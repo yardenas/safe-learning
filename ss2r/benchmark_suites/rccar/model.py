@@ -14,11 +14,7 @@ class CarParams:
     delta_limit: [0.3 - 0.5] -> Limit of the steering angle.
     c_m_1: Motor parameter. Range [0.2, 0.5]
     c_m_1: Motor friction, Range [0.00, 0.007]
-    c_f, c_r: [1.0 2.0] # motor parameters: source https://web.mit.edu/drela/Public/web/qprop/motor1_theory.pdf,
-    https://ethz.ch/content/dam/ethz/special-interest/mavt/dynamic-systems-n-control/idsc-dam/Lectures/Embedded
-    -Control-Systems/LectureNotes/6_Motor_Control.pdf # or look at:
-    https://video.ethz.ch/lectures/d-mavt/2021/spring/151-0593-00L/00718f4f-116b-4645-91da-b9482164a3c7.html :
-    lecture 2 part 2
+    c_f, c_r: [1.0 2.0] # motor parameters
     c_m_1: max current of motor: [0.2 - 0.5] c_m_2: motor resistance due to shaft: [0.01 - 0.15]
     """
 

@@ -11,7 +11,7 @@ A collection of algorithms and experiment tools for safe sim to real transfer in
 ### Using pip
 
 ```bash
-git clone https://github.com/yardenas/safe-sim2real
+git clone https://github.com/anon/safe-sim2real
 cd safe-sim2real
 python3 -m venv venv
 source venv/bin/activate
@@ -21,7 +21,7 @@ pip install -e .
 ### Using Poetry
 
 ```bash
-git clone https://github.com/yardenas/safe-sim2real
+git clone https://github.com/anon/safe-sim2real
 cd safe-sim2real
 poetry install
 poetry shell

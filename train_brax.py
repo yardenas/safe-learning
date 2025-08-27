@@ -124,7 +124,7 @@ def main(cfg):
             rng = jax.random.split(
                 jax.random.PRNGKey(cfg.training.seed), cfg.training.num_eval_envs
             )
-            # TODO (yarden): write a function that handles this
+            # TODO (anon): write a function that handles this
             # more cleanly.
             if len(params) != 2:
                 policy_params = params[:2]

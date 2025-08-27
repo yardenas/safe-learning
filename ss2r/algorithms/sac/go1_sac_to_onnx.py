@@ -149,7 +149,7 @@ def convert_policy_to_onnx(params, cfg, act_size, obs_size):
         onnx_model (InferenceSession): Loaded ONNX runtime model.
     """
     # Define the TF policy network
-    # TODO (yarden): generalize to more activation functions
+    # TODO (anon): generalize to more activation functions
     mean = params[0].mean["state"]
     std = params[0].std["state"]
     mean_std = (tf.convert_to_tensor(mean), tf.convert_to_tensor(std))
