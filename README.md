@@ -11,8 +11,8 @@ This repository contains an implementation of SOOPER, as introduced in the paper
 ### Using pip
 
 ```bash
-git clone https://github.com/anon/safe-sim2real
-cd safe-sim2real
+git clone https://github.com/anon/safe-learning
+cd safe-learning
 python3 -m venv venv
 source venv/bin/activate
 pip install -e .
@@ -21,8 +21,8 @@ pip install -e .
 ### Using Poetry
 
 ```bash
-git clone https://github.com/anon/safe-sim2real
-cd safe-sim2real
+git clone https://github.com/anon/safe-learning
+cd safe-learning
 poetry install
 poetry shell
 ```
