@@ -1,5 +1,5 @@
-# Safe Sim2Real
-A collection of algorithms and experiment tools for safe sim to real transfer in robotics.
+# Safe Exploration via Policy Priors
+This repository contains an implementation of SOOPER, as introduced in the paper Safe Exploration via Policy Priors.
 
 ## Requirements
 
