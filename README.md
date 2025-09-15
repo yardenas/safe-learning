@@ -26,7 +26,7 @@ A collection of algorithms and experiment tools for safe sim to real transfer an
 
 ```bash
 git clone https://github.com/yardenas/safe-learning
-cd safe-sim2real
+cd safe-learning
 python3 -m venv venv
 source venv/bin/activate
 pip install -e .
@@ -36,7 +36,7 @@ pip install -e .
 
 ```bash
 git clone https://github.com/yardenas/safe-learning
-cd safe-sim2real
+cd safe-learning
 poetry install
 poetry shell
 ```
