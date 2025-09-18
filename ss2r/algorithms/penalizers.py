@@ -186,7 +186,6 @@ class LBSGD:
             "lbsgd/eta": new_params.eta,
             "lbsgd/active": active,
         }
-
         return loss, aux, new_params
 
 
