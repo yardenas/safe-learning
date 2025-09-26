@@ -142,6 +142,52 @@ class CostEpisodeWrapper(brax_training.EpisodeWrapper):
         return state.replace(done=done)
 
 
+class NonEpisodicWrapper(Wrapper):
+    def __init__(self, env: Env, action_repeat: int):
+        super().__init__(env)
+        self.action_repeat = action_repeat
+
+    def reset(self, rng):
+        state = self.env.reset(rng)
+        state.info["steps"] = jp.zeros(rng.shape[:-1])
+        state.info["average_reward"] = jp.zeros(rng.shape[:-1])
+        metrics = {
+            "average_reward": state.info["average_reward"],
+        }
+        state.info["truncation"] = jp.zeros(rng.shape[:-1])
+        state.metrics.update(metrics)
+        # Keep separate record of episode done as state.info['done'] can be erased
+        # by AutoResetWrapper
+        return state
+
+    def step(self, state: State, action: jax.Array) -> State:
+        def f(state, _):
+            nstate = self.env.step(state, action)
+            maybe_cost = nstate.info.get("cost", None)
+            maybe_eval_reward = nstate.info.get("eval_reward", None)
+            return nstate, (nstate.reward, maybe_cost, maybe_eval_reward)
+
+        state, (rewards, maybe_costs, maybe_eval_rewards) = jax.lax.scan(
+            f, state, (), self.action_repeat
+        )
+        sum_rewards = jp.sum(rewards, axis=0)
+        state = state.replace(reward=sum_rewards)
+        if maybe_costs is not None:
+            state.info["cost"] = jp.sum(maybe_costs, axis=0)
+        if maybe_eval_rewards is not None:
+            state.info["eval_reward"] = jp.sum(maybe_eval_rewards, axis=0)
+        steps = state.info["steps"] + self.action_repeat
+        sum_rewards /= self.action_repeat
+        average_reward = (
+            state.info["average_reward"]
+            + (sum_rewards - state.info["average_reward"]) * self.action_repeat / steps
+        )
+        state.info["steps"] = steps
+        state.info["average_reward"] = average_reward
+        state.metrics["average_reward"] = average_reward
+        return state
+
+
 def wrap(
     env: Env,
     episode_length: int = 1000,
