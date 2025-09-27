@@ -53,12 +53,19 @@ python train_brax.py +experiment=go1_sim_to_real
 * In `ss2r/docs/videos` you can find videos of 5 trials for each policy, marked by its policy id.
 
 
-<!-- ## Citation
+## Citation
 
 If you find our repository useful in your work, please consider citing:
 
 ```bibtex
-``` -->
+@inproceedings{
+  as2025spidrsimpleapproachzeroshot,
+  title={{SP}i{DR}: A Simple Approach for Zero-Shot Safety in Sim-to-Real Transfer},
+  author={Yarden As and Chengrui Qu and Benjamin Unger and Dongho Kang and Max van der Hart and Laixi Shi and Stelian Coros and Adam Wierman and Andreas Krause},
+  booktitle={International Conference on Neural Information Processing Systems},
+  year={2025},
+}
+```
 
 <!-- ## Learn More
 
