@@ -1,14 +1,14 @@
 import functools
 
-import ss2r.algorithms.mbpo.networks as mbpo_networks
-import ss2r.algorithms.mbpo.vision_networks as mbpo_vision_networks
-from ss2r.algorithms.mbpo import on_policy_training_step
+import ss2r.algorithms.sbsrl.networks as sbsrl_networks
+import ss2r.algorithms.sbsrl.vision_networks as sbsrl_vision_networks
 from ss2r.algorithms.penalizers import get_penalizer
 from ss2r.algorithms.sac.data import get_collection_fn
 from ss2r.algorithms.sac.q_transforms import (
     get_cost_q_transform,
     get_reward_q_transform,
 )
+from ss2r.algorithms.sbsrl import on_policy_training_step
 
 
 def get_training_step_fn(cfg):
@@ -21,7 +21,7 @@ def get_training_step_fn(cfg):
 def get_train_fn(cfg, checkpoint_path, restore_checkpoint_path):
     import jax.nn as jnn
 
-    import ss2r.algorithms.mbpo.train as mbpo
+    import ss2r.algorithms.sbsrl.train as sbsrl
 
     agent_cfg = dict(cfg.agent)
     training_cfg = {
@@ -62,7 +62,7 @@ def get_train_fn(cfg, checkpoint_path, restore_checkpoint_path):
         del agent_cfg["pessimistic_q"]
     if "use_vision" in agent_cfg and agent_cfg["use_vision"]:
         network_factory = functools.partial(
-            mbpo_vision_networks.make_mbpo_vision_networks,
+            sbsrl_vision_networks.make_sbsrl_vision_networks,
             policy_hidden_layer_sizes=policy_hidden_layer_sizes,
             value_hidden_layer_sizes=value_hidden_layer_sizes,
             activation=activation,
@@ -76,7 +76,7 @@ def get_train_fn(cfg, checkpoint_path, restore_checkpoint_path):
             "privileged_state" if cfg.training.policy_privileged else "state"
         )
         network_factory = functools.partial(
-            mbpo_networks.make_mbpo_networks,
+            sbsrl_networks.make_sbsrl_networks,
             policy_hidden_layer_sizes=policy_hidden_layer_sizes,
             value_hidden_layer_sizes=value_hidden_layer_sizes,
             model_hidden_layer_sizes=model_hidden_layer_sizes,
@@ -90,7 +90,7 @@ def get_train_fn(cfg, checkpoint_path, restore_checkpoint_path):
     data_collection = get_collection_fn(cfg)
     training_step_fn = get_training_step_fn(cfg)
     train_fn = functools.partial(
-        mbpo.train,
+        sbsrl.train,
         **agent_cfg,
         **training_cfg,
         network_factory=network_factory,
