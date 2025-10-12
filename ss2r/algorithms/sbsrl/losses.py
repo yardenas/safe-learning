@@ -26,8 +26,8 @@ from brax.training import types
 from brax.training.types import Params, PRNGKey
 
 from ss2r.algorithms.penalizers import Penalizer
-from ss2r.algorithms.sac.q_transforms import QTransformation
 from ss2r.algorithms.sbsrl.networks import SBSRLNetworks
+from ss2r.algorithms.sbsrl.q_transforms import QTransformation
 
 Transition: TypeAlias = types.Transition
 
@@ -41,6 +41,7 @@ def make_losses(
     action_size: int,
     use_bro: bool,
     normalize_fn,
+    ensemble_size,
     target_entropy: float | None = None,
 ):
     target_entropy = -0.5 * action_size if target_entropy is None else target_entropy
@@ -84,7 +85,11 @@ def make_losses(
         scale = cost_scaling if safe else reward_scaling
         gamma = safety_discounting if safe else discounting
         q_old_action = qr_network.apply(
-            normalizer_params, q_params, transitions.observation, action
+            normalizer_params,
+            q_params,
+            transitions.observation,
+            action,
+            transitions.extras["state_extras"]["idx"],
         )
         key, another_key = jax.random.split(key)
 
@@ -101,8 +106,8 @@ def make_losses(
             next_action = parametric_action_distribution.postprocess(next_action)
             return next_action, next_log_prob
 
-        q_fn = lambda obs, action: qr_network.apply(
-            normalizer_params, target_q_params, obs, action
+        q_fn = lambda obs, action, idx: qr_network.apply(
+            normalizer_params, target_q_params, obs, action, idx
         )
         target_q = target_q_fn(
             transitions,
