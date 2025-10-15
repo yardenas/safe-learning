@@ -1,8 +1,8 @@
 # @package _global_
 defaults:
   - override /environment: cartpole_swingup
-  - override /agent: sbsrl
-  - override /agent/penalizer: multi_lagrangian
+  - override /agent: mbpo
+  - override /agent/penalizer: lagrangian
   - _self_
 
 training:
@@ -16,6 +16,7 @@ training:
   num_evals: 20
   num_eval_envs: 128
 
+
 agent:
   policy_hidden_layer_sizes: [256, 256, 256]
   value_hidden_layer_sizes: [512, 512]
@@ -26,4 +27,3 @@ agent:
   critic_grad_updates_per_step: 50
   model_grad_updates_per_step: 50
   num_model_rollouts: 200
-  embedding_dim: 32

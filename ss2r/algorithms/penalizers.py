@@ -112,6 +112,33 @@ def update_augmented_lagrangian(
     return AugmentedLagrangianParams(new_lagrange_multiplier, new_penalty_multiplier)
 
 
+class PrimalDualLagrangianParams(NamedTuple):
+    lagrange_multiplier: jax.Array
+
+
+class PrimalDualLagrangian:
+    def __init__(self, lr: float):
+        self.lr = lr
+
+    def __call__(
+        self,
+        actor_loss: jax.Array,
+        constraints: jax.Array,
+        params: PrimalDualLagrangianParams,
+    ) -> tuple[jax.Array, dict[str, Any], PrimalDualLagrangianParams]:
+        multipliers = params.lagrange_multiplier
+
+        g = -constraints
+        actor_loss += jnp.sum(multipliers * g)
+
+        new_multipliers = jnp.maximum(multipliers + self.lr * g, 0.0)
+
+        new_params = PrimalDualLagrangianParams(lagrange_multiplier=new_multipliers)
+
+        aux = {"lagrange_multipliers": new_multipliers}
+        return actor_loss, aux, new_params
+
+
 class LagrangianParams(NamedTuple):
     lagrange_multiplier: jax.Array
     optimizer_state: optax.OptState
@@ -218,6 +245,22 @@ def get_penalizer(cfg):
             cfg.agent.penalizer.epsilon,
         )
         penalizer_state = LBSGDParams(cfg.agent.penalizer.initial_eta)
+    elif cfg.agent.penalizer.name == "multi_lagrangian":
+        # broadcast scalar config parameters to a vector if multiple constraints are needed
+        n_constraints = 0
+        if cfg.agent.get("uncertainty_constraint", False):
+            n_constraints += 1
+        if cfg.training.get("safe", False):
+            n_constraints += cfg.agent["model_ensemble_size"]
+        if n_constraints == 0:
+            return None, None
+        penalizer = PrimalDualLagrangian(cfg.agent.penalizer.learning_rate)
+        init_multipliers = cfg.agent.penalizer.initial_multiplier * jnp.ones(
+            n_constraints
+        )
+        penalizer_state = PrimalDualLagrangianParams(
+            lagrange_multiplier=init_multipliers
+        )
     else:
         raise ValueError(f"Unknown penalizer {cfg.agent.penalizer.name}")
     return penalizer, penalizer_state
