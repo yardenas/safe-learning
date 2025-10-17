@@ -21,3 +21,4 @@ training:
 agent:
   uncertainty_constraint: true
   uncertainty_epsilon: 0.0
+  augment_reward: true

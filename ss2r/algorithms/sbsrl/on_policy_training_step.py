@@ -45,6 +45,9 @@ def make_on_policy_training_step(
     unroll_length,
     num_model_rollouts,
     penalizer,
+    augment_reward,
+    uncertainty_constraint,
+    uncertainty_epsilon,
     safety_budget,
     offline,
     ensemble_size,
@@ -338,8 +341,53 @@ def make_on_policy_training_step(
         sac_replay_buffer_state = sac_replay_buffer.insert(
             sac_replay_buffer_state, float16(transitions)
         )
-
         return sac_replay_buffer_state
+
+    def relabel(
+        training_state: TrainingState,
+        transitions: Transition,
+    ):
+        aux = {}
+        constraints_list = []
+        if uncertainty_constraint:
+            disagreement = (
+                transitions.next_observation.std(
+                    axis=1
+                ).mean()  # next_observation=(7680, 5, 5)
+            )
+            constraints_list.append(-(disagreement - uncertainty_epsilon))
+            aux["disagreement"] = disagreement
+        if safe:
+            mean_cost = jnp.mean(
+                transitions.extras["state_extras"]["cost"], axis=(1, 2)
+            )
+            safety_constraint = -(safety_budget - mean_cost)
+            constraints_list.append(safety_constraint)
+            aux["constraint_estimate"] = safety_constraint
+            aux["cost"] = mean_cost.mean()
+            aux["qc_std"] = jnp.std(mean_cost)
+
+        if penalizer is not None:
+            # penalizer
+            constraints_arr = jnp.concatenate(
+                [jnp.atleast_1d(c) for c in constraints_list], axis=0
+            )
+            (
+                new_reward,
+                penalizer_aux,
+                new_penalizer_params,
+            ) = penalizer(  # reward=(7680, 5)
+                transitions.reward,
+                constraints_arr,
+                jax.lax.stop_gradient(training_state.penalizer_params),
+            )
+            aux["penalizer_params"] = new_penalizer_params
+            aux |= penalizer_aux
+            training_state = training_state.replace(  # type: ignore
+                penalizer_params=new_penalizer_params,
+            )
+            transitions = transitions._replace(reward=new_reward)
+        return transitions, aux
 
     def training_step(
         training_state: TrainingState,
@@ -390,6 +438,9 @@ def make_on_policy_training_step(
         # Train SAC with model data
         sac_buffer_state, model_transitions = sac_replay_buffer.sample(sac_buffer_state)
         transitions = model_transitions
+        additional_metrics = {}
+        if augment_reward:
+            transitions, additional_metrics = relabel(training_state, transitions)
         transitions = jax.tree_util.tree_map(
             lambda x: jnp.reshape(x, (critic_grad_updates_per_step, -1) + x.shape[1:]),
             transitions,
@@ -413,6 +464,7 @@ def make_on_policy_training_step(
         metrics = {**model_metrics, **critic_metrics, **actor_metrics}
         metrics["buffer_current_size"] = model_replay_buffer.size(model_buffer_state)
         metrics |= env_state.metrics
+        metrics |= additional_metrics
         return (
             training_state,
             env_state,

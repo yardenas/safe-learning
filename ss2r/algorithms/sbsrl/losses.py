@@ -43,6 +43,7 @@ def make_losses(
     normalize_fn,
     ensemble_size,
     safe,
+    augment_reward: bool,
     uncertainty_constraint,
     uncertainty_epsilon,
     target_entropy: float | None = None,
@@ -169,45 +170,47 @@ def make_losses(
         exploration_loss = (alpha * log_prob).mean()
 
         aux = {}
-        constraints_list = []
-        if uncertainty_constraint:
-            model_apply = jax.vmap(
-                sbsrl_network.model_network.apply, (None, 0, None, None)
-            )
-            next_obs_pred, *_ = model_apply(
-                normalizer_params, model_params, transitions.observation, action
-            )
-            disagreement = jnp.mean(jnp.std(next_obs_pred, axis=0))
-            constraints_list.append(disagreement - uncertainty_epsilon)
-            aux["disagreement"] = disagreement
-        if safe:
-            assert qc_network is not None
-            qc_action = jax.vmap(
-                lambda i: qc_network.apply(
-                    normalizer_params,
-                    qc_params,
-                    transitions.observation,
-                    action,
-                    jnp.full((transitions.observation.shape[0],), i, dtype=jnp.int32),
+        if not augment_reward:
+            constraints_list = []
+            if uncertainty_constraint:
+                model_apply = jax.vmap(
+                    sbsrl_network.model_network.apply, (None, 0, None, None)
                 )
-            )(idxs)  # (E, B, n_critics)
-            mean_qc = jnp.mean(qc_action, axis=(1, 2))
-            safety_constraint = safety_budget - mean_qc
-            constraints_list.append(safety_constraint)
-            aux["constraint_estimate"] = safety_constraint
-            aux["cost"] = mean_qc.mean()
-            aux["qc_std"] = jnp.std(mean_qc)
-
-        if penalizer is not None:
-            # penalizer
-            constraints_arr = jnp.concatenate(
-                [jnp.atleast_1d(c) for c in constraints_list], axis=0
-            )
-            actor_loss, penalizer_aux, penalizer_params = penalizer(
-                actor_loss, constraints_arr, jax.lax.stop_gradient(penalizer_params)
-            )
-            aux["penalizer_params"] = penalizer_params
-            aux |= penalizer_aux
+                next_obs_pred, *_ = model_apply(
+                    normalizer_params, model_params, transitions.observation, action
+                )
+                disagreement = jnp.mean(jnp.std(next_obs_pred, axis=0))
+                constraints_list.append(disagreement - uncertainty_epsilon)
+                aux["disagreement"] = disagreement
+            if safe:
+                assert qc_network is not None
+                qc_action = jax.vmap(
+                    lambda i: qc_network.apply(
+                        normalizer_params,
+                        qc_params,
+                        transitions.observation,
+                        action,
+                        jnp.full(
+                            (transitions.observation.shape[0],), i, dtype=jnp.int32
+                        ),
+                    )
+                )(idxs)  # (E, B, n_critics)
+                mean_qc = jnp.mean(qc_action, axis=(1, 2))
+                safety_constraint = safety_budget - mean_qc
+                constraints_list.append(safety_constraint)
+                aux["constraint_estimate"] = safety_constraint
+                aux["cost"] = mean_qc.mean()
+                aux["qc_std"] = jnp.std(mean_qc)
+            if penalizer is not None:
+                # penalizer
+                constraints_arr = jnp.concatenate(
+                    [jnp.atleast_1d(c) for c in constraints_list], axis=0
+                )
+                actor_loss, penalizer_aux, penalizer_params = penalizer(
+                    actor_loss, constraints_arr, jax.lax.stop_gradient(penalizer_params)
+                )
+                aux["penalizer_params"] = penalizer_params
+                aux |= penalizer_aux
 
         aux["qr_std"] = jnp.std(jnp.mean(qr, axis=-1))
         actor_loss += exploration_loss
