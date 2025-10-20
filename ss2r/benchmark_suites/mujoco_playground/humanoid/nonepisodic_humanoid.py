@@ -14,7 +14,7 @@ def normalize_angle(angle, lower_bound=-jp.pi, upper_bound=jp.pi):
     return (angle - lower_bound) % range_width + lower_bound
 
 
-class HumanoidGetup(humanoid.Humanoid):
+class NonEpisodicHumanoid(humanoid.Humanoid):
     """Humanoid getup task adapted from Go1 getup."""
 
     def __init__(
@@ -66,12 +66,9 @@ class HumanoidGetup(humanoid.Humanoid):
     def _get_random_qpos(self, key: jax.Array) -> jax.Array:
         key1, key2 = jax.random.split(key, 2)
         qpos = jp.zeros(self.mjx_model.nq)
-        # TODO (yarden): make sure that this entry is indeed the height of the robot
         qpos = qpos.at[2].set(humanoid._STAND_HEIGHT)  # drop height
         quat = jax.random.normal(key1, (4,))
         quat /= jp.linalg.norm(quat) + 1e-6
-        # TODO (yarden): make sure that this is the orientation of
-        # the humanoid
         qpos = qpos.at[3:7].set(quat)
         qpos = qpos.at[self.qpos_ids].set(
             jax.random.uniform(

@@ -186,7 +186,7 @@ def make_non_episodic_training_step(
             make_rollout_policy,
             get_rollout_policy_params(training_state),
             training_state.normalizer_params,
-            model_replay_buffer,
+            sac_replay_buffer,
             env_state,
             buffer_state,
             experience_key,
@@ -216,28 +216,28 @@ def make_non_episodic_training_step(
         ) = run_experience_step(training_state, env_state, sac_buffer_state, key)
         # Train SAC
         sac_buffer_state, sac_transitions = sac_replay_buffer.sample(sac_buffer_state)
-        transitions = jax.tree_util.tree_map(
+        critic_transitions = jax.tree_util.tree_map(
             lambda x: jnp.reshape(x, (critic_grad_updates_per_step, -1) + x.shape[1:]),
             sac_transitions,
         )
         (training_state, _), critic_metrics = jax.lax.scan(
-            critic_sgd_step, (training_state, training_key), transitions
+            critic_sgd_step, (training_state, training_key), critic_transitions
         )
         num_actor_updates = -(
             -critic_grad_updates_per_step // num_critic_updates_per_actor_update
         )
         assert num_actor_updates > 0, "Actor updates is non-positive"
-        transitions = jax.tree_util.tree_map(
-            lambda x: x[:num_actor_updates], transitions
+        actor_transitions = jax.tree_util.tree_map(
+            lambda x: x[:num_actor_updates], sac_transitions
         )
         (training_state, _), actor_metrics = jax.lax.scan(
             actor_sgd_step,
             (training_state, training_key),
-            transitions,
+            actor_transitions,
             length=num_actor_updates,
         )
         metrics = {**critic_metrics, **actor_metrics}
-        metrics["buffer_current_size"] = sac_replay_buffer.size(model_buffer_state)
+        metrics["buffer_current_size"] = sac_replay_buffer.size(sac_buffer_state)
         metrics |= env_state.metrics
         return (
             training_state,

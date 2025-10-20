@@ -1,7 +1,7 @@
 defaults:
   - mujoco_playground_base
 
-task_name: HumanoidGetup
+task_name: NonEpisodicHumanoidStand
 task_params:
   action_repeat: 1
   ctrl_dt: 0.025

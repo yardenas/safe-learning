@@ -2,7 +2,7 @@
 defaults:
   - mujoco_playground_dm_control_mbpo
   - override /agent: mbpo
-  - override /environment: humanoid_getup
+  - override /environment: nonepisodic_humanoid
   - _self_
 
 training:
@@ -13,5 +13,5 @@ training:
   safe: true
 
 agent:
-  training_step_fn: non_episodic
+  training_step_fn: nonepisodic
   safety_discounting: 1.
