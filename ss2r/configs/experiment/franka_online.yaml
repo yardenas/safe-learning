@@ -29,7 +29,7 @@ agent:
   replay_buffer:
     wandb_ids:
       - 3mjz962p
-    mix: [0.5, 0.0, 10000]
+    mix: [0.5, 1., 10000]
   grad_updates_per_step: 1250
   learning_rate: 1e-5
   critic_learning_rate: 3e-4
