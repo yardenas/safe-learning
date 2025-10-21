@@ -1,10 +1,3 @@
-<p align="center">
-  <img src="docs/assets/up-034.jpg" alt="Go2-0" width="22%">
-  <img src="docs/assets/up-036.jpg" alt="Go2-1" width="22%">
-  <img src="docs/assets/up-039.jpg" alt="Go2-2" width="22%">
-  <img src="docs/assets/up-042.jpg" alt="Go2-3" width="22%">
-</p>
-
 
 # Safe Learning on Real Robots
 A collection of algorithms and experiment tools for safe sim to real transfer and learning in robotics.
