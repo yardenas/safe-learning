@@ -208,15 +208,14 @@ def train(
     reset_on_eval: bool = True,
     store_buffer: bool = False,
     optimism: float = 0.0,
-    pessimism: float = 0.0,
+    reward_pessimism: float = 0.0,
+    cost_pessimism: float = 0.0,
     model_propagation: str = "nominal",
     use_termination: bool = True,
     safety_filter: str | None = None,
     advantage_threshold: float = 0.2,
     offline: bool = False,
     learn_from_scratch: bool = False,
-    load_auxiliaries: bool = False,
-    load_normalizer: bool = True,
     target_entropy: float | None = None,
     pure_exploration_steps: int | None = None,
     pessimistic_q: bool = False,
@@ -375,15 +374,12 @@ def train(
     if restore_checkpoint_path is not None:
         params = checkpoint.load(restore_checkpoint_path)
         ts_normalizer_params = training_state.normalizer_params
-        if load_normalizer:
-            if isinstance(ts_normalizer_params.mean, dict) and not isinstance(
-                params[0].mean, dict
-            ):
-                ts_normalizer_params = get_dict_normalizer_params(
-                    params, ts_normalizer_params
-                )
-            else:
-                ts_normalizer_params = params[0]
+        if isinstance(ts_normalizer_params.mean, dict) and not isinstance(
+            params[0].mean, dict
+        ):
+            ts_normalizer_params = get_dict_normalizer_params(
+                params, ts_normalizer_params
+            )
         if offline:
             model_buffer_state = replay_buffers.ReplayBufferState(**params[-1])
             training_state = training_state.replace(  # type: ignore
@@ -400,25 +396,6 @@ def train(
                 else None,
             )
         else:
-            training_state = training_state.replace(  # type: ignore
-                normalizer_params=ts_normalizer_params,
-                behavior_policy_params=params[1],
-                backup_policy_params=params[1],
-                behavior_qr_params=params[3],
-                behavior_target_qr_params=params[3],
-                backup_qr_params=params[3],
-                behavior_qc_params=params[4]
-                if safe or uncertainty_constraint
-                else None,
-                behavior_target_qc_params=params[4]
-                if safe or uncertainty_constraint
-                else None,
-                backup_qc_params=params[4] if safe or uncertainty_constraint else None,
-                backup_target_qc_params=params[4]
-                if safe or uncertainty_constraint
-                else None,
-            )
-        if load_auxiliaries:
             policy_optimizer_state = restore_state(
                 params[6][1]["inner_state"]
                 if isinstance(params[6][1], dict)
@@ -444,6 +421,29 @@ def train(
                     training_state.backup_qc_optimizer_state,
                 )
             training_state = training_state.replace(  # type: ignore
+                normalizer_params=ts_normalizer_params,
+                behavior_policy_params=params[1],
+                backup_policy_params=params[1],
+                behavior_qr_params=params[3],
+                behavior_target_qr_params=params[3],
+                backup_qr_params=params[3],
+                behavior_qc_params=params[4]
+                if safe or uncertainty_constraint
+                else None,
+                behavior_target_qc_params=params[4]
+                if safe or uncertainty_constraint
+                else None,
+                backup_qc_params=params[4] if safe or uncertainty_constraint else None,
+                backup_target_qc_params=params[4]
+                if safe or uncertainty_constraint
+                else None,
+                model_params=params[10],
+                model_optimizer_state=restore_state(
+                    params[11][1]["inner_state"]
+                    if isinstance(params[11][1], dict)
+                    else params[11],
+                    training_state.model_optimizer_state,
+                ),
                 behavior_policy_optimizer_state=policy_optimizer_state,
                 alpha_optimizer_state=alpha_optimizer_state,
                 behavior_qr_optimizer_state=qr_optimizer_state,
@@ -473,6 +473,7 @@ def train(
         uncertainty_constraint=uncertainty_constraint,
         uncertainty_epsilon=uncertainty_epsilon,
         n_critics=n_critics,
+        offline=offline,
         target_entropy=target_entropy,
     )
     alpha_update = (
@@ -553,6 +554,8 @@ def train(
         num_model_rollouts,
         penalizer,
         safety_budget,
+        reward_pessimism,
+        cost_pessimism,
         model_to_real_data_ratio,
         offline,
         model_ensemble_size,
@@ -775,6 +778,8 @@ def train(
                 training_state.alpha_optimizer_state,
                 training_state.behavior_qr_optimizer_state,
                 training_state.behavior_qc_optimizer_state,
+                training_state.model_params,
+                training_state.model_optimizer_state,
             )
             if store_buffer:
                 params += (model_buffer_state,)
@@ -805,6 +810,8 @@ def train(
         training_state.alpha_optimizer_state,
         training_state.behavior_qr_optimizer_state,
         training_state.behavior_qc_optimizer_state,
+        training_state.model_params,
+        training_state.model_optimizer_state,
     )
     if store_buffer:
         params += (model_buffer_state,)
