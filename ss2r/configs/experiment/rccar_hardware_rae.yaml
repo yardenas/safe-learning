@@ -34,7 +34,7 @@ agent:
   grad_updates_per_step: 2500
   learning_rate: 1e-5
   critic_learning_rate: 3e-4
-  num_critic_updates_per_actor_update: 10
+  num_critic_updates_per_actor_update: 20
   data_collection:
     address: tcp://169.254.211.241:5555
   store_buffer: true
