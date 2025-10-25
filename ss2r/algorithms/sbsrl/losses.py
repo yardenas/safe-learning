@@ -36,6 +36,7 @@ def make_losses(
     sbsrl_network: SBSRLNetworks,
     reward_scaling: float,
     cost_scaling: float,
+    sigma_scaling: float,
     discounting: float,
     safety_discounting: float,
     action_size: int,
@@ -89,7 +90,16 @@ def make_losses(
     ) -> jnp.ndarray:
         action = transitions.action
         q_network = qc_network if safe or uncertainty_constraint else qr_network
-        scale = cost_scaling if safe or uncertainty_constraint else reward_scaling
+        scales = []
+        if safe:
+            scales.append(cost_scaling)
+        if uncertainty_constraint:
+            scales.append(sigma_scaling)
+        scale = (
+            jnp.stack(scales, axis=-1)
+            if safe or uncertainty_constraint
+            else reward_scaling
+        )
         gamma = safety_discounting if safe or uncertainty_constraint else discounting
         q_old_action = q_network.apply(
             normalizer_params,
@@ -187,16 +197,7 @@ def make_losses(
         actor_loss = -qr.mean()
         exploration_loss = (alpha * log_prob).mean()
 
-        aux = {}  # now just for logging purpose
-        if uncertainty_constraint:
-            model_apply = jax.vmap(
-                sbsrl_network.model_network.apply, (None, 0, None, None)
-            )
-            next_obs_pred, *_ = model_apply(
-                normalizer_params, model_params, transitions.observation, action
-            )
-            disagreement = jnp.mean(jnp.std(next_obs_pred, axis=0))
-            aux["disagreement"] = disagreement
+        aux = {}
         if safe or uncertainty_constraint:
             assert qc_network is not None
             qc_action = jax.vmap(

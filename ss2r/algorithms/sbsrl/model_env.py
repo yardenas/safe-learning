@@ -20,9 +20,6 @@ class ModelBasedEnv(envs.Env):
         safety_budget=float("inf"),
         cost_discount=1.0,
         scaling_fn=lambda x: x,
-        use_termination=True,
-        safety_filter="sooper",
-        initial_normalizer_params=None,
     ):
         super().__init__()
         self.model_network = sbsrl_network.model_network
@@ -41,11 +38,6 @@ class ModelBasedEnv(envs.Env):
         self.transitions = transitions
         self.cost_discount = cost_discount
         self.scaling_fn = scaling_fn
-        self.use_termination = use_termination
-        self.safety_filter = safety_filter
-        self.initial_normalizer_params = (
-            initial_normalizer_params if initial_normalizer_params is not None else {}
-        )
 
     def reset(self, rng: jax.Array) -> base.State:
         sample_key, model_key = jax.random.split(rng)
@@ -95,12 +87,12 @@ class ModelBasedEnv(envs.Env):
             if isinstance(next_obs, jax.Array)
             else next_obs["state"].std(axis=0).mean(-1)
         )
-        state.info["disagreement"] = jnp.full(cost.shape, disagreement)
+        state.info["disagreement"] = disagreement
 
         state = state.replace(
             obs=next_obs,
             reward=reward,
-            done=done if self.use_termination else jnp.zeros_like(done),
+            done=done,
             info=state.info,
         )
         return state
@@ -131,9 +123,6 @@ def create_model_env(
     safety_budget=float("inf"),
     cost_discount=1.0,
     scaling_fn=lambda x: x,
-    use_termination=True,
-    safety_filter="sooper",
-    initial_normalizer_params=None,
 ) -> ModelBasedEnv:
     """Factory function to create a model-based environment."""
     return ModelBasedEnv(
@@ -146,9 +135,6 @@ def create_model_env(
         safety_budget=safety_budget,
         cost_discount=cost_discount,
         scaling_fn=scaling_fn,
-        use_termination=use_termination,
-        safety_filter=safety_filter,
-        initial_normalizer_params=initial_normalizer_params,
     )
 
 
