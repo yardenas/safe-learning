@@ -214,6 +214,7 @@ def train(
     load_normalizer: bool = True,
     target_entropy: float | None = None,
     pure_exploration_steps: int | None = None,
+    override_actions: bool = True,
 ):
     if min_replay_size >= num_timesteps:
         raise ValueError(
@@ -302,6 +303,8 @@ def train(
             "expected_total_cost": jnp.zeros(()),
             "q_c": jnp.zeros(()),
         }
+        if safety_filter == "nonepisodic":
+            extras["policy_extras"]["behavior_action"] = dummy_action  # type: ignore
 
     dummy_transition = Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
         observation=dummy_obs,
@@ -544,6 +547,7 @@ def train(
             num_critic_updates_per_actor_update,
             safety_budget,
             mbpo_network.qc_network,
+            override_actions if safety_filter == "nonepisodic" else False,
         )
 
     def prefill_replay_buffer(
