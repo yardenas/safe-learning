@@ -202,6 +202,7 @@ def train(
     restore_checkpoint_path: Optional[str] = None,
     eval_env: Optional[envs.Env] = None,
     safe: bool = False,
+    use_mean_critic: bool = False,
     uncertainty_constraint: bool = False,
     uncertainty_epsilon: float = 0.0,
     safety_budget: float = float("inf"),
@@ -217,6 +218,7 @@ def train(
     cost_pessimism: float = 0.0,
     model_propagation: str = "nominal",
     offline: bool = False,
+    flip_uncertainty_constraint: bool = False,
     learn_from_scratch: bool = False,
     target_entropy: float | None = None,
     pessimistic_q: bool = False,
@@ -356,6 +358,22 @@ def train(
     local_key, model_rb_key, actor_critic_rb_key, env_key, eval_key = jax.random.split(
         local_key, 5
     )
+    num_model_rollouts = int(
+        critic_grad_updates_per_step * sac_batch_size * model_to_real_data_ratio
+    )
+    model_grad_updates_per_step = (
+        int(
+            (
+                num_model_rollouts
+                * (1 - model_to_real_data_ratio)
+                / model_to_real_data_ratio
+            )
+            / batch_size
+        )
+        + 1
+    )
+    logging.info(f"Num model rollouts: {num_model_rollouts}")
+    logging.info(f"Model grad updates per step: {model_grad_updates_per_step}")
     model_replay_buffer = replay_buffers.UniformSamplingQueue(
         max_replay_size=max_replay_size,
         dummy_data_sample=dummy_transition,
@@ -384,7 +402,7 @@ def train(
     sac_replay_buffer = replay_buffers.UniformSamplingQueue(
         max_replay_size=max_replay_size,
         dummy_data_sample=dummy_transition_sac,
-        sample_batch_size=sac_batch_size * critic_grad_updates_per_step,
+        sample_batch_size=sac_batch_size,
     )
     model_buffer_state = model_replay_buffer.init(model_rb_key)
     sac_buffer_state = sac_replay_buffer.init(actor_critic_rb_key)
@@ -496,10 +514,12 @@ def train(
         normalize_fn=normalize_fn,
         ensemble_size=model_ensemble_size,
         safe=safe,
+        use_mean_critic=use_mean_critic,
         uncertainty_constraint=uncertainty_constraint,
         uncertainty_epsilon=uncertainty_epsilon,
         n_critics=n_critics,
         offline=offline,
+        flip_uncertainty_constraint=flip_uncertainty_constraint,
         target_entropy=target_entropy,
     )
     alpha_update = (
