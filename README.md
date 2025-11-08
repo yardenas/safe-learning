@@ -11,7 +11,7 @@ A collection of algorithms and experiment tools for safe sim to real transfer an
 ## Requirements
 
 - Python == 3.11.6
-- `venv` or `Poetry`
+- [`uv`](https://docs.astral.sh/uv/) (recommended) or the built-in `venv`
 
 ## Installation
 
@@ -25,14 +25,69 @@ source venv/bin/activate
 pip install -e .
 ````
 
-### Using Poetry
+### Using uv
+
+Install uv if it is not already available:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Create a project environment and install dependencies:
 
 ```bash
 git clone https://github.com/yardenas/safe-learning
 cd safe-learning
-poetry install
-poetry shell
+uv sync
+uv run python --version  # sanity check, optional
 ```
+
+### Installing `madrona_mjx` (optional, required for Madrona backend)
+
+Some benchmarks (e.g., the MJX-based pick-and-place tasks) require the custom
+[`madrona_mjx`](https://github.com/shacklettbp/madrona_mjx) fork. Build and
+install it inside the UV environment you created above:
+
+1. From the parent directory of `safe-sim2real`, clone the repository and check
+   out the tested commit:
+
+   ```bash
+   git clone https://github.com/shacklettbp/madrona_mjx.git
+   cd madrona_mjx
+   git checkout c34f3cf6d95148dba50ffeb981aea033b8a4d225
+   git submodule update --init --recursive
+   ```
+
+2. Configure and build (disable Vulkan if you do not have it available):
+
+   ```bash
+   mkdir -p build
+   cd build
+   cmake -DLOAD_VULKAN=OFF ..
+   cmake --build . -j
+   cd ..
+   ```
+
+3. While having your environment activated, install the Python bindings into your UV environment:
+
+   ```bash
+   uv pip install -e .
+   ```
+
+Refer to the upstream repository for platform-specific prerequisites (CUDA,
+Vulkan, compiler versions). Re-run `uv pip install -e .` whenever you rebuild the
+library.
+
+**Troubleshooting tips**
+
+- If you see CUDA OOMs immediately after the build, try `export
+  MADRONA_DISABLE_CUDA_HEAP_SIZE=1` before launching training.
+- Populate the kernel caches to avoid recompilation on every run:
+
+  ```bash
+  export MADRONA_MWGPU_KERNEL_CACHE=/path/to/cache/mwgpu
+  export MADRONA_BVH_KERNEL_CACHE=/path/to/cache/bvh
+  ```
 
 ## Usage
 
@@ -65,4 +120,3 @@ If you find our repository useful in your work, please consider citing:
 * **Project Webpage**: 
 * **Paper**:
 * **Contact**: 
-
