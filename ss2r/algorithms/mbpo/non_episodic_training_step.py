@@ -68,12 +68,12 @@ def make_non_episodic_training_step(
             optimizer_state=training_state.behavior_qr_optimizer_state,
             params=training_state.behavior_qr_params,
         )
-        if safe:
+        if safe and "cost" in transitions.extras["state_extras"]:
             # If the cost is greater than 1, we haven't reached our
             # goal safe set yet.
             cost = transitions.extras["state_extras"]["cost"]
             new_discount = jnp.where(
-                cost > 0.0,
+                (cost > 0.0) & transitions.discount.astype(bool),
                 jnp.ones_like(transitions.discount),
                 jnp.zeros_like(transitions.discount),
             )
@@ -161,8 +161,6 @@ def make_non_episodic_training_step(
             behavior_target_qr_params=new_behavior_target_qr_params,
             backup_qc_optimizer_state=backup_qc_optimizer_state,
             backup_qc_params=backup_qc_params,
-            behavior_qc_optimizer_state=backup_qc_optimizer_state,
-            behavior_qc_params=backup_qc_params,
             backup_target_qc_params=new_backup_target_qc_params,
             gradient_steps=training_state.gradient_steps + 1,
             behavior_policy_optimizer_state=policy_optimizer_state,

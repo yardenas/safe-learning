@@ -8,13 +8,16 @@ defaults:
 
 environment:
   task_name: NonEpisodicHumanoidWalk
+  task_params:
+    ground_start_probability: 1.
+
 
 training:
   num_timesteps: 5000000
   train_domain_randomization: false
   eval_domain_randomization: false
   safe: true
-  wandb_id: jkdr831o
+  wandb_id: qwe3dw9u
   safety_budget: 25.
 
 agent:
@@ -23,3 +26,4 @@ agent:
   safety_discounting: 1.
   safety_filter: nonepisodic
   load_auxiliaries: true
+  learn_from_scratch: false
