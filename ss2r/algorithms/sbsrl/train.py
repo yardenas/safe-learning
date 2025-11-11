@@ -185,6 +185,7 @@ def train(
     min_alpha: float = 0.0,
     discounting: float = 0.9,
     safety_discounting: float = 0.9,
+    sigma_discounting: float = 0.9,
     seed: int = 0,
     batch_size: int = 256,
     sac_batch_size: int = 256,
@@ -243,11 +244,13 @@ def train(
             "No training will happen because min_replay_size >= num_timesteps"
         )
     episodic_safety_budget = safety_budget
-    budget_scaling_fn = lambda x: x
     if safety_discounting != 1.0 and normalize_budget:
-        budget_scaling_fn = (
-            lambda x: x * episode_length * (1.0 - safety_discounting) / action_repeat
+        safety_budget = (
+            (safety_budget / episode_length)
+            / (1.0 - safety_discounting)
+            * action_repeat
         )
+    budget_scaling_fn = lambda x: x  # TODO:remove this
     logging.info(f"Episode safety budget: {budget_scaling_fn(safety_budget)}")
     if max_replay_size is None:
         max_replay_size = num_timesteps
@@ -383,12 +386,13 @@ def train(
             / batch_size
         ),
     )
-    num_model_rollouts = int(
-        model_grad_updates_per_step
-        * batch_size
-        * model_to_real_data_ratio
-        / (1 - model_to_real_data_ratio)
-    )
+    if model_to_real_data_ratio != 1:
+        num_model_rollouts = int(
+            model_grad_updates_per_step
+            * batch_size
+            * model_to_real_data_ratio
+            / (1 - model_to_real_data_ratio)
+        )
     logging.info(f"Num model rollouts: {num_model_rollouts}")
     logging.info(f"Model grad updates per step: {model_grad_updates_per_step}")
     model_replay_buffer = replay_buffers.UniformSamplingQueue(
@@ -532,6 +536,7 @@ def train(
         sigma_scaling=sigma_scaling,
         discounting=discounting,
         safety_discounting=safety_discounting,
+        sigma_discounting=sigma_discounting,
         action_size=action_size,
         use_bro=use_bro,
         normalize_fn=normalize_fn,

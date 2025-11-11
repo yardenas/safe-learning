@@ -40,6 +40,7 @@ def make_losses(
     sigma_scaling: float,
     discounting: float,
     safety_discounting: float,
+    sigma_discounting: float,
     action_size: int,
     use_bro: bool,
     normalize_fn,
@@ -136,7 +137,16 @@ def make_losses(
             if safe or uncertainty_constraint
             else reward_scaling
         )
-        gamma = safety_discounting if safe or uncertainty_constraint else discounting
+        gammas = []
+        if safe:
+            gammas.append(safety_discounting)
+        if uncertainty_constraint:
+            gammas.append(sigma_discounting)
+        gamma = (
+            jnp.stack(gammas, axis=-1)
+            if safe or uncertainty_constraint
+            else discounting
+        )
         q_old_action = q_network.apply(
             normalizer_params,
             q_params,
@@ -230,6 +240,7 @@ def make_losses(
             qr = jnp.mean(qr_action, axis=-1)
         else:
             qr = jnp.min(qr_action, axis=-1)
+        qr /= reward_scaling
         actor_loss = -qr.mean()
         exploration_loss = (alpha * log_prob).mean()
 
@@ -250,7 +261,7 @@ def make_losses(
             )  # -> (E, B, n_critics, head_size)
             constraints_list = []
             if safe:
-                q_c = qc_action[:, :, :, 0]
+                q_c = qc_action[:, :, :, 0] / cost_scaling
                 mean_qc = jnp.mean(q_c, axis=(1, 2))
                 qc_constr = mean_qc
                 if use_mean_critic:
@@ -263,7 +274,7 @@ def make_losses(
                 aux["q_cost"] = mean_qc.mean()
                 aux["qc_std"] = jnp.std(mean_qc)
             if uncertainty_constraint:
-                q_sigma = qc_action[:, :, :, -1]
+                q_sigma = qc_action[:, :, :, -1] / sigma_scaling
                 sigma_constraint = q_sigma.mean() - uncertainty_epsilon
                 if offline and flip_uncertainty_constraint:
                     sigma_constraint = -sigma_constraint
