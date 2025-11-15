@@ -65,13 +65,6 @@ manipulation.register_environment(
 
 
 def get_wrap_env_fn(cfg):
-    if cfg.training.action_noise_scale > 0.0:
-
-        def wrap_fn(env):
-            env = ActionNoiseWrapper(env, cfg.training.action_noise_scale)
-            return env
-
-        out = wrap_fn, wrap_fn
     if (
         cfg.environment.task_name == "SafeWalkerWalk"
         or cfg.environment.task_name == "SafeWalkerRun"
@@ -380,6 +373,8 @@ def make_mujoco_playground_envs(cfg, train_wrap_env_fn, eval_wrap_env_fn):
     if vision:
         _preinitialize_vision_env(task_cfg.task_name, task_params, registry)
     train_env = registry.load(task_cfg.task_name, config=task_params)
+    if cfg.training.action_noise_scale > 0.0:
+        train_env = ActionNoiseWrapper(train_env, cfg.training.action_noise_scale)
     train_env = train_wrap_env_fn(train_env)
     train_key, eval_key = jax.random.split(jax.random.PRNGKey(cfg.training.seed))
     if vision and cfg.training.train_domain_randomization:
@@ -410,6 +405,8 @@ def make_mujoco_playground_envs(cfg, train_wrap_env_fn, eval_wrap_env_fn):
     if vision:
         return train_env, train_env
     eval_env = registry.load(task_cfg.task_name, config=task_params)
+    if cfg.training.action_noise_scale > 0.0:
+        eval_env = ActionNoiseWrapper(eval_env, cfg.training.action_noise_scale)
     eval_env = eval_wrap_env_fn(eval_env)
     eval_randomization_fn = (
         prepare_randomization_fn(
@@ -439,6 +436,9 @@ def make_safety_gym_envs(cfg, train_wrap_env_fn, eval_wrap_env_fn):
     train_env = go_to_goal.GoToGoal(**task_cfg.task_params)
     train_env = train_wrap_env_fn(train_env)
     eval_env = go_to_goal.GoToGoal(**task_cfg.task_params)
+    if cfg.training.action_noise_scale > 0.0:
+        train_env = ActionNoiseWrapper(train_env, cfg.training.action_noise_scale)
+        eval_env = ActionNoiseWrapper(eval_env, cfg.training.action_noise_scale)
     eval_env = eval_wrap_env_fn(eval_env)
     train_key, eval_key = jax.random.split(jax.random.PRNGKey(cfg.training.seed))
     train_randomization_fn = (
