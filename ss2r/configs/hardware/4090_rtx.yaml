@@ -2,4 +2,4 @@
 
 hydra:
   launcher:
-    additional_parameters: { "gpus": "rtx_4090:1", "account": "anon" }
+    additional_parameters: { "gpus": "rtx_4090:1", "account": "ls_krausea" }
