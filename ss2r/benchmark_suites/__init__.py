@@ -32,6 +32,7 @@ from ss2r.benchmark_suites.rccar import rccar
 from ss2r.benchmark_suites.safety_gym import go_to_goal
 from ss2r.benchmark_suites.utils import get_domain_name, get_task_config
 from ss2r.benchmark_suites.wrappers import (
+    ActionNoiseWrapper,
     GoToGoalObservationWrapper,
     Saute,
     SPiDR,
@@ -64,6 +65,13 @@ manipulation.register_environment(
 
 
 def get_wrap_env_fn(cfg):
+    if cfg.training.action_noise_scale > 0.0:
+
+        def wrap_fn(env):
+            env = ActionNoiseWrapper(env, cfg.training.action_noise_scale)
+            return env
+
+        out = wrap_fn, wrap_fn
     if (
         cfg.environment.task_name == "SafeWalkerWalk"
         or cfg.environment.task_name == "SafeWalkerRun"

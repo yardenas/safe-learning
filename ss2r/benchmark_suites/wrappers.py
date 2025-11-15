@@ -535,3 +535,23 @@ class WalkerObservationWrapper(Wrapper):
                 else:
                     sizes[k] = v
             return sizes
+
+
+class ActionNoiseWrapper(Wrapper):
+    def __init__(self, env, action_noise_scale: float):
+        super().__init__(env)
+        self.action_noise_scale = action_noise_scale
+
+    def step(self, state: State, action: jax.Array) -> State:
+        rng = state.info["rng"]
+        rng, noise_rng = jax.random.split(rng)
+        noise = jax.random.uniform(
+            noise_rng,
+            shape=action.shape,
+            minval=-self.action_noise_scale,
+            maxval=self.action_noise_scale,
+        )
+        noisy_action = action + noise
+        nstate = self.env.step(state, noisy_action)
+        nstate.info["rng"] = rng
+        return nstate
