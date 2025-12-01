@@ -28,7 +28,7 @@ from absl import logging
 from brax import envs
 from brax.training import replay_buffers
 from brax.training.acme import running_statistics, specs
-from brax.training.acme.running_statistics import NestedMeanStd
+from brax.training.acme.running_statistics import NestedMeanStd, RunningStatisticsState
 from brax.training.acme.types import NestedArray
 from brax.training.agents.sac import checkpoint
 from brax.training.types import PRNGKey
@@ -79,6 +79,24 @@ def get_dict_normalizer_params(params, ts_normalizer_params, idx):
         summed_variance=summed_var,
     )
     return ts_normalizer_params
+
+
+def dict_to_running_statistics(d: dict) -> RunningStatisticsState:
+    """
+    Convert type from dict into RunningStatisticsState
+    """
+    if isinstance(d, RunningStatisticsState):
+        return d
+
+    mean = d.get("mean")
+    std = d.get("std")
+    summed_variance = d.get("summed_variance", None)
+    count = d.get("count", 0)
+
+    count = jnp.asarray(count)
+    return RunningStatisticsState(
+        mean=mean, std=std, summed_variance=summed_variance, count=count
+    )
 
 
 def _init_training_state(
@@ -192,6 +210,7 @@ def train(
     num_evals: int = 1,
     normalize_observations: bool = False,
     normalize_disagreement: bool = False,
+    load_disagreement_normalizer: bool = False,
     reward_scaling: float = 1.0,
     cost_scaling: float = 1.0,
     sigma_scaling: float = 1.0,
@@ -232,6 +251,7 @@ def train(
     store_buffer: bool = False,
     reward_pessimism: float = 0.0,
     cost_pessimism: float = 0.0,
+    pessimistic_cost: bool = False,
     model_propagation: str = "nominal",
     offline: bool = False,
     flip_uncertainty_constraint: bool = False,
@@ -439,15 +459,19 @@ def train(
             ts_normalizer_params = get_dict_normalizer_params(
                 params, ts_normalizer_params, 0
             )
-        if (
-            isinstance(ts_disagreement_normalizer_params.mean, dict)
-            and not isinstance(params[12].mean, dict)
-            and params
-            and not (offline and len(params) == 13)
-        ):
-            ts_disagreement_normalizer_params = get_dict_normalizer_params(
-                params, ts_disagreement_normalizer_params, 12
-            )
+        else:
+            ts_normalizer_params = params[0]
+        if params and not offline and load_disagreement_normalizer:
+            if isinstance(
+                ts_disagreement_normalizer_params.mean, dict
+            ) and not isinstance(params[12].mean, dict):
+                ts_disagreement_normalizer_params = get_dict_normalizer_params(
+                    params, ts_disagreement_normalizer_params, 12
+                )
+            else:
+                ts_disagreement_normalizer_params = dict_to_running_statistics(
+                    params[12]
+                )
         if offline:
             model_buffer_state = replay_buffers.ReplayBufferState(**params[-1])
             training_state = training_state.replace(  # type: ignore
@@ -640,6 +664,7 @@ def train(
         safety_budget,
         reward_pessimism,
         cost_pessimism,
+        pessimistic_cost,
         model_to_real_data_ratio,
         offline,
         save_sooper_backup,

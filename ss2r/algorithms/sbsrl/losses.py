@@ -266,6 +266,7 @@ def make_losses(
                 qc_constr = mean_qc
                 if use_mean_critic:
                     qc_constr = mean_qc.mean()
+                aux["qc_max"] = mean_qc.max()
                 safety_constraint = (
                     safety_budget - qc_constr
                 )  # one constraint for each idx
@@ -291,9 +292,15 @@ def make_losses(
                 )
                 aux |= penalizer_aux
                 if safe:
+                    n_safety_constraints = ensemble_size
+                    if use_mean_critic:
+                        n_safety_constraints = 1
                     aux["cost_multipliers"] = penalizer_params.lagrange_multiplier[
-                        :ensemble_size
+                        :n_safety_constraints
                     ]
+                    aux["mult_minmax"] = (
+                        aux["cost_multipliers"].max() - aux["cost_multipliers"].min()
+                    )
                 if uncertainty_constraint:
                     aux["sigma_multipliers"] = penalizer_params.lagrange_multiplier[-1]
         aux["q_reward"] = qr.mean()

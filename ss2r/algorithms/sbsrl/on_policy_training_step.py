@@ -53,6 +53,7 @@ def make_on_policy_training_step(
     safety_budget,
     reward_pessimism,
     cost_pessimism,
+    pessimistic_cost,
     model_to_real_data_ratio,
     offline,
     save_sooper_backup,
@@ -133,7 +134,7 @@ def make_on_policy_training_step(
         )
         alpha = jnp.exp(training_state.alpha_params) + min_alpha
 
-        if offline:
+        if offline or pessimistic_cost:
             transitions = relabel_offline_transitions(planning_env, transitions)
 
         # reshape transitions with leading ensemble size
@@ -419,6 +420,9 @@ def make_on_policy_training_step(
                 transitions.reward.shape, disagreement
             )  # (B,ensemble_size)
             disagreement_metrics = {"normalized_disagreement": disagreement.mean()}
+            disagreement_metrics["model_stage_cost"] = transitions.extras[
+                "state_extras"
+            ]["cost"]
         sac_replay_buffer_state = sac_replay_buffer.insert(
             sac_replay_buffer_state, float16(transitions)
         )
@@ -539,6 +543,8 @@ def make_on_policy_training_step(
             )
             training_key = key
         model_buffer_state, transitions = model_replay_buffer.sample(model_buffer_state)
+        cost_metrics = {}
+        cost_metrics["real_stage_cost"] = transitions.extras["state_extras"]["cost"]
         # Change the front dimension of transitions so 'update_step' is called
         # grad_updates_per_step times by the scan.
         tmp_transitions = jax.tree_util.tree_map(
@@ -581,6 +587,7 @@ def make_on_policy_training_step(
         metrics |= env_state.metrics
         metrics |= disagreement_metrics
         metrics |= model_metrics
+        metrics |= cost_metrics
         return (
             training_state,
             env_state,
