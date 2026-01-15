@@ -13,7 +13,7 @@ agent:
   value_hidden_layer_sizes: [512, 512]  # two block of BroNet
   grad_updates_per_step: 64
   learning_rate: 0.0003
-  max_replay_size: 4194304
+  max_replay_size: 1048576
   discounting: 0.95
   reward_scaling: 125
   min_replay_size: 8192
