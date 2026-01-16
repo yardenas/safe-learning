@@ -19,6 +19,7 @@ See: https://arxiv.org/pdf/1812.05905.pdf
 
 import functools
 import time
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Tuple
 
 import jax
@@ -241,6 +242,7 @@ def train(
     if wrap_env_fn is not None:
         env = wrap_env_fn(env)
     rng = jax.random.PRNGKey(seed)
+    process_id = jax.process_index()
     obs_size = env.observation_size
     if isinstance(obs_size, Mapping):
         for key, value in obs_size.items():
@@ -756,6 +758,7 @@ def train(
         # Eval and logging
         if checkpoint_logdir:
             # Save current policy.
+            save_start = time.time()
             params = (
                 training_state.normalizer_params,
                 training_state.policy_params,
@@ -775,6 +778,26 @@ def train(
                     params += (buffer_state,)
             dummy_ckpt_config = config_dict.ConfigDict()
             checkpoint.save(checkpoint_logdir, current_step, params, dummy_ckpt_config)
+            save_duration = time.time() - save_start
+            logging.info(
+                "checkpoint save finished in %.2fs at step %s",
+                save_duration,
+                current_step,
+            )
+            if process_id == 0:
+                ckpt_path = Path(checkpoint_logdir) / f"{current_step:012d}"
+                data_dir = ckpt_path / "d"
+                if not data_dir.exists():
+                    logging.warning(
+                        "checkpoint data dir missing: %s", data_dir.as_posix()
+                    )
+                try:
+                    checkpoint.load(ckpt_path)
+                    logging.info("checkpoint verify ok: %s", ckpt_path.as_posix())
+                except Exception:
+                    logging.exception(
+                        "checkpoint verify failed: %s", ckpt_path.as_posix()
+                    )
 
         # Run evals.
         metrics = evaluator.run_evaluation(
