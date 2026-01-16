@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - g1_joystick
+  - g1_online
   - override /agent/data_collection: episodic
   - override /agent/penalizer: null
   - _self_

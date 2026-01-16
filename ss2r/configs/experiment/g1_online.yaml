@@ -13,7 +13,6 @@ training:
   render: false
   wandb_id: 02anvfes
   safe: false
-  episode_length: 1000
 
 agent:
   min_replay_size: 1000
