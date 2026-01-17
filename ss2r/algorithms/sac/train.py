@@ -40,6 +40,7 @@ import ss2r.algorithms.sac.networks as sac_networks
 from ss2r.algorithms.penalizers import Penalizer
 from ss2r.algorithms.sac import gradients
 from ss2r.algorithms.sac.data import collect_single_step
+from ss2r.algorithms.sac.pytree_uniform_sampling_queue import PytreeReplayBufferState
 from ss2r.algorithms.sac.q_transforms import QTransformation, SACBase, SACCost, UCBCost
 from ss2r.algorithms.sac.rae import RAEReplayBufferState
 from ss2r.algorithms.sac.types import (
@@ -368,7 +369,10 @@ def train(
     buffer_state = replay_buffer.init(rb_key)
     if load_buffer and params[-1] is not None:
         if "data" in params[-1]:
-            data = Transition(**params[-1].pop("data"))
+            if isinstance(
+                buffer_state, (PytreeReplayBufferState, RAEReplayBufferState)
+            ):
+                data = Transition(**params[-1].pop("data"))
             buffer_state = buffer_state.replace(**params[-1], data=data)  # type: ignore
         else:
             buffer_state = params[-1]
