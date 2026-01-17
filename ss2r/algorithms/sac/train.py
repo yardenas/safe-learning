@@ -366,12 +366,14 @@ def train(
         sample_batch_size=batch_size,
     )
     buffer_state = replay_buffer.init(rb_key)
-    if load_buffer:
+    if load_buffer and params[-1] is not None:
         if "data" in params[-1]:
             data = Transition(**params[-1].pop("data"))
             buffer_state = buffer_state.replace(**params[-1], data=data)  # type: ignore
         else:
             buffer_state = params[-1]
+    elif load_buffer and params[-1] is None:
+        logging.warning("Requested to load buffer but could not find data")
     alpha_loss, critic_loss, actor_loss = sac_losses.make_losses(
         sac_network=sac_network,
         reward_scaling=reward_scaling,

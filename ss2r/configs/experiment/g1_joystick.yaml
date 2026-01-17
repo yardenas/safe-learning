@@ -18,6 +18,6 @@ agent:
   reward_scaling: 125
   min_replay_size: 8192
   cost_scaling: 100
-  n_critics: 1
-  n_heads: 10
+  n_critics: 2
+  n_heads: 1
 
