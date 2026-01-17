@@ -373,6 +373,8 @@ def train(
                 buffer_state, (PytreeReplayBufferState, RAEReplayBufferState)
             ):
                 data = Transition(**params[-1].pop("data"))
+            else:
+                data = params[-1].pop("data")
             buffer_state = buffer_state.replace(**params[-1], data=data)  # type: ignore
         else:
             buffer_state = params[-1]
