@@ -2,8 +2,6 @@
 defaults:
   - g1_online
   - override /agent/data_collection: episodic
-  - override /agent/replay_buffer: pytree
-  - override /agent/penalizer: null
   - _self_
 
 training:
