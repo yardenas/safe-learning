@@ -21,7 +21,7 @@ agent:
   learning_rate: 1e-5
   critic_learning_rate: 3e-4
   num_critic_updates_per_actor_update: 20
-  n_critics: 2
-  n_heads: 1
+  n_critics: 1
+  n_heads: 10
   data_collection:
     wait_time_sec: 120
