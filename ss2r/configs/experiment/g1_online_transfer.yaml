@@ -5,20 +5,19 @@ defaults:
   - _self_
 
 training:
-  train_domain_randomization: true
-  eval_domain_randomization: true
+  train_domain_randomization: false
+  eval_domain_randomization: false
   num_eval_envs: 128
   render: false
   num_evals: 25
-  num_timesteps: 25000
-  wandb_id: bmzztihk
+  num_timesteps: 150000
+  wandb_id: ne1qq0zy
 
 
 environment:
-  train_params:  
-    floor_friction: [0.35, 0.35]
-  eval_params:
-    floor_friction: [0.35, 0.35]
-    
+  task_params:
+    action_scale: 0.4
+
 agent:
   reset_on_eval: false
+  max_replay_size: 1048576
