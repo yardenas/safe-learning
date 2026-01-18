@@ -29,6 +29,7 @@ from ss2r.benchmark_suites.mujoco_playground.humanoid import humanoid as dm_huma
 from ss2r.benchmark_suites.mujoco_playground.humanoid import (
     nonepisodic_humanoid as nonepisodic_humanoid,
 )
+from ss2r.benchmark_suites.mujoco_playground.pendulum import pendulum as dm_pendulum
 from ss2r.benchmark_suites.mujoco_playground.pick_cartesian import pick_cartesian
 from ss2r.benchmark_suites.mujoco_playground.quadruped import quadruped
 from ss2r.benchmark_suites.mujoco_playground.walker import walker
@@ -549,6 +550,7 @@ randomization_fns = {
     "CartpoleSwingupSparse": dm_cartpole.domain_randomization,
     "CartpoleBalanceSparse": dm_cartpole.domain_randomization,
     "CartpoleBalance": dm_cartpole.domain_randomization,
+    "PendulumSwingup": dm_pendulum.domain_randomization,
     "HumanoidWalk": dm_humanoid.domain_randomization,
     "HumanoidStand": dm_humanoid.domain_randomization,
     "NonEpisodicHumanoidStand": dm_humanoid.domain_randomization,
@@ -606,6 +608,7 @@ render_fns = {
     "CartpoleSwingupSparse": functools.partial(mujoco_playground.render),
     "CartpoleBalanceSparse": functools.partial(mujoco_playground.render),
     "CartpoleBalance": functools.partial(mujoco_playground.render),
+    "PendulumSwingup": functools.partial(mujoco_playground.render),
     "QuadrupedWalk": functools.partial(mujoco_playground.render, camera="x"),
     "QuadrupedRun": functools.partial(mujoco_playground.render, camera="x"),
     "SafeQuadrupedWalk": functools.partial(mujoco_playground.render, camera="x"),

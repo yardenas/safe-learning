@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - mujoco_playground_dm_control
+  - override /environment: pendulum_swingup
+  - _self_
+
+training:
+  num_timesteps: 5000000
+  action_repeat: 4
+  safe: false
+  train_domain_randomization: false
+  eval_domain_randomization: false
+  num_eval_episodes: 1
+
+agent:
+  activation: swish
