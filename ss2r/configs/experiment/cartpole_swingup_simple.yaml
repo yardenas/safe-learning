@@ -16,3 +16,4 @@ training:
 
 agent:
   activation: swish
+  grad_updates_per_step: 32
