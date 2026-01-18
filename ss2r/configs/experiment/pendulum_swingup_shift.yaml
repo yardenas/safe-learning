@@ -1,9 +1,14 @@
 # @package _global_
 defaults:
   - pendulum_swingup_simple
+  - override /agent/data_collection: episodic
   - _self_
 
 training:
+  num_envs: 1
+  num_timesteps: 25000
+  num_evals: 25
+  render: false
   train_domain_randomization: true
   eval_domain_randomization: true
   wandb_id: 2ppxdklz
@@ -15,3 +20,10 @@ environment:
     pendulum_length: [-0.25, -0.25]
   
   
+agent:
+  min_replay_size: 1000
+  max_replay_size: 500000
+  grad_updates_per_step: 1250
+  learning_rate: 1e-5
+  critic_learning_rate: 3e-4
+  num_critic_updates_per_actor_update: 20
