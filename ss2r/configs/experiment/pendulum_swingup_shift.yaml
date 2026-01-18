@@ -15,9 +15,9 @@ training:
 
 environment:
   train_params:
-    pendulum_length: [-0.125, -0.125]
+    pendulum_length: [-0.105, -0.105]
   eval_params:
-    pendulum_length: [-0.125, -0.125]
+    pendulum_length: [-0.105, -0.105]
   
   
 agent:
