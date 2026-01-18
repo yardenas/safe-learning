@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - pendulum_swingup_simpl
+  - pendulum_swingup_simple
   - _self_
 
 training:
