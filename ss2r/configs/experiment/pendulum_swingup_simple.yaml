@@ -11,6 +11,3 @@ training:
   train_domain_randomization: false
   eval_domain_randomization: false
   num_eval_episodes: 1
-
-agent:
-  activation: swish
