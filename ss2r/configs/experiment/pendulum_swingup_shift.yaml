@@ -6,9 +6,12 @@ defaults:
 training:
   train_domain_randomization: true
   eval_domain_randomization: true
+  wandb_id: 2ppxdklz
 
 environment:
   train_params:
     pendulum_length: [-0.25, -0.25]
   eval_params:
     pendulum_length: [-0.25, -0.25]
+  
+  
