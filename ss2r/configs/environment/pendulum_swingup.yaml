@@ -4,7 +4,7 @@ defaults:
 task_name: PendulumSwingup
 task_params:
   action_repeat: 1
-  ctrl_dt: 0.01
+  ctrl_dt: 0.02
   episode_length: 1000
   sim_dt: 0.01
   vision: false
