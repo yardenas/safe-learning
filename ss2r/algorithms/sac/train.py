@@ -485,6 +485,12 @@ def train(
             policy_params["params"]["SharedEncoder"] = encoder_params
         else:
             policy_params = training_state.policy_params
+        critic_pred = sac_network.qr_network.apply(
+            training_state.normalizer_params,
+            qr_params,
+            transitions.observation,
+            transitions.action,
+        ).mean()
         # TODO (yarden): try to make it faster with cond later
         (actor_loss, aux), new_policy_params, new_policy_optimizer_state = actor_update(
             policy_params,
@@ -528,6 +534,7 @@ def train(
             additional_metrics = {}
 
         metrics = {
+            "critic_pred": critic_pred,
             "critic_loss": critic_loss,
             "actor_loss": actor_loss,
             "alpha_loss": alpha_loss,
