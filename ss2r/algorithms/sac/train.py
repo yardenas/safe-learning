@@ -681,7 +681,7 @@ def train(
             return hist, 0.0, jnp.nan, jnp.nan, jnp.nan
 
         num_bins = 50
-        q_min = 90.0
+        q_min = 96.0
         q_max = 105.0
         hist, count, q_mean, q_min_val, q_max_val = q_histogram(
             buffer_state, training_state.qr_params, num_bins, q_min, q_max
