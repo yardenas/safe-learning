@@ -18,6 +18,7 @@ See: https://arxiv.org/pdf/1812.05905.pdf
 """
 
 import functools
+import os
 import time
 from typing import Any, Callable, Mapping, Optional, Tuple
 
@@ -203,6 +204,7 @@ def train(
     entropy_bonus: bool = True,
     augment_pixels: bool = False,
     load_buffer: bool = False,
+    store_env_state: bool = False,
 ):
     if min_replay_size >= num_timesteps:
         raise ValueError(
@@ -303,6 +305,10 @@ def train(
         extras["state_extras"]["cost"] = jnp.zeros(())  # type: ignore
     if isinstance(cost_q_transform, UCBCost):
         extras["state_extras"]["disagreement"] = jnp.zeros(())  # type: ignore
+    if store_env_state:
+        dummy_env_keys = jax.random.split(jax.random.PRNGKey(seed + 1), num_envs)
+        dummy_env_state = env.reset(dummy_env_keys)
+        extras["state_extras"]["env_state"] = dummy_env_state  # type: ignore
     dummy_transition = Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
         observation=dummy_obs,
         action=dummy_action,
@@ -890,6 +896,23 @@ def train(
                     params += (buffer_state,)
             dummy_ckpt_config = config_dict.ConfigDict()
             checkpoint.save(checkpoint_logdir, current_step, params, dummy_ckpt_config)
+            try:
+                import wandb
+
+                if wandb.run is not None:
+                    ckpt_dir = os.path.join(checkpoint_logdir, f"{current_step:012d}")
+                    artifact = wandb.Artifact(
+                        "checkpoint",
+                        type="checkpoint",
+                        metadata={"step": int(current_step)},
+                    )
+                    artifact.add_dir(ckpt_dir)
+                    aliases = [f"step_{current_step}"]
+                    if wandb.run.id:
+                        aliases.append(wandb.run.id)
+                    wandb.log_artifact(artifact, aliases=aliases)
+            except Exception as exc:  # pragma: no cover - best effort logging
+                logging.warning("Failed to log checkpoint artifact: %s", exc)
 
         # Run evals.
         metrics = evaluator.run_evaluation(

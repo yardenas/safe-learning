@@ -33,6 +33,7 @@ use_bro: true
 normalize_budget: true
 reset_on_eval: true
 store_buffer: false
+store_env_state: false
 n_critics: 2
 n_heads: 1
 schedule_lr: false

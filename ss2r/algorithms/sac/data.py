@@ -13,8 +13,20 @@ from ss2r.rl.types import MakePolicyFn, UnrollFn
 from ss2r.rl.utils import quantize_images, remove_pixels
 
 
+def _add_env_state(transition: Transition, env_state: envs.State) -> Transition:
+    extras = transition.extras or {}
+    state_extras = dict(extras.get("state_extras", {}))
+    state_extras["env_state"] = env_state
+    new_extras = dict(extras)
+    new_extras["state_extras"] = state_extras
+    return transition._replace(extras=new_extras)
+
+
 def get_collection_fn(cfg):
+    store_env_state = bool(getattr(cfg.agent, "store_env_state", False))
     if cfg.agent.data_collection.name == "step":
+        if store_env_state:
+            return make_collection_fn(actor_step_with_state)
         return collect_single_step
     elif cfg.agent.data_collection.name == "episodic":
 
@@ -26,14 +38,25 @@ def get_collection_fn(cfg):
             key,
             extra_fields,
         ):
-            env_state, transitions = acting.generate_unroll(
-                env,
-                env_state,
-                make_policy_fn(policy_params),
-                key,
-                cfg.training.episode_length,
-                extra_fields,
-            )
+            if store_env_state:
+                env_state, transitions = generate_unroll_with_state(
+                    env,
+                    env_state,
+                    make_policy_fn,
+                    policy_params,
+                    key,
+                    cfg.training.episode_length,
+                    extra_fields,
+                )
+            else:
+                env_state, transitions = acting.generate_unroll(
+                    env,
+                    env_state,
+                    make_policy_fn(policy_params),
+                    key,
+                    cfg.training.episode_length,
+                    extra_fields,
+                )
             transitions = jax.tree.map(
                 lambda x: x.reshape(-1, *x.shape[2:]), transitions
             )
@@ -41,6 +64,10 @@ def get_collection_fn(cfg):
 
         return make_collection_fn(generate_episodic_unroll)
     elif cfg.agent.data_collection.name == "hardware":
+        if store_env_state:
+            raise ValueError(
+                "store_env_state is not supported for hardware data collection."
+            )
         data_collection_cfg = cfg.agent.data_collection
         if "Go1" in cfg.environment.task_name or "Go2" in cfg.environment.task_name:
             from ss2r.algorithms.sac.go1_sac_to_onnx import (
@@ -108,6 +135,22 @@ def actor_step(
     return acting.actor_step(env, env_state, policy, key, extra_fields)
 
 
+def actor_step_with_state(
+    env,
+    env_state,
+    make_policy_fn,
+    policy_params,
+    key,
+    extra_fields,
+):
+    policy = make_policy_fn(policy_params)
+    new_env_state, transition = acting.actor_step(
+        env, env_state, policy, key, extra_fields
+    )
+    transition = _add_env_state(transition, env_state)
+    return new_env_state, transition
+
+
 def generate_unroll(
     env,
     env_state,
@@ -121,6 +164,32 @@ def generate_unroll(
     return acting.generate_unroll(
         env, env_state, policy, key, unroll_length, extra_fields
     )
+
+
+def generate_unroll_with_state(
+    env,
+    env_state,
+    make_policy_fn,
+    policy_params,
+    key,
+    unroll_length,
+    extra_fields,
+):
+    policy = make_policy_fn(policy_params)
+
+    def step_fn(carry, _):
+        state, key = carry
+        key, subkey = jax.random.split(key)
+        new_state, transition = acting.actor_step(
+            env, state, policy, subkey, extra_fields
+        )
+        transition = _add_env_state(transition, state)
+        return (new_state, key), transition
+
+    (env_state, _), transitions = jax.lax.scan(
+        step_fn, (env_state, key), (), length=unroll_length
+    )
+    return env_state, transitions
 
 
 def make_collection_fn(unroll_fn: UnrollFn) -> CollectDataFn:
