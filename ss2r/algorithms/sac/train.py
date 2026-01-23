@@ -604,9 +604,14 @@ def train(
             mask = (idx >= state.sample_position) & (idx < state.insert_position)
             mask = mask.astype(q.dtype)
             count = jnp.sum(mask)
+            denom = jnp.where(count > 0, count, 1.0)
+            mean = jnp.sum(q * mask) / denom
+            mean = jnp.where(count > 0, mean, jnp.nan)
             q_min = jnp.min(jnp.where(mask > 0, q, jnp.inf))
             q_max = jnp.max(jnp.where(mask > 0, q, -jnp.inf))
-            return q, mask, count, q_min, q_max
+            q_min = jnp.where(count > 0, q_min, jnp.nan)
+            q_max = jnp.where(count > 0, q_max, jnp.nan)
+            return q, mask, count, mean, q_min, q_max
 
         def q_histogram(state, params, num_bins, q_min, q_max):
             if isinstance(state, RAEReplayBufferState):
@@ -614,17 +619,36 @@ def train(
                     online_q,
                     online_mask,
                     online_count,
-                    _,
-                    _,
+                    online_mean,
+                    online_min,
+                    online_max,
                 ) = buffer_q_stats(state.online_state, params)
                 (
                     offline_q,
                     offline_mask,
                     offline_count,
-                    _,
-                    _,
+                    offline_mean,
+                    offline_min,
+                    offline_max,
                 ) = buffer_q_stats(state.offline_state, params)
                 total = online_count + offline_count
+                denom = jnp.where(total > 0, total, 1.0)
+                online_mean = jnp.where(online_count > 0, online_mean, 0.0)
+                offline_mean = jnp.where(offline_count > 0, offline_mean, 0.0)
+                mean = (
+                    online_mean * online_count + offline_mean * offline_count
+                ) / denom
+                mean = jnp.where(total > 0, mean, jnp.nan)
+                min_val = jnp.minimum(
+                    jnp.where(online_count > 0, online_min, jnp.inf),
+                    jnp.where(offline_count > 0, offline_min, jnp.inf),
+                )
+                max_val = jnp.maximum(
+                    jnp.where(online_count > 0, online_max, -jnp.inf),
+                    jnp.where(offline_count > 0, offline_max, -jnp.inf),
+                )
+                min_val = jnp.where(total > 0, min_val, jnp.nan)
+                max_val = jnp.where(total > 0, max_val, jnp.nan)
                 edges = jnp.linspace(
                     q_min,
                     q_max,
@@ -640,9 +664,9 @@ def train(
                 denom = jnp.where(total > 0, total, 1.0)
                 bin_width = (q_max - q_min) / num_bins
                 hist = jnp.where(total > 0, hist / (denom * bin_width), jnp.nan)
-                return hist, total
+                return hist, total, mean, min_val, max_val
             if isinstance(state, PytreeReplayBufferState):
-                q, mask, count, _, _ = buffer_q_stats(state, params)
+                q, mask, count, mean, min_val, max_val = buffer_q_stats(state, params)
                 edges = jnp.linspace(
                     q_min,
                     q_max,
@@ -652,14 +676,14 @@ def train(
                 denom = jnp.where(count > 0, count, 1.0)
                 bin_width = (q_max - q_min) / num_bins
                 hist = jnp.where(count > 0, hist / (denom * bin_width), jnp.nan)
-                return hist, count
+                return hist, count, mean, min_val, max_val
             hist = jnp.full((num_bins,), jnp.nan)
-            return hist, 0.0
+            return hist, 0.0, jnp.nan, jnp.nan, jnp.nan
 
         num_bins = 50
         q_min = 75.0
         q_max = 105.0
-        hist, count = q_histogram(
+        hist, count, q_mean, q_min_val, q_max_val = q_histogram(
             buffer_state, training_state.qr_params, num_bins, q_min, q_max
         )
         (training_state, buffer_state, *_), metrics = jax.lax.scan(
@@ -673,6 +697,9 @@ def train(
         metrics["q_hist_min"] = q_min
         metrics["q_hist_max"] = q_max
         metrics["q_hist_count"] = count
+        metrics["q_stats_mean"] = q_mean
+        metrics["q_stats_min"] = q_min_val
+        metrics["q_stats_max"] = q_max_val
         return training_state, buffer_state, metrics
 
     def training_step(
