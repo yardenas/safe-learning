@@ -308,6 +308,10 @@ def train(
     if store_env_state:
         dummy_env_keys = jax.random.split(jax.random.PRNGKey(seed + 1), num_envs)
         dummy_env_state = env.reset(dummy_env_keys)
+        dummy_env_state = jax.tree_util.tree_map(
+            lambda x: x[0] if x.shape and x.shape[0] == num_envs else x,
+            dummy_env_state,
+        )
         extras["state_extras"]["env_state"] = dummy_env_state  # type: ignore
     dummy_transition = Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
         observation=dummy_obs,
