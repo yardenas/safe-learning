@@ -591,7 +591,7 @@ def train(
     ) -> Tuple[TrainingState, ReplayBufferState, Metrics]:
         """Runs the jittable training step after experience collection."""
 
-        def buffer_q_max(state, params):
+        def buffer_q_stats(state, params):
             data = float32(state.data)
             q = sac_network.qr_network.apply(
                 training_state.normalizer_params,
@@ -604,33 +604,75 @@ def train(
             mask = (idx >= state.sample_position) & (idx < state.insert_position)
             mask = mask.astype(q.dtype)
             count = jnp.sum(mask)
-            q_min = jnp.min(q)
-            masked = jnp.where(mask > 0, q, q_min)
-            max_val = jnp.max(masked)
-            max_val = jnp.where(count > 0, max_val, jnp.nan)
-            return max_val, count
+            q_min = jnp.min(jnp.where(mask > 0, q, jnp.inf))
+            q_max = jnp.max(jnp.where(mask > 0, q, -jnp.inf))
+            return q, mask, count, q_min, q_max
 
-        def global_q_max(state, params):
+        def q_histogram(state, params, num_bins, q_min, q_max):
             if isinstance(state, RAEReplayBufferState):
-                online_max, online_count = buffer_q_max(state.online_state, params)
-                offline_max, offline_count = buffer_q_max(state.offline_state, params)
+                (
+                    online_q,
+                    online_mask,
+                    online_count,
+                    _,
+                    _,
+                ) = buffer_q_stats(state.online_state, params)
+                (
+                    offline_q,
+                    offline_mask,
+                    offline_count,
+                    _,
+                    _,
+                ) = buffer_q_stats(state.offline_state, params)
                 total = online_count + offline_count
-                max_val = jnp.maximum(online_max, offline_max)
-                return jnp.where(total > 0, max_val, jnp.nan)
+                edges = jnp.linspace(
+                    q_min,
+                    q_max,
+                    num_bins + 1,
+                )
+                hist_online = jnp.histogram(online_q, bins=edges, weights=online_mask)[
+                    0
+                ]
+                hist_offline = jnp.histogram(
+                    offline_q, bins=edges, weights=offline_mask
+                )[0]
+                hist = hist_online + hist_offline
+                denom = jnp.where(total > 0, total, 1.0)
+                bin_width = (q_max - q_min) / num_bins
+                hist = jnp.where(total > 0, hist / (denom * bin_width), jnp.nan)
+                return hist, total
             if isinstance(state, PytreeReplayBufferState):
-                return buffer_q_max(state, params)[0]
-            return jnp.nan
+                q, mask, count, _, _ = buffer_q_stats(state, params)
+                edges = jnp.linspace(
+                    q_min,
+                    q_max,
+                    num_bins + 1,
+                )
+                hist = jnp.histogram(q, bins=edges, weights=mask)[0]
+                denom = jnp.where(count > 0, count, 1.0)
+                bin_width = (q_max - q_min) / num_bins
+                hist = jnp.where(count > 0, hist / (denom * bin_width), jnp.nan)
+                return hist, count
+            hist = jnp.full((num_bins,), jnp.nan)
+            return hist, 0.0
 
-        pre_critic_pred = global_q_max(buffer_state, training_state.qr_params)
+        num_bins = 50
+        q_min = 75.0
+        q_max = 125.0
+        hist, count = q_histogram(
+            buffer_state, training_state.qr_params, num_bins, q_min, q_max
+        )
         (training_state, buffer_state, *_), metrics = jax.lax.scan(
             sgd_step,
             (training_state, buffer_state, training_key, 0),
             (),
             length=grad_updates_per_step,
         )
-        post_critic_pred = global_q_max(buffer_state, training_state.qr_params)
-        metrics["pre_critic_pred"] = pre_critic_pred
-        metrics["post_critic_pred"] = post_critic_pred
+        for i in range(num_bins):
+            metrics[f"q_hist/bin_{i:02d}"] = hist[i]
+        metrics["q_hist_min"] = q_min
+        metrics["q_hist_max"] = q_max
+        metrics["q_hist_count"] = count
         return training_state, buffer_state, metrics
 
     def training_step(
