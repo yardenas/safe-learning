@@ -485,18 +485,6 @@ def train(
             policy_params["params"]["SharedEncoder"] = encoder_params
         else:
             policy_params = training_state.policy_params
-        post_critic_pred = sac_network.qr_network.apply(
-            training_state.normalizer_params,
-            qr_params,
-            transitions.observation,
-            transitions.action,
-        ).mean()
-        pre_critic_pred = sac_network.qr_network.apply(
-            training_state.normalizer_params,
-            training_state.qr_params,
-            transitions.observation,
-            transitions.action,
-        ).mean()
         # TODO (yarden): try to make it faster with cond later
         (actor_loss, aux), new_policy_params, new_policy_optimizer_state = actor_update(
             policy_params,
@@ -540,8 +528,6 @@ def train(
             additional_metrics = {}
 
         metrics = {
-            "post_critic_pred": post_critic_pred,
-            "pre_critic_pred": pre_critic_pred,
             "critic_loss": critic_loss,
             "actor_loss": actor_loss,
             "alpha_loss": alpha_loss,
@@ -604,12 +590,28 @@ def train(
         training_key: PRNGKey,
     ) -> Tuple[TrainingState, ReplayBufferState, Metrics]:
         """Runs the jittable training step after experience collection."""
+        transitions = buffer_state.data
+        transitions = float32(transitions)
+        pre_critic_pred = sac_network.qr_network.apply(
+            training_state.normalizer_params,
+            training_state.qr_params,
+            transitions.observation,
+            transitions.action,
+        ).mean()
         (training_state, buffer_state, *_), metrics = jax.lax.scan(
             sgd_step,
             (training_state, buffer_state, training_key, 0),
             (),
             length=grad_updates_per_step,
         )
+        post_critic_pred = sac_network.qr_network.apply(
+            training_state.normalizer_params,
+            training_state.qr_params,
+            transitions.observation,
+            transitions.action,
+        ).mean()
+        metrics["pre_critic_pred"] = pre_critic_pred
+        metrics["post_critic_pred"] = post_critic_pred
         return training_state, buffer_state, metrics
 
     def training_step(
