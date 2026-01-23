@@ -658,7 +658,7 @@ def train(
 
         num_bins = 50
         q_min = 75.0
-        q_max = 125.0
+        q_max = 105.0
         hist, count = q_histogram(
             buffer_state, training_state.qr_params, num_bins, q_min, q_max
         )
