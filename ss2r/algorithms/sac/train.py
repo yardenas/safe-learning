@@ -590,26 +590,48 @@ def train(
         training_key: PRNGKey,
     ) -> Tuple[TrainingState, ReplayBufferState, Metrics]:
         """Runs the jittable training step after experience collection."""
-        transitions = buffer_state.data
-        transitions = float32(transitions)
-        pre_critic_pred = sac_network.qr_network.apply(
-            training_state.normalizer_params,
-            training_state.qr_params,
-            transitions.observation,
-            transitions.action,
-        ).mean()
+
+        def buffer_q_mean(state, params):
+            data = float32(state.data)
+            q = sac_network.qr_network.apply(
+                training_state.normalizer_params,
+                params,
+                data.observation,
+                data.action,
+            )
+            q = jnp.mean(q, axis=-1)
+            idx = jnp.arange(q.shape[0])
+            mask = (idx >= state.sample_position) & (idx < state.insert_position)
+            mask = mask.astype(q.dtype)
+            count = jnp.sum(mask)
+            denom = jnp.where(count > 0, count, 1.0)
+            mean = jnp.sum(q * mask) / denom
+            mean = jnp.where(count > 0, mean, jnp.nan)
+            return mean, count
+
+        def global_q_mean(state, params):
+            if isinstance(state, RAEReplayBufferState):
+                online_mean, online_count = buffer_q_mean(state.online_state, params)
+                offline_mean, offline_count = buffer_q_mean(state.offline_state, params)
+                total = online_count + offline_count
+                denom = jnp.where(total > 0, total, 1.0)
+                mean = (
+                    online_mean * online_count + offline_mean * offline_count
+                ) / denom
+                mean = jnp.where(total > 0, mean, jnp.nan)
+                return mean
+            if isinstance(state, PytreeReplayBufferState):
+                return buffer_q_mean(state, params)[0]
+            return jnp.nan
+
+        pre_critic_pred = global_q_mean(buffer_state, training_state.qr_params)
         (training_state, buffer_state, *_), metrics = jax.lax.scan(
             sgd_step,
             (training_state, buffer_state, training_key, 0),
             (),
             length=grad_updates_per_step,
         )
-        post_critic_pred = sac_network.qr_network.apply(
-            training_state.normalizer_params,
-            training_state.qr_params,
-            transitions.observation,
-            transitions.action,
-        ).mean()
+        post_critic_pred = global_q_mean(buffer_state, training_state.qr_params)
         metrics["pre_critic_pred"] = pre_critic_pred
         metrics["post_critic_pred"] = post_critic_pred
         return training_state, buffer_state, metrics
