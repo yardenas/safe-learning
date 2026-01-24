@@ -206,7 +206,7 @@ class RCCar(Env):
                 )
             else:
                 init_pos = self.init_pose[:2] + jax.random.uniform(
-                    key_pos, shape=(2,), minval=-0.10, maxval=0.10
+                    key_pos, shape=(2,), minval=-0.5, maxval=0.5
                 )
                 init_theta = self.init_pose[2:] + jax.random.uniform(
                     key_pos, shape=(1,), minval=-0.10 * jnp.pi, maxval=0.10 * jnp.pi
@@ -216,13 +216,13 @@ class RCCar(Env):
             ) * jax.random.normal(key_vel, shape=(3,))
             init_state = jnp.concatenate([init_pos, init_theta, init_vel])
         init_obs = self._obs(init_state)
-        obs_buffer, action_buffer = self._init_delay_buffers(jnp.zeros_like(init_obs))
+        obs_buffer, action_buffer = self._init_delay_buffers(init_obs)
         if self.observation_delay == 0:
             obs_buffer = None
         if self.action_delay == 0:
             action_buffer = None
         if self.sliding_window > 0:
-            obs_stack, action_stack = self._init_stack_buffers(jnp.zeros_like(init_obs))
+            obs_stack, action_stack = self._init_stack_buffers(init_obs)
             stacked_obs = self._get_stacked_obs(obs_stack, action_stack)
         else:
             obs_stack = None
@@ -278,7 +278,7 @@ class RCCar(Env):
             delayed_action,
             self.sys,
         )
-        key = state.pipeline_state[1]
+        key = state.pipeline_state[1].astype(jnp.uint32)
         nkey, key = jax.random.split(key, 2)
         goal_dist = jnp.linalg.norm(next_dynamics_state[:2])
         prev_goal_dist = state.pipeline_state[2]

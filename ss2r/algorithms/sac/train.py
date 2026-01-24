@@ -905,16 +905,16 @@ def train(
 
                 if wandb.run is not None:
                     ckpt_dir = os.path.join(checkpoint_logdir, f"{current_step:012d}")
+                    metadata = dict(getattr(wandb, "config", {}))
+                    metadata["step"] = int(current_step)
                     artifact = wandb.Artifact(
                         "checkpoint",
-                        type="checkpoint",
-                        metadata={"step": int(current_step)},
+                        type="model",
+                        metadata=metadata,
                     )
                     artifact.add_dir(ckpt_dir)
-                    aliases = [f"step_{current_step}"]
-                    if wandb.run.id:
-                        aliases.append(wandb.run.id)
-                    wandb.log_artifact(artifact, aliases=aliases)
+                    alias = f"{wandb.run.id}-step_{current_step}"
+                    wandb.log_artifact(artifact, aliases=[alias])
             except Exception as exc:  # pragma: no cover - best effort logging
                 logging.warning("Failed to log checkpoint artifact: %s", exc)
 
