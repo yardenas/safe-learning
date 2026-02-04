@@ -1,0 +1,29 @@
+name: hydrax_mpc
+
+# Uses mujoco_playground env._get_reward for running cost.
+running_cost_scale: 1.0
+terminal_cost_scale: 0.0
+domain_randomization: false
+
+# Hydrax controller factory (required). Either set controller_target or controller_name.
+# controller_target: hydrax.algs.PredictiveSampling
+controller_name: predictive_sampling
+controller_target: null
+controller_kwargs:
+  plan_horizon: 1.0
+  num_knots: 20
+  dt: 0.02
+  num_samples: 128
+  noise_level: 0.1
+  num_randomizations: 1
+
+# Optional risk strategy factory
+risk_strategy_target: null
+risk_strategy_kwargs: {}
+
+# Optional action bounds
+action_low: -1.0
+action_high: 1.0
+
+# Whether to warm-start controller params across steps
+warm_start: true

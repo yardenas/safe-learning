@@ -17,6 +17,7 @@ dependencies = [
     "imageio>=2.37.0,<3",
     "brax",
     "playground",
+    "hydrax",
     "nvidia-cuda-nvrtc-cu12>=12.9.86,<13",
     "matplotlib>=3.10.3,<4",
 ]
@@ -52,6 +53,7 @@ default = true
 [tool.uv.sources]
 brax = { git = "https://github.com/Andrew-Luo1/brax.git", rev = "bc_checkpointing" }
 playground = { git = "https://github.com/Andrew-Luo1/mujoco_playground_new.git" }
+hydrax = { git = "https://github.com/vincekurtz/hydrax.git" }
 
 [build-system]
 requires = ["hatchling"]

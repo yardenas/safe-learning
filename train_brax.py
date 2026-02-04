@@ -8,7 +8,7 @@ from brax import envs
 from omegaconf import OmegaConf
 
 from ss2r import benchmark_suites
-from ss2r.algorithms import mbpo, ppo, sac, sbsrl
+from ss2r.algorithms import hydrax_mpc, mbpo, ppo, sac, sbsrl
 from ss2r.common.logging import TrainingLogger
 from ss2r.common.wandb import get_state_path, get_wandb_checkpoint
 
@@ -81,6 +81,12 @@ def get_train_fn(cfg):
             restore_checkpoint_path=restore_checkpoint_path,
             checkpoint_path=get_state_path(),
         )
+    elif cfg.agent.name == "hydrax_mpc":
+        train_fn = hydrax_mpc.get_train_fn(
+            cfg,
+            restore_checkpoint_path=restore_checkpoint_path,
+            checkpoint_path=get_state_path(),
+        )
     else:
         raise ValueError(f"Unknown agent name: {cfg.agent.name}")
     return train_fn
@@ -105,11 +111,16 @@ def main(cfg):
     )
     logger = TrainingLogger(cfg)
     train_fn = get_train_fn(cfg)
-    train_env_wrap_fn, eval_env_wrap_fn = benchmark_suites.get_wrap_env_fn(cfg)
-    use_vision = "use_vision" in cfg.agent and cfg.agent.use_vision
-    train_env, eval_env = benchmark_suites.make(
-        cfg, train_env_wrap_fn, eval_env_wrap_fn
-    )
+    if cfg.agent.name == "hydrax_mpc":
+        train_env = benchmark_suites.make_real_env(cfg)
+        eval_env = train_env
+        use_vision = False
+    else:
+        train_env_wrap_fn, eval_env_wrap_fn = benchmark_suites.get_wrap_env_fn(cfg)
+        use_vision = "use_vision" in cfg.agent and cfg.agent.use_vision
+        train_env, eval_env = benchmark_suites.make(
+            cfg, train_env_wrap_fn, eval_env_wrap_fn
+        )
     if use_vision:
         _validate_madrona_args(
             train_env,
@@ -130,13 +141,23 @@ def main(cfg):
             rng = jax.random.split(
                 jax.random.PRNGKey(cfg.training.seed), cfg.training.num_eval_envs
             )
-            if len(params) != 2:
-                policy_params = params[:2]
+            if cfg.agent.name == "hydrax_mpc":
+                from brax.envs.wrappers import training as brax_training
+
+                from ss2r.algorithms.hydrax_mpc.train import _MjxDataObsWrapper
+
+                render_env = _MjxDataObsWrapper(brax_training.VmapWrapper(eval_env))
+                policy = make_policy
             else:
-                policy_params = params
+                render_env = eval_env
+                if len(params) != 2:
+                    policy_params = params[:2]
+                else:
+                    policy_params = params
+                policy = make_policy(policy_params, deterministic=True)
             video = benchmark_suites.render_fns[cfg.environment.task_name](
-                eval_env,
-                make_policy(policy_params, deterministic=True),
+                render_env,
+                policy,
                 cfg.training.episode_length,
                 rng,
             )
