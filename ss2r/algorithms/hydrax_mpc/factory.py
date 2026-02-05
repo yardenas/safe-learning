@@ -1,32 +1,8 @@
-from importlib import import_module
 from typing import Any
 
+from hydrax.algs import MPPI
+
 from ss2r.algorithms.hydrax_mpc.task import MujocoPlaygroundTask
-
-
-def _import_from_path(target: str) -> Any:
-    module_path, attr = target.rsplit(".", 1)
-    module = import_module(module_path)
-    return getattr(module, attr)
-
-
-def _instantiate(target: str, *args: Any, **kwargs: Any) -> Any:
-    cls = _import_from_path(target)
-    return cls(*args, **kwargs)
-
-
-def _resolve_controller_target(name: str | None) -> str | None:
-    if name is None:
-        return None
-    normalized = name.strip().lower()
-    mapping = {
-        "predictivesampling": "hydrax.algs.PredictiveSampling",
-        "predictive_sampling": "hydrax.algs.PredictiveSampling",
-        "ps": "hydrax.algs.PredictiveSampling",
-        "mppi": "hydrax.algs.MPPI",
-        "cem": "hydrax.algs.CEM",
-    }
-    return mapping.get(normalized, name)
 
 
 def get_mjx_model(env: Any) -> Any:
@@ -54,34 +30,15 @@ def make_task(cfg, env: Any) -> Any:
     )
 
 
-def make_risk_strategy(cfg) -> Any | None:
-    risk_target = cfg.agent.get("risk_strategy_target", None)
-    if not risk_target:
-        return None
-    risk_kwargs = dict(cfg.agent.get("risk_strategy_kwargs", {}))
-    return _instantiate(risk_target, **risk_kwargs)
-
-
 def make_controller(cfg, task: Any, *, env: Any | None = None) -> Any:
-    controller_target = cfg.agent.get("controller_target", None)
-    if controller_target is None:
-        controller_target = _resolve_controller_target(
-            cfg.agent.get("controller_name", None)
-        )
-    if not controller_target:
-        raise ValueError(
-            "hydrax_mpc requires cfg.agent.controller_target or controller_name."
-        )
     controller_kwargs = dict(cfg.agent.get("controller_kwargs", {}))
     if "dt" not in controller_kwargs and env is not None:
         env_dt = _get_env_ctrl_dt(env)
         if env_dt is None:
             raise ValueError("Unable to infer controller dt from environment.")
-        controller_kwargs["dt"] = env_dt
-    risk_strategy = make_risk_strategy(cfg)
-    if risk_strategy is not None and "risk_strategy" not in controller_kwargs:
-        controller_kwargs["risk_strategy"] = risk_strategy
-    return _instantiate(controller_target, task, **controller_kwargs)
+        if hasattr(task, "dt"):
+            task.dt = env_dt
+    return MPPI(task, **controller_kwargs)
 
 
 def _get_env_ctrl_dt(env: Any) -> float | None:
