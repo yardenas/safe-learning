@@ -1,10 +1,7 @@
 from importlib import import_module
 from typing import Any
 
-from ss2r.algorithms.hydrax_mpc.task import (
-    MujocoPlaygroundDomainRandomizedTask,
-    MujocoPlaygroundTask,
-)
+from ss2r.algorithms.hydrax_mpc.task import MujocoPlaygroundTask
 
 
 def _import_from_path(target: str) -> Any:
@@ -48,13 +45,7 @@ def make_task(cfg, env: Any) -> Any:
     randomization_cfg = cfg.environment.train_params
     running_cost_scale = cfg.agent.get("running_cost_scale", 1.0)
     terminal_cost_scale = cfg.agent.get("terminal_cost_scale", 0.0)
-    use_randomization = bool(cfg.agent.get("domain_randomization", False))
-    task_cls = (
-        MujocoPlaygroundDomainRandomizedTask
-        if use_randomization
-        else MujocoPlaygroundTask
-    )
-    return task_cls(
+    return MujocoPlaygroundTask(
         env,
         task_name=task_name,
         randomization_cfg=randomization_cfg,
@@ -71,7 +62,7 @@ def make_risk_strategy(cfg) -> Any | None:
     return _instantiate(risk_target, **risk_kwargs)
 
 
-def make_controller(cfg, task: Any) -> Any:
+def make_controller(cfg, task: Any, *, env: Any | None = None) -> Any:
     controller_target = cfg.agent.get("controller_target", None)
     if controller_target is None:
         controller_target = _resolve_controller_target(
@@ -82,7 +73,23 @@ def make_controller(cfg, task: Any) -> Any:
             "hydrax_mpc requires cfg.agent.controller_target or controller_name."
         )
     controller_kwargs = dict(cfg.agent.get("controller_kwargs", {}))
+    if "dt" not in controller_kwargs and env is not None:
+        env_dt = _get_env_ctrl_dt(env)
+        if env_dt is None:
+            raise ValueError("Unable to infer controller dt from environment.")
+        controller_kwargs["dt"] = env_dt
     risk_strategy = make_risk_strategy(cfg)
     if risk_strategy is not None and "risk_strategy" not in controller_kwargs:
         controller_kwargs["risk_strategy"] = risk_strategy
     return _instantiate(controller_target, task, **controller_kwargs)
+
+
+def _get_env_ctrl_dt(env: Any) -> float | None:
+    for attr in ("ctrl_dt", "dt"):
+        value = getattr(env, attr, None)
+        if value is not None:
+            return float(value)
+    cfg = getattr(env, "_config", None)
+    if cfg is not None and getattr(cfg, "ctrl_dt", None) is not None:
+        return float(cfg.ctrl_dt)
+    return None

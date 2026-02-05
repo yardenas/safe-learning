@@ -3,7 +3,7 @@ name = "ss2r"
 version = "0.1.0"
 description = ""
 authors = [{ name = "Yarden", email = "yarden.as@inf.ethz.ch" }]
-requires-python = ">=3.11.6,<4"
+requires-python = ">=3.12,<4"
 readme = "README.md"
 dependencies = [
     "mujoco==3.3.0",

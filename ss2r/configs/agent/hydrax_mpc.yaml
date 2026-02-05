@@ -3,7 +3,6 @@ name: hydrax_mpc
 # Uses mujoco_playground env._get_reward for running cost.
 running_cost_scale: 1.0
 terminal_cost_scale: 0.0
-domain_randomization: false
 
 # Hydrax controller factory (required). Either set controller_target or controller_name.
 # controller_target: hydrax.algs.PredictiveSampling

@@ -126,7 +126,7 @@ def train(
     eval_env = _MjxDataObsWrapper(eval_env)
 
     task = make_task(cfg, environment)
-    controller = make_controller(cfg, task)
+    controller = make_controller(cfg, task, env=environment)
     template_state = environment.reset(jax.random.PRNGKey(seed))
     controller = wrap_controller_with_env(controller, environment, template_state)
     action_low = cfg.agent.get("action_low", None)
