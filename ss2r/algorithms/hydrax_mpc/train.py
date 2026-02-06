@@ -75,7 +75,9 @@ def _action_from_params(
     if not hasattr(state.data, "time"):
         raise ValueError("state.data has no time attribute.")
     t_curr = state.data.time
-    tq = jnp.atleast_1d(jnp.asarray(t_curr))
+    sim_dt = controller.task.dt
+    steps = controller.ctrl_steps
+    tq = jnp.arange(0, steps) * sim_dt + t_curr
     tk = params.tk
     knots = params.mean[None, ...]  # ty:ignore[not-subscriptable]
     us = controller.interp_func(tq, tk, knots)
