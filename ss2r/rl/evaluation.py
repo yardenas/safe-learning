@@ -380,7 +380,9 @@ class Evaluator:
         self._eval_walltime = 0.0
         eval_env = EvalWrapper(eval_env)
 
-        def generate_eval_unroll(policy_params: PolicyParams, key: PRNGKey) -> State:  # type: ignore
+        def generate_eval_unroll(
+            policy_params: PolicyParams, key: PRNGKey
+        ) -> Tuple[State, Transition]:  # type: ignore
             reset_keys = jax.random.split(key, num_eval_envs)
             eval_first_state = eval_env.reset(reset_keys)
             return generate_unroll_state(
@@ -389,7 +391,7 @@ class Evaluator:
                 eval_policy_fn(policy_params),
                 key,
                 unroll_length=episode_length // action_repeat,
-            )[0]
+            )
 
         self._generate_eval_unroll = jax.jit(generate_eval_unroll)
         self._steps_per_unroll = episode_length * num_eval_envs
@@ -403,7 +405,7 @@ class Evaluator:
         self._key, unroll_key = jax.random.split(self._key)
 
         t = time.time()
-        eval_state = self._generate_eval_unroll(policy_params, unroll_key)
+        eval_state, transitions = self._generate_eval_unroll(policy_params, unroll_key)
         eval_metrics = eval_state.info["eval_metrics"]
         eval_metrics.active_episodes.block_until_ready()
         epoch_eval_time = time.time() - t
@@ -423,6 +425,14 @@ class Evaluator:
         metrics["eval/epoch_eval_time"] = epoch_eval_time
         metrics["eval/sps"] = self._steps_per_unroll / epoch_eval_time
         self._eval_walltime = self._eval_walltime + epoch_eval_time
+        if (
+            isinstance(transitions.extras, dict)
+            and "policy_extras" in transitions.extras
+        ):
+            policy_extras = transitions.extras["policy_extras"]
+            if isinstance(policy_extras, dict) and policy_extras:
+                for name, value in policy_extras.items():
+                    metrics[f"eval/{name}"] = jnp.mean(value)
         metrics = {
             "eval/walltime": self._eval_walltime,
             **training_metrics,

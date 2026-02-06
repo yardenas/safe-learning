@@ -22,14 +22,15 @@ def _make_policy(
     def _policy(state: mjx_env.State, rng: jax.Array):
         del rng
         if _is_batched(state):
-            actions, _ = jax.vmap(lambda s, p: _optimize_and_action(controller, s, p))(
-                state, batched_params
-            )
+            actions, _, metrics = jax.vmap(
+                lambda s, p: _optimize_and_action(controller, s, p)
+            )(state, batched_params)
             action = _clip_action(actions, action_low, action_high)
         else:
-            action, _ = _optimize_and_action(controller, state, params)
+            action, _, metrics = _optimize_and_action(controller, state, params)
             action = _clip_action(action, action_low, action_high)
-        return action, {}
+        metrics = jax.tree.map(jnp.mean, metrics)
+        return action, metrics
 
     return _policy
 
@@ -48,10 +49,21 @@ def _tile_params(params: jax.Array, batch_size: int) -> jax.Array:
 
 def _optimize_and_action(
     controller: SamplingBasedController, state: mjx_env.State, params: jax.Array
-) -> tuple[jax.Array, jax.Array]:
-    params_out, _ = controller.optimize(state, params)
+) -> tuple[jax.Array, jax.Array, dict[str, jax.Array]]:
+    params_out, rollouts = controller.optimize(state, params)
     action = _action_from_params(controller, params_out, state)
-    return action, params_out
+    total_cost = jnp.sum(rollouts.costs, axis=-1)
+    mean_cost = jnp.mean(total_cost)
+    min_cost = jnp.min(total_cost)
+    max_cost = jnp.max(total_cost)
+    metrics = {
+        "planner/rollout_cost_mean": mean_cost,
+        "planner/rollout_cost_min": min_cost,
+        "planner/rollout_cost_max": max_cost,
+        "planner/estimated_return": -min_cost,
+        "planner/best_vs_mean_cost": min_cost - mean_cost,
+    }
+    return action, params_out, metrics
 
 
 # TODO (yarden): check that this function is how the hydrax people also do.
