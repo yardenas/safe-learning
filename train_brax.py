@@ -112,8 +112,7 @@ def main(cfg):
     logger = TrainingLogger(cfg)
     train_fn = get_train_fn(cfg)
     if cfg.agent.name == "hydrax_mpc":
-        train_env = benchmark_suites.make_real_env(cfg)
-        eval_env = train_env
+        train_env, eval_env = benchmark_suites.make_real_env(cfg)
         use_vision = False
     else:
         train_env_wrap_fn, eval_env_wrap_fn = benchmark_suites.get_wrap_env_fn(cfg)

@@ -207,7 +207,7 @@ def make(cfg, train_wrap_env_fn=lambda env: env, eval_wrap_env_fn=lambda env: en
 
 
 def make_real_env(cfg):
-    """Builds an unwrapped environment for real-world MPC/planning."""
+    """Builds a real-world MPC/planning train env and a wrapped eval env."""
     domain_name = get_domain_name(cfg)
     if domain_name == "mujoco_playground":
         from ml_collections import config_dict
@@ -215,7 +215,9 @@ def make_real_env(cfg):
 
         task_cfg = get_task_config(cfg)
         task_params = config_dict.ConfigDict(task_cfg.task_params)
-        return registry.load(task_cfg.task_name, config=task_params)
+        train_env = registry.load(task_cfg.task_name, config=task_params)
+        _, eval_env = make_mujoco_playground_envs(cfg, lambda env: env, lambda env: env)
+        return train_env, eval_env
     raise ValueError("make_real_env only supports mujoco_playground domains for MPC.")
 
 

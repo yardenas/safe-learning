@@ -6,7 +6,8 @@ import jax.numpy as jnp
 import numpy as np
 from brax.envs.base import Env, State
 from brax.envs.wrappers.training import EvalMetrics, EvalWrapper
-from brax.training.acting import Evaluator as BraxEvaluator, generate_unroll
+from brax.training.acting import Evaluator as BraxEvaluator
+from brax.training.acting import generate_unroll
 from brax.training.types import Metrics, Policy, PolicyParams, PRNGKey, Transition
 
 from ss2r.algorithms.mbpo.data import generate_safe_unroll
@@ -332,7 +333,7 @@ def actor_step_state(
     actions, policy_extras = policy(env_state, key)
     nstate = env.step(env_state, actions)
     state_extras = {x: nstate.info[x] for x in extra_fields}
-    return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
+    return nstate, Transition(
         observation=env_state.obs,
         action=actions,
         reward=nstate.reward,
@@ -359,9 +360,7 @@ def generate_unroll_state(
         )
         return (nstate, next_key), transition
 
-    (final_state, _), data = jax.lax.scan(
-        f, (env_state, key), (), length=unroll_length
-    )
+    (final_state, _), data = jax.lax.scan(f, (env_state, key), (), length=unroll_length)
     return final_state, data
 
 
