@@ -124,13 +124,33 @@ def train(
     key = jax.random.PRNGKey(seed)
     key, eval_key = jax.random.split(key)
     params = controller.init_params()
-    make_policy = _make_policy(
-        controller,
-        params,
-        action_low,
-        action_high,
-        cfg.training.num_eval_envs,
-    )
+    if cfg.agent.get("debug_random_policy", False):
+        action_size = environment.action_size
+        low = -1.0 if action_low is None else action_low
+        high = 1.0 if action_high is None else action_high
+
+        def make_policy(state: mjx_env.State, rng: jax.Array):
+            if _is_batched(state):
+                batch_size = state.data.qpos.shape[0]
+                keys = jax.random.split(rng, batch_size)
+                actions = jax.vmap(
+                    lambda k: jax.random.uniform(
+                        k, (action_size,), minval=low, maxval=high
+                    )
+                )(keys)
+            else:
+                actions = jax.random.uniform(
+                    rng, (action_size,), minval=low, maxval=high
+                )
+            return actions, {}
+    else:
+        make_policy = _make_policy(
+            controller,
+            params,
+            action_low,
+            action_high,
+            cfg.training.num_eval_envs,
+        )
 
     evaluator = Evaluator(
         eval_env,

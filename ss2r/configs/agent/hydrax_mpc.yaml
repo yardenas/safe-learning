@@ -19,3 +19,6 @@ controller_kwargs:
 # Optional action bounds
 action_low: -1.0
 action_high: 1.0
+
+# Debug: use a random policy instead of MPC
+debug_random_policy: false
