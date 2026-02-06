@@ -137,42 +137,6 @@ def main(cfg):
             eval_env=eval_env,
             progress_fn=functools.partial(report, logger, steps),
         )
-        if cfg.training.render:
-            rng = jax.random.split(
-                jax.random.PRNGKey(cfg.training.seed), cfg.training.num_eval_envs
-            )
-            if cfg.agent.name == "hydrax_mpc":
-                from brax.envs.wrappers import training as brax_training
-
-                from ss2r.algorithms.hydrax_mpc.train import _MjxDataObsWrapper
-
-                render_env = _MjxDataObsWrapper(brax_training.VmapWrapper(eval_env))
-                policy = make_policy
-            else:
-                render_env = eval_env
-                if len(params) != 2:
-                    policy_params = params[:2]
-                else:
-                    policy_params = params
-                policy = make_policy(policy_params, deterministic=True)
-            video = benchmark_suites.render_fns[cfg.environment.task_name](
-                render_env,
-                policy,
-                cfg.training.episode_length,
-                rng,
-            )
-            fps = (
-                1 / cfg.environment.task_params.ctrl_dt
-                if "task_params" in cfg.environment
-                and "ctrl_dt" in cfg.environment.task_params
-                else 30.0
-            )
-            logger.log_video(
-                video,
-                steps.count,
-                "eval/video",
-                fps,
-            )
         if cfg.training.store_checkpoint:
             artifacts = locate_last_checkpoint()
             if artifacts:

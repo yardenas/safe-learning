@@ -1,13 +1,13 @@
 import time
-from typing import Callable
+from typing import Callable, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from brax.envs.base import Env, State
 from brax.envs.wrappers.training import EvalMetrics, EvalWrapper
-from brax.training.acting import Evaluator, generate_unroll
-from brax.training.types import Metrics, Policy, PolicyParams, PRNGKey
+from brax.training.acting import Evaluator as BraxEvaluator, generate_unroll
+from brax.training.types import Metrics, Policy, PolicyParams, PRNGKey, Transition
 
 from ss2r.algorithms.mbpo.data import generate_safe_unroll
 
@@ -131,7 +131,7 @@ class InterventionConstraintEvalWrapper(EvalWrapper):
         return nstate
 
 
-class ConstraintsEvaluator(Evaluator):
+class ConstraintsEvaluator(BraxEvaluator):
     def __init__(
         self,
         eval_env: Env,
@@ -320,3 +320,114 @@ class InterventionConstraintsEvaluator(ConstraintsEvaluator):
             **metrics,
         }
         return metrics
+
+
+def actor_step_state(
+    env: Env,
+    env_state: State,
+    policy: Policy,
+    key: PRNGKey,
+    extra_fields: Sequence[str] = (),
+) -> Tuple[State, Transition]:
+    actions, policy_extras = policy(env_state, key)
+    nstate = env.step(env_state, actions)
+    state_extras = {x: nstate.info[x] for x in extra_fields}
+    return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
+        observation=env_state.obs,
+        action=actions,
+        reward=nstate.reward,
+        discount=1 - nstate.done,
+        next_observation=nstate.obs,
+        extras={"policy_extras": policy_extras, "state_extras": state_extras},
+    )
+
+
+def generate_unroll_state(
+    env: Env,
+    env_state: State,
+    policy: Policy,
+    key: PRNGKey,
+    unroll_length: int,
+    extra_fields: Sequence[str] = (),
+) -> Tuple[State, Transition]:
+    @jax.jit
+    def f(carry, unused_t):
+        state, current_key = carry
+        current_key, next_key = jax.random.split(current_key)
+        nstate, transition = actor_step_state(
+            env, state, policy, current_key, extra_fields=extra_fields
+        )
+        return (nstate, next_key), transition
+
+    (final_state, _), data = jax.lax.scan(
+        f, (env_state, key), (), length=unroll_length
+    )
+    return final_state, data
+
+
+class Evaluator:
+    """State-aware evaluator that passes the full env State to the policy."""
+
+    def __init__(
+        self,
+        eval_env: Env,
+        eval_policy_fn: Callable[[PolicyParams], Policy],  # type: ignore
+        num_eval_envs: int,
+        episode_length: int,
+        action_repeat: int,
+        key: PRNGKey,
+    ):
+        self._key = key
+        self._eval_walltime = 0.0
+        eval_env = EvalWrapper(eval_env)
+
+        def generate_eval_unroll(policy_params: PolicyParams, key: PRNGKey) -> State:  # type: ignore
+            reset_keys = jax.random.split(key, num_eval_envs)
+            eval_first_state = eval_env.reset(reset_keys)
+            return generate_unroll_state(
+                eval_env,
+                eval_first_state,
+                eval_policy_fn(policy_params),
+                key,
+                unroll_length=episode_length // action_repeat,
+            )[0]
+
+        self._generate_eval_unroll = jax.jit(generate_eval_unroll)
+        self._steps_per_unroll = episode_length * num_eval_envs
+
+    def run_evaluation(
+        self,
+        policy_params: PolicyParams,
+        training_metrics: Metrics,
+        aggregate_episodes: bool = True,
+    ) -> Metrics:
+        self._key, unroll_key = jax.random.split(self._key)
+
+        t = time.time()
+        eval_state = self._generate_eval_unroll(policy_params, unroll_key)
+        eval_metrics = eval_state.info["eval_metrics"]
+        eval_metrics.active_episodes.block_until_ready()
+        epoch_eval_time = time.time() - t
+        metrics = {}
+        for fn in [np.mean, np.std]:
+            suffix = "_std" if fn == np.std else ""
+            metrics.update(
+                {
+                    f"eval/episode_{name}{suffix}": (
+                        fn(value) if aggregate_episodes else value  # type: ignore
+                    )
+                    for name, value in eval_metrics.episode_metrics.items()
+                }
+            )
+        metrics["eval/avg_episode_length"] = np.mean(eval_metrics.episode_steps)
+        metrics["eval/std_episode_length"] = np.std(eval_metrics.episode_steps)
+        metrics["eval/epoch_eval_time"] = epoch_eval_time
+        metrics["eval/sps"] = self._steps_per_unroll / epoch_eval_time
+        self._eval_walltime = self._eval_walltime + epoch_eval_time
+        metrics = {
+            "eval/walltime": self._eval_walltime,
+            **training_metrics,
+            **metrics,
+        }
+
+        return metrics  # pytype: disable=bad-return-type  # jax-ndarray
