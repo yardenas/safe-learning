@@ -391,7 +391,9 @@ class Evaluator:
                 unroll_length=episode_length // action_repeat,
             )[0]
 
-        self._generate_eval_unroll = jax.jit(generate_eval_unroll)
+        self._generate_eval_unroll = jax.jit(
+            generate_eval_unroll, donate_argnums=(0,), keep_unused=True
+        )
         self._steps_per_unroll = episode_length * num_eval_envs
 
     def run_evaluation(

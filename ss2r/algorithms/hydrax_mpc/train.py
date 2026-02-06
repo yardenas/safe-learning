@@ -1,9 +1,8 @@
 import jax
 import jax.numpy as jnp
-from brax.envs.wrappers import training as brax_training
+from brax import envs
 from hydrax.alg_base import SamplingBasedController
 from mujoco_playground._src import mjx_env
-from brax import envs
 from omegaconf import DictConfig
 
 from ss2r.algorithms.hydrax_mpc.controller import wrap_controller_for_env_step
@@ -41,7 +40,7 @@ def _is_batched(state: mjx_env.State) -> bool:
 
 
 def _tile_params(params: jax.Array, batch_size: int) -> jax.Array:
-    return jax.tree_map(
+    return jax.tree.map(
         lambda x: jnp.broadcast_to(x, (batch_size,) + x.shape),
         params,
     )
@@ -100,12 +99,10 @@ def train(
     seed: int,
     cfg: DictConfig,
 ):
-    if not eval_env:
-        eval_env = environment
-    eval_env = brax_training.VmapWrapper(eval_env)
-
-    task = make_task(cfg, environment)
-    controller = make_controller(cfg, task, env=environment)
+    task = make_task(cfg, environment)  # ty:ignore[invalid-argument-type]
+    controller = make_controller(
+        cfg, task, env=environment
+    )  # ty:ignore[invalid-argument-type]
     controller = wrap_controller_for_env_step(controller, environment)
     action_low = cfg.agent.get("action_low", None)
     action_high = cfg.agent.get("action_high", None)
