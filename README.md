@@ -113,6 +113,15 @@ If you find our repository useful in your work, please consider citing:
   booktitle={International Conference on Neural Information Processing Systems},
   year={2025},
 }
+
+@inproceedings{
+wendl2026safe,
+title={Safe Exploration via Policy Priors},
+author={Manuel Wendl and Yarden As and Manish Prajapat and Anton Pollak and Stelian Coros and Andreas Krause},
+booktitle={The Fourteenth International Conference on Learning Representations},
+year={2026},
+url={https://openreview.net/forum?id=JC8xYAADHL}
+}
 ```
 
 <!-- ## Learn More
