@@ -217,7 +217,7 @@ def make_real_env(cfg):
         task_params = config_dict.ConfigDict(task_cfg.task_params)
         train_env = registry.load(task_cfg.task_name, config=task_params)
         _, eval_env = make_mujoco_playground_envs(cfg, lambda env: env, lambda env: env)
-        return eval_env, eval_env
+        return train_env, eval_env
     raise ValueError("make_real_env only supports mujoco_playground domains for MPC.")
 
 
