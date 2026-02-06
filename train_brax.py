@@ -17,6 +17,8 @@ _LOG = logging.getLogger(__name__)
 
 def locate_last_checkpoint() -> Path | None:
     ckpt_dir = Path(get_state_path())
+    if not ckpt_dir.exists():
+        return None
     # Get all directories or files that match the 12-digit pattern
     checkpoints = [
         p

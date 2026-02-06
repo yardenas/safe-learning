@@ -19,6 +19,3 @@ controller_kwargs:
 # Optional action bounds
 action_low: -1.0
 action_high: 1.0
-
-# Whether to warm-start controller params across steps
-warm_start: true
