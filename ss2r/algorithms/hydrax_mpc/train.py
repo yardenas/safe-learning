@@ -22,9 +22,16 @@ def _make_policy(
     def _policy(state: mjx_env.State, rng: jax.Array):
         del rng
         if _is_batched(state):
+            current_batch = state.data.qpos.shape[0]
+            params_for_batch = (
+                batched_params
+                if batched_params is not None
+                and getattr(batched_params, "shape", (0,))[0] == current_batch
+                else _tile_params(params, current_batch)
+            )
             actions, _, metrics = jax.vmap(
                 lambda s, p: _optimize_and_action(controller, s, p)
-            )(state, batched_params)
+            )(state, params_for_batch)
             action = _clip_action(actions, action_low, action_high)
         else:
             action, _, metrics = _optimize_and_action(controller, state, params)
