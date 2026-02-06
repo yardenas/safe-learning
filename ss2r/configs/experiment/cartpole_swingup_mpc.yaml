@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - override /environment: cartpole_swingup
+  - override /agent: hydrax_mpc
+  - _self_
+
+training:
+  num_eval_episodes: 1  
+  episode_length: 200
+  train_domain_randomization: false
+  eval_domain_randomization: false
+
+agent:
+  controller_kwargs:
+    spline_type: cubic
+    noise_level: 0.3
