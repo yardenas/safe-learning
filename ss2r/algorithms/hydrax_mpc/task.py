@@ -1,9 +1,10 @@
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 from hydrax.task_base import Task
-from mujoco_playground._src import mjx_env
 from mujoco import mjx
+from mujoco_playground._src import mjx_env
 
 
 class MujocoPlaygroundTask(Task):
