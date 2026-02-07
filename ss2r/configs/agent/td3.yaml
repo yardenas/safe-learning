@@ -1,0 +1,34 @@
+defaults:
+  - data_collection: step
+  - replay_buffer: null
+
+name: td3
+learning_rate: 3e-4
+critic_learning_rate: 3e-4
+discounting: 0.99
+batch_size: 256
+normalize_observations: true
+reward_scaling: 1.0
+tau: 0.005
+min_replay_size: 8192
+max_replay_size: 1000000
+grad_updates_per_step: 512
+policy_delay: 2
+deterministic_eval: true
+policy_hidden_layer_sizes: [128, 128]
+value_hidden_layer_sizes: [512, 512]
+activation: swish
+exploration_noise: 0.1
+policy_noise: 0.2
+noise_clip: 0.5
+n_critics: 2
+n_heads: 1
+use_bro: true
+schedule_lr: false
+init_lr: 0.0
+actor_burnin: 0.0
+actor_wait: 0.0
+critic_burnin: 0.0
+reset_on_eval: true
+store_buffer: false
+load_buffer: false
