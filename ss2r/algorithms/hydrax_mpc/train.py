@@ -81,6 +81,8 @@ def _action_from_params(
         raise ValueError("Hydrax params must expose tk and mean for interpolation.")
     if not hasattr(state.data, "time"):
         raise ValueError("state.data has no time attribute.")
+    # Be careful: this is wrong, hydrax originally plans over continuous-time systems
+    # with knots that coincide with the planning frequency. Below we do something different.
     t_curr = state.data.time
     sim_dt = controller.task.dt
     steps = controller.ctrl_steps
