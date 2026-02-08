@@ -122,7 +122,7 @@ def make_td3_networks(
         n_critics=n_critics,
         n_heads=n_heads,
     )
-    return TD3Networks(
+    return TD3Networks(  # type: ignore
         policy_network=policy_network,
         qr_network=qr_network,
     )
