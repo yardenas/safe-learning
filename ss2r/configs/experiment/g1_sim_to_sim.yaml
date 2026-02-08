@@ -1,7 +1,6 @@
 # @package _global_
 defaults:
   - g1_joystick
-  - override /agent/penalizer: lagrangian
   - _self_
 
 training:
