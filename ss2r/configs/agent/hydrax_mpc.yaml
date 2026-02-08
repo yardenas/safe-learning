@@ -15,8 +15,8 @@ controller_kwargs:
   num_randomizations: 1
   seed: 0
   # Planning horizon in control steps (plan_horizon = horizon * env_dt).
-  horizon: 50
-  spline_type: zero
+  horizon: 100
+  spline_type: cubic
   num_knots: 4
   iterations: 1
 

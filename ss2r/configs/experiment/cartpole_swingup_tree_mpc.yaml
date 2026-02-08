@@ -15,7 +15,6 @@ agent:
   controller_kwargs:
     width: 64
     branch: 4
-    horizon: 25
     gamma: 0.99
     temperature: 0.5
     action_noise_std: 0.3
