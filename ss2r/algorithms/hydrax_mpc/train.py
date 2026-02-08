@@ -165,7 +165,12 @@ def train(
 
     key = jax.random.PRNGKey(seed)
     key, eval_key = jax.random.split(key)
-    params = controller.init_params()
+    base_params = controller.init_params()
+    eval_params = (
+        _tile_params(base_params, cfg.training.num_eval_envs)
+        if cfg.training.num_eval_envs > 1
+        else base_params
+    )
     stateful_policy = _make_stateful_policy(controller, action_low, action_high)
     if cfg.agent.get("debug_random_policy", False):
         action_size = environment.action_size
@@ -193,7 +198,7 @@ def train(
     else:
         make_policy = _make_policy(
             controller,
-            params,
+            base_params,
             action_low,
             action_high,
             cfg.training.num_eval_envs,
@@ -209,6 +214,6 @@ def train(
         key=eval_key,
     )
 
-    metrics = evaluator.run_evaluation(params, training_metrics={})
+    metrics = evaluator.run_evaluation(eval_params, training_metrics={})
     progress_fn(0, metrics)
-    return make_policy, params, metrics
+    return make_policy, base_params, metrics
