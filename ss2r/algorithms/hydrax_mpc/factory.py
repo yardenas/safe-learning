@@ -23,9 +23,21 @@ def make_controller(
     if controller_name == "mppi":
         return MPPI(task, **controller_kwargs)
     if controller_name == "tree":
-        controller_kwargs.pop("spline_type", None)
-        controller_kwargs.pop("num_knots", None)
-        controller_kwargs.pop("num_randomizations", None)
-        controller_kwargs.pop("seed", None)
+        allowed_keys = {
+            "width",
+            "branch",
+            "horizon",
+            "gamma",
+            "temperature",
+            "action_noise_std",
+            "mode",
+            "plan_horizon",
+            "iterations",
+        }
+        controller_kwargs = {
+            key: value
+            for key, value in controller_kwargs.items()
+            if key in allowed_keys
+        }
         return TreeMPC(task, **controller_kwargs)
     raise ValueError(f"Unknown controller_name: {controller_name}")
