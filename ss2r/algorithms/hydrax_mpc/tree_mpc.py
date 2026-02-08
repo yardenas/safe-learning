@@ -114,7 +114,7 @@ class TreeMPC:
         traj_rewards = jnp.zeros((width, horizon), dtype=jnp.float32)
         traj_data = jax.tree.map(
             lambda x: jnp.zeros((width, horizon + 1) + x.shape, dtype=x.dtype),
-            states.data,
+            state.data,
         )
         traj_data = jax.tree.map(lambda t, d: t.at[:, 0].set(d), traj_data, states.data)
 
