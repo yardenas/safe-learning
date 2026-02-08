@@ -1,12 +1,26 @@
 # @package _global_
 defaults:
-  - rccar_hardware
+  - override /environment: rccar_real
   - override /agent/data_collection: episodic
+  - agent: td3
   - _self_
 
+environment:
+  action_delay: 1
+  observation_delay: 0
+  sliding_window: 5
+  dt: 0.03333333
+  sample_init_pose: false
+
 training:
+  num_envs: 1
   num_timesteps: 25000
+  episode_length: 250
+  safe: false
+  train_domain_randomization: false
+  eval_domain_randomization: false
   wandb_id: k4gxyxzj
+  render: false
 
 agent:
   batch_size: 256
