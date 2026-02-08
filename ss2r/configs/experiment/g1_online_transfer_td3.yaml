@@ -1,0 +1,24 @@
+# @package _global_
+defaults:
+  - g1_online
+  - override /agent: td3
+  - override /agent/data_collection: episodic
+  - _self_
+
+training:
+  train_domain_randomization: false
+  eval_domain_randomization: false
+  num_eval_envs: 128
+  render: false
+  num_evals: 25
+  num_timesteps: 150000
+  wandb_id: xz1a0eci
+
+
+environment:
+  task_params:
+    action_scale: 0.4
+
+agent:
+  reset_on_eval: false
+  max_replay_size: 1048576
