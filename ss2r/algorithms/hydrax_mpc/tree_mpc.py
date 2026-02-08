@@ -163,7 +163,7 @@ class TreeMPC:
                     new_knot.reshape(width * branch, act_dim)
                 )
 
-                tq = self._tq[t : t + 1]
+                tq = jax.lax.dynamic_slice(self._tq, (t,), (1,))
                 action_t = self.interp_func(tq, self._tk, exp_knot_actions)[:, 0]
                 next_states = jax.vmap(self.task.env.step)(exp_states, action_t)
                 rewards = next_states.reward
@@ -208,7 +208,7 @@ class TreeMPC:
                 )
 
             def _propagate():
-                tq = self._tq[t : t + 1]
+                tq = jax.lax.dynamic_slice(self._tq, (t,), (1,))
                 action_t = self.interp_func(tq, self._tk, knot_actions)[:, 0]
                 next_states = jax.vmap(self.task.env.step)(states, action_t)
                 rewards = next_states.reward
