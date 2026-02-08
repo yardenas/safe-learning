@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 from hydrax.alg_base import SamplingParams, Trajectory
 from hydrax.utils.spline import get_interp_func
+from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
 from .task import MujocoPlaygroundTask
@@ -51,7 +52,7 @@ def _gather_tree(tree: Any, idx: jax.Array) -> Any:
 
 @dataclass
 class _TreeRollout:
-    traj_data: Any
+    traj_data: mjx.Data
     traj_actions: jax.Array
     traj_rewards: jax.Array
     returns: jax.Array
