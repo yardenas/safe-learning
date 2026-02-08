@@ -1,23 +1,19 @@
-from typing import Any, Optional, Protocol
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 from flax import struct
-from hydrax.alg_base import SamplingParams, Trajectory
-from hydrax.utils.spline import get_interp_func
+from hydrax.alg_base import Trajectory
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
 from .task import MujocoPlaygroundTask
 
 
-class TreeMPCParams(Protocol):
-    mean: jax.Array
-    tk: jax.Array
+@struct.dataclass
+class TreeMPCParams:
+    actions: jax.Array
     rng: jax.Array
-
-    def replace(self, **kwargs: Any) -> "TreeMPCParams":
-        ...
 
 
 def _squash_to_bounds(u: jax.Array, low: jax.Array, high: jax.Array) -> jax.Array:
@@ -82,10 +78,6 @@ class TreeMPC:
         self.horizon = int(horizon)
         self.plan_horizon = float(self.horizon) * self.dt
         self.ctrl_steps = int(self.horizon)
-        # Force zero-order hold with one knot per timestep.
-        self.spline_type = "zero"
-        self.num_knots = int(self.horizon)
-        self.interp_func = get_interp_func("zero")
         self.gamma = float(gamma)
         self.temperature = float(temperature)
         self.action_noise_std = action_noise_std
@@ -100,6 +92,7 @@ class TreeMPC:
         branch = self.branch
         horizon = self.horizon
         act_dim = self.task.u_min.shape[-1]
+        gamma_powers = jnp.ones((horizon,), dtype=jnp.float32)
 
         # Initialize B identical roots
         states = _broadcast_tree(state, width)
@@ -117,7 +110,7 @@ class TreeMPC:
             key, states, returns, traj_data, traj_actions, traj_rewards = carry
             key, k_noise, k_sel = jax.random.split(key, 3)
 
-            mu = jnp.broadcast_to(params.mean[0], (width, act_dim))
+            mu = jnp.broadcast_to(params.actions[t], (width, act_dim))
             eps = jax.random.normal(k_noise, (width, branch, act_dim))
             std = jnp.asarray(self.action_noise_std, dtype=jnp.float32)
             u = mu[:, None, :] + eps * std
@@ -132,10 +125,6 @@ class TreeMPC:
             flat_next_states = jax.vmap(_env_step)(flat_states, flat_actions)
             flat_rewards = flat_next_states.reward
 
-            flat_parent_returns = jnp.repeat(returns, branch, axis=0)
-            flat_new_returns = flat_parent_returns + (self.gamma**t) * flat_rewards
-            scores = flat_new_returns
-
             exp_traj_data = _repeat_tree(traj_data, branch)
             exp_traj_actions = jnp.repeat(traj_actions, branch, axis=0)
             exp_traj_rewards = jnp.repeat(traj_rewards, branch, axis=0)
@@ -148,6 +137,7 @@ class TreeMPC:
                 flat_next_states.data,
             )
 
+            scores = jnp.sum(exp_traj_rewards * gamma_powers[None, :], axis=1)
             if self.mode == "beam":
                 idx = _topk_indices(scores, width)
             elif self.mode == "resample":
@@ -159,10 +149,10 @@ class TreeMPC:
                 raise ValueError(f"Unknown mode={self.mode}. Use 'beam' or 'resample'.")
 
             states = _gather_tree(flat_next_states, idx)
-            returns = flat_new_returns[idx]
             traj_data = _gather_tree(exp_traj_data, idx)
             traj_actions = exp_traj_actions[idx]
             traj_rewards = exp_traj_rewards[idx]
+            returns = jnp.sum(traj_rewards * gamma_powers[None, :], axis=1)
 
             return (key, states, returns, traj_data, traj_actions, traj_rewards), None
 
@@ -178,13 +168,6 @@ class TreeMPC:
         )
 
     def optimize(self, state: mjx_env.State, params: TreeMPCParams):
-        data = state.data
-        if not hasattr(data, "time"):
-            raise ValueError("state.data has no time attribute.")
-
-        new_tk = jnp.linspace(0.0, self.plan_horizon, self.num_knots) + data.time
-        knot_idx = jnp.arange(self.horizon, dtype=jnp.int32)
-
         def _iter_step(carry, _):
             params, rng = carry
             rng, tree_rng = jax.random.split(rng)
@@ -192,8 +175,7 @@ class TreeMPC:
 
             best_idx = jnp.argmax(rollouts.returns)
             best_actions = rollouts.traj_actions[best_idx]
-            best_knots = best_actions[knot_idx]
-            params = params.replace(tk=new_tk, mean=best_knots, rng=rng)
+            params = params.replace(actions=best_actions, rng=rng)
 
             return (params, rng), rollouts
 
@@ -208,7 +190,7 @@ class TreeMPC:
             return self.task.get_trace_sites(x)
 
         trace_sites = jax.vmap(jax.vmap(_trace_sites))(rollouts.traj_data)
-        traj_knots = rollouts.traj_actions[:, knot_idx, :]
+        traj_knots = rollouts.traj_actions
 
         return params, Trajectory(
             controls=rollouts.traj_actions,
@@ -217,8 +199,9 @@ class TreeMPC:
             trace_sites=trace_sites,
         )
 
-    def init_params(self, seed: int = 0) -> SamplingParams:
+    def init_params(self, seed: int = 0) -> TreeMPCParams:
         rng = jax.random.key(seed)
-        mean = jnp.zeros((self.num_knots, self.task.u_min.shape[-1]), dtype=jnp.float32)
-        tk = jnp.linspace(0.0, self.plan_horizon, self.num_knots)
-        return SamplingParams(tk=tk, mean=mean, rng=rng)
+        actions = jnp.zeros(
+            (self.horizon, self.task.u_min.shape[-1]), dtype=jnp.float32
+        )
+        return TreeMPCParams(actions=actions, rng=rng)  # type: ignore

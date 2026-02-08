@@ -68,10 +68,14 @@ def _is_batched(state: mjx_env.State) -> bool:
 
 
 def _params_batch_size(params: jax.Array) -> int:
+    if hasattr(params, "actions"):
+        actions = params.actions
+        return actions.shape[0] if actions.ndim >= 3 else 1
+    if hasattr(params, "mean"):
+        mean = params.mean
+        return mean.shape[0] if mean.ndim >= 3 else 1
     leaf = jax.tree_util.tree_leaves(params)[0]
-    if leaf.ndim >= 3:
-        return leaf.shape[0]
-    return 1
+    return leaf.shape[0] if leaf.ndim >= 3 else 1
 
 
 def _tile_params(params: jax.Array, batch_size: int) -> jax.Array:
@@ -104,8 +108,10 @@ def _optimize_and_action(
 def _action_from_params(
     controller: SamplingBasedController, params: jax.Array, state: mjx_env.State
 ) -> jax.Array:
+    if hasattr(params, "actions"):
+        return params.actions[0]
     if not hasattr(params, "tk") or not hasattr(params, "mean"):
-        raise ValueError("Hydrax params must expose tk and mean for interpolation.")
+        raise ValueError("Hydrax params must expose tk/mean or actions.")
     if not hasattr(state.data, "time"):
         raise ValueError("state.data has no time attribute.")
     # Be careful: this is wrong, hydrax originally plans over continuous-time systems
