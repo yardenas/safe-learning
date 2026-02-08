@@ -1,4 +1,4 @@
-from hydrax.algs import MPPI
+from hydrax.algs import MPPI, PredictiveSampling
 from mujoco_playground._src import mjx_env
 
 from ss2r.algorithms.hydrax_mpc.task import MujocoPlaygroundTask
@@ -17,11 +17,35 @@ def make_task(env: mjx_env.MjxEnv) -> MujocoPlaygroundTask:
 
 def make_controller(
     cfg, task: MujocoPlaygroundTask, *, env: mjx_env.MjxEnv
-) -> MPPI | TreeMPC:
+) -> MPPI | TreeMPC | PredictiveSampling:
     controller_kwargs = dict(cfg.agent.get("controller_kwargs", {}))
     controller_name = cfg.agent.get("controller_name", "mppi")
+    if controller_name in {"mppi", "predictive_sampling", "ps"}:
+        if "horizon" in controller_kwargs and "plan_horizon" not in controller_kwargs:
+            controller_kwargs["plan_horizon"] = (
+                float(controller_kwargs["horizon"]) * task.dt
+            )
+        controller_kwargs.pop("horizon", None)
     if controller_name == "mppi":
         return MPPI(task, **controller_kwargs)
+    if controller_name in {"predictive_sampling", "ps"}:
+        allowed_keys = {
+            "num_samples",
+            "noise_level",
+            "num_randomizations",
+            "risk_strategy",
+            "seed",
+            "plan_horizon",
+            "spline_type",
+            "num_knots",
+            "iterations",
+        }
+        controller_kwargs = {
+            key: value
+            for key, value in controller_kwargs.items()
+            if key in allowed_keys
+        }
+        return PredictiveSampling(task, **controller_kwargs)
     if controller_name == "tree":
         allowed_keys = {
             "width",

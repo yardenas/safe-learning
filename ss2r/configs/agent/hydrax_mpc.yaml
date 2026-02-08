@@ -14,7 +14,8 @@ controller_kwargs:
   temperature: 0.1
   num_randomizations: 1
   seed: 0
-  plan_horizon: 1.0
+  # Planning horizon in control steps (plan_horizon = horizon * env_dt).
+  horizon: 50
   spline_type: zero
   num_knots: 4
   iterations: 1

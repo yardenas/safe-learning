@@ -92,8 +92,6 @@ class TreeMPC:
         branch = self.branch
         horizon = self.horizon
         act_dim = self.task.u_min.shape[-1]
-        gamma_powers = jnp.ones((horizon,), dtype=jnp.float32)
-
         # Initialize B identical roots
         states = _broadcast_tree(state, width)
         returns = jnp.zeros((width,), dtype=jnp.float32)
@@ -137,7 +135,7 @@ class TreeMPC:
                 flat_next_states.data,
             )
 
-            scores = jnp.sum(exp_traj_rewards * gamma_powers[None, :], axis=1)
+            scores = jnp.sum(exp_traj_rewards, axis=1)
             if self.mode == "beam":
                 idx = _topk_indices(scores, width)
             elif self.mode == "resample":
@@ -152,7 +150,7 @@ class TreeMPC:
             traj_data = _gather_tree(exp_traj_data, idx)
             traj_actions = exp_traj_actions[idx]
             traj_rewards = exp_traj_rewards[idx]
-            returns = jnp.sum(traj_rewards * gamma_powers[None, :], axis=1)
+            returns = jnp.sum(traj_rewards, axis=1)
 
             return (key, states, returns, traj_data, traj_actions, traj_rewards), None
 
