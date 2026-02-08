@@ -31,7 +31,6 @@ def make_controller(
             "temperature",
             "action_noise_std",
             "mode",
-            "plan_horizon",
             "iterations",
         }
         controller_kwargs = {

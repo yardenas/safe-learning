@@ -70,7 +70,6 @@ class TreeMPC:
         temperature: float = 1.0,
         action_noise_std: float = 0.3,
         mode: str = "resample",
-        plan_horizon: float = 1.0,
         iterations: int = 1,
     ) -> None:
         self.task = task
@@ -79,12 +78,9 @@ class TreeMPC:
         self.width = int(width)
         self.branch = int(branch)
         if horizon is None:
-            self.plan_horizon = float(plan_horizon)
-            self.horizon = int(round(self.plan_horizon / self.dt))
-        else:
-            self.horizon = int(horizon)
-            # Keep time horizon consistent with discrete rollout length.
-            self.plan_horizon = float(self.horizon) * self.dt
+            raise ValueError("TreeMPC requires horizon to be set explicitly.")
+        self.horizon = int(horizon)
+        self.plan_horizon = float(self.horizon) * self.dt
         self.ctrl_steps = int(self.horizon)
         # Force zero-order hold with one knot per timestep.
         self.spline_type = "zero"
@@ -194,11 +190,7 @@ class TreeMPC:
             rng, tree_rng = jax.random.split(rng)
             rollouts = self._tree_expand(tree_rng, state, params)
 
-            last_data = jax.tree.map(lambda x: x[:, -1, ...], rollouts.traj_data)
-            terminal_cost = jax.vmap(self.task.terminal_cost)(last_data)
-            total_returns = rollouts.returns - terminal_cost
-
-            best_idx = jnp.argmax(total_returns)
+            best_idx = jnp.argmax(rollouts.returns)
             best_actions = rollouts.traj_actions[best_idx]
             best_knots = best_actions[knot_idx]
             params = params.replace(tk=new_tk, mean=best_knots, rng=rng)
@@ -210,11 +202,7 @@ class TreeMPC:
         )
         rollouts = jax.tree.map(lambda x: x[-1], rollouts)
 
-        last_data = jax.tree.map(lambda x: x[:, -1, ...], rollouts.traj_data)
-        terminal_cost = jax.vmap(self.task.terminal_cost)(last_data)
-        costs = jnp.concatenate(
-            [-rollouts.traj_rewards, terminal_cost[:, None]], axis=1
-        )
+        costs = -rollouts.traj_rewards
 
         def _trace_sites(x):
             return self.task.get_trace_sites(x)

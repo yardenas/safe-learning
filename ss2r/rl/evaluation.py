@@ -343,6 +343,31 @@ def actor_step_state(
     )
 
 
+def actor_step_state_with_params(
+    env: Env,
+    env_state: State,
+    policy: Policy,
+    key: PRNGKey,
+    params: PolicyParams,
+    extra_fields: Sequence[str] = (),
+) -> Tuple[State, PolicyParams, Transition]:
+    actions, params_out, policy_extras = policy(env_state, key, params)
+    nstate = env.step(env_state, actions)
+    state_extras = {x: nstate.info[x] for x in extra_fields}
+    return (
+        nstate,
+        params_out,
+        Transition(
+            observation=env_state.obs,
+            action=actions,
+            reward=nstate.reward,
+            discount=1 - nstate.done,
+            next_observation=nstate.obs,
+            extras={"policy_extras": policy_extras, "state_extras": state_extras},
+        ),
+    )
+
+
 def generate_unroll_state(
     env: Env,
     env_state: State,
@@ -362,6 +387,35 @@ def generate_unroll_state(
 
     (final_state, _), data = jax.lax.scan(f, (env_state, key), (), length=unroll_length)
     return final_state, data
+
+
+def generate_unroll_state_with_params(
+    env: Env,
+    env_state: State,
+    policy: Policy,
+    key: PRNGKey,
+    params: PolicyParams,
+    unroll_length: int,
+    extra_fields: Sequence[str] = (),
+) -> Tuple[State, PolicyParams, Transition]:
+    @jax.jit
+    def f(carry, unused_t):
+        state, current_params, current_key = carry
+        current_key, next_key = jax.random.split(current_key)
+        nstate, nparams, transition = actor_step_state_with_params(
+            env,
+            state,
+            policy,
+            current_key,
+            current_params,
+            extra_fields=extra_fields,
+        )
+        return (nstate, nparams, next_key), transition
+
+    (final_state, final_params, _), data = jax.lax.scan(
+        f, (env_state, params, key), (), length=unroll_length
+    )
+    return final_state, final_params, data
 
 
 class Evaluator:
@@ -385,13 +439,15 @@ class Evaluator:
         ) -> Tuple[State, Transition]:  # type: ignore
             reset_keys = jax.random.split(key, num_eval_envs)
             eval_first_state = eval_env.reset(reset_keys)
-            return generate_unroll_state(
+            final_state, _, transitions = generate_unroll_state_with_params(
                 eval_env,
                 eval_first_state,
                 eval_policy_fn(policy_params),
                 key,
+                policy_params,
                 unroll_length=episode_length // action_repeat,
             )
+            return final_state, transitions
 
         self._generate_eval_unroll = jax.jit(generate_eval_unroll)
         self._steps_per_unroll = episode_length * num_eval_envs

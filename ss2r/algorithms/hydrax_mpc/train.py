@@ -10,6 +10,35 @@ from ss2r.algorithms.hydrax_mpc.factory import make_controller, make_task
 from ss2r.rl.evaluation import Evaluator
 
 
+def _make_stateful_policy(
+    controller: SamplingBasedController,
+    action_low: jax.Array | None,
+    action_high: jax.Array | None,
+):
+    def _policy(state: mjx_env.State, rng: jax.Array, params: jax.Array):
+        del rng
+        if _is_batched(state):
+            current_batch = state.data.qpos.shape[0]
+            params_for_batch = (
+                params
+                if _params_batch_size(params) == current_batch
+                else _tile_params(params, current_batch)
+            )
+            actions, params_out, metrics = jax.vmap(
+                lambda s, p: _optimize_and_action(controller, s, p)
+            )(state, params_for_batch)
+            action = _clip_action(actions, action_low, action_high)
+        else:
+            action, params_out, metrics = _optimize_and_action(
+                controller, state, params
+            )
+            action = _clip_action(action, action_low, action_high)
+        metrics = jax.tree.map(jnp.mean, metrics)
+        return action, params_out, metrics
+
+    return _policy
+
+
 def _make_policy(
     controller: SamplingBasedController,
     params: jax.Array,
@@ -18,25 +47,16 @@ def _make_policy(
     batch_size: int | None,
 ):
     batched_params = _tile_params(params, batch_size) if batch_size else None
+    stateful_policy = _make_stateful_policy(controller, action_low, action_high)
 
     def _policy(state: mjx_env.State, rng: jax.Array):
-        del rng
-        if _is_batched(state):
-            current_batch = state.data.qpos.shape[0]
-            params_for_batch = (
-                batched_params
-                if batched_params is not None
-                and getattr(batched_params, "shape", (0,))[0] == current_batch
-                else _tile_params(params, current_batch)
-            )
-            actions, _, metrics = jax.vmap(
-                lambda s, p: _optimize_and_action(controller, s, p)
-            )(state, params_for_batch)
-            action = _clip_action(actions, action_low, action_high)
-        else:
-            action, _, metrics = _optimize_and_action(controller, state, params)
-            action = _clip_action(action, action_low, action_high)
-        metrics = jax.tree.map(jnp.mean, metrics)
+        params_for_batch = (
+            batched_params
+            if batched_params is not None
+            and _params_batch_size(batched_params) == state.data.qpos.shape[0]
+            else params
+        )
+        action, _, metrics = stateful_policy(state, rng, params_for_batch)
         return action, metrics
 
     return _policy
@@ -45,6 +65,13 @@ def _make_policy(
 def _is_batched(state: mjx_env.State) -> bool:
     data = state.data
     return hasattr(data, "qpos") and getattr(data.qpos, "ndim", 0) >= 2
+
+
+def _params_batch_size(params: jax.Array) -> int:
+    leaf = jax.tree_util.tree_leaves(params)[0]
+    if leaf.ndim >= 3:
+        return leaf.shape[0]
+    return 1
 
 
 def _tile_params(params: jax.Array, batch_size: int) -> jax.Array:
@@ -139,6 +166,7 @@ def train(
     key = jax.random.PRNGKey(seed)
     key, eval_key = jax.random.split(key)
     params = controller.init_params()
+    stateful_policy = _make_stateful_policy(controller, action_low, action_high)
     if cfg.agent.get("debug_random_policy", False):
         action_size = environment.action_size
         low = -1.0 if action_low is None else action_low
@@ -158,6 +186,10 @@ def train(
                     rng, (action_size,), minval=low, maxval=high
                 )
             return actions, {}
+
+        def eval_policy(state: mjx_env.State, rng: jax.Array, params: jax.Array):
+            action, _ = make_policy(state, rng)
+            return action, params, {}
     else:
         make_policy = _make_policy(
             controller,
@@ -166,10 +198,11 @@ def train(
             action_high,
             cfg.training.num_eval_envs,
         )
+        eval_policy = stateful_policy
 
     evaluator = Evaluator(
         eval_env,
-        lambda _: make_policy,
+        lambda _: eval_policy,
         num_eval_envs=cfg.training.num_eval_envs,
         episode_length=episode_length,
         action_repeat=cfg.training.action_repeat,
