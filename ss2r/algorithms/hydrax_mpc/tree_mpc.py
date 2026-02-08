@@ -1,10 +1,8 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
 import jax
 import jax.numpy as jnp
+from flax import struct
 from hydrax.alg_base import SamplingParams, Trajectory
 from hydrax.utils.spline import get_interp_func
 from mujoco import mjx
@@ -50,7 +48,7 @@ def _gather_tree(tree: Any, idx: jax.Array) -> Any:
     return jax.tree.map(lambda x: x[idx], tree)
 
 
-@dataclass
+@struct.dataclass
 class _TreeRollout:
     traj_data: mjx.Data
     traj_actions: jax.Array
@@ -176,7 +174,7 @@ class TreeMPC:
         carryN, _ = jax.lax.scan(_step_fn, carry0, jnp.arange(horizon))
         _, states, returns, traj_data, traj_actions, traj_rewards = carryN
 
-        return _TreeRollout(
+        return _TreeRollout(  # type: ignore
             traj_data=traj_data,
             traj_actions=traj_actions,
             traj_rewards=traj_rewards,
