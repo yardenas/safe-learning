@@ -5,11 +5,10 @@ import jax
 import jax.numpy as jnp
 from hydrax.alg_base import SamplingBasedController, Trajectory
 from mujoco_playground._src import mjx_env
-from brax import envs
 
 
 def wrap_controller_for_env_step(
-    controller: SamplingBasedController, env: envs.Env
+    controller: SamplingBasedController, env: mjx_env.MjxEnv
 ) -> SamplingBasedController:
     """Override controller methods to step the environment State."""
 

@@ -126,7 +126,8 @@ def train(
     controller = make_controller(
         cfg, task, env=environment
     )  # ty:ignore[invalid-argument-type]
-    controller = wrap_controller_for_env_step(controller, environment)
+    if not getattr(controller, "uses_env_step", False):
+        controller = wrap_controller_for_env_step(controller, environment)
     action_low = cfg.agent.get("action_low", None)
     action_high = cfg.agent.get("action_high", None)
 

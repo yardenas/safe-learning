@@ -1,5 +1,8 @@
 name: hydrax_mpc
 
+# Controller type: "mppi" or "tree"
+controller_name: mppi
+
 # Uses mujoco_playground env._get_reward for running cost.
 running_cost_scale: 1.0
 terminal_cost_scale: 0.0
