@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - agent: td3
+  - override /agent: td3
   - override /environment: rccar_real
   - override /agent/data_collection: episodic
   - _self_
