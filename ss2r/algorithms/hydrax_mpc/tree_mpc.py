@@ -2,10 +2,8 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from flax import struct
 from hydrax.alg_base import Trajectory
-from hydrax.utils.spline import get_interp_func
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
@@ -59,8 +57,6 @@ class TreeMPC:
         width: int,
         branch: int,
         horizon: Optional[int] = None,
-        num_knots: int = 4,
-        spline_type: str = "zero",
         gamma: float = 0.99,
         temperature: float = 1.0,
         action_noise_std: float = 0.3,
@@ -77,37 +73,12 @@ class TreeMPC:
         self.horizon = int(horizon)
         self.plan_horizon = float(self.horizon) * self.dt
         self.ctrl_steps = int(self.horizon)
-        self.num_knots = int(num_knots)
-        if self.num_knots < 1:
-            raise ValueError("num_knots must be >= 1.")
-        if self.num_knots > self.horizon:
-            raise ValueError("num_knots cannot exceed horizon.")
-        self.spline_type = spline_type
         self.gamma = float(gamma)
         self.temperature = float(temperature)
         self.action_noise_std = action_noise_std
         self.mode = mode
         self.iterations = int(iterations)
         self.uses_env_step = True
-        self.interp_func = get_interp_func(self.spline_type)
-
-        knot_indices = np.round(
-            np.linspace(0, self.horizon - 1, self.num_knots)
-        ).astype(int)
-        knot_indices[0] = 0
-        knot_indices[-1] = self.horizon - 1
-        if np.unique(knot_indices).size != self.num_knots:
-            raise ValueError(
-                "num_knots results in duplicate knot indices; "
-                "reduce num_knots or increase horizon."
-            )
-        self._knot_indices = jnp.asarray(knot_indices, dtype=jnp.int32)
-        knot_id = np.full((self.horizon,), -1, dtype=np.int32)
-        for idx, t in enumerate(knot_indices):
-            knot_id[t] = idx
-        self._knot_id = jnp.asarray(knot_id, dtype=jnp.int32)
-        self._tk = jnp.linspace(0.0, self.plan_horizon, self.num_knots)
-        self._tq = jnp.linspace(self._tk[0], self._tk[-1], self.ctrl_steps)
 
     def _tree_expand(
         self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
@@ -127,124 +98,62 @@ class TreeMPC:
             state.data,
         )
         traj_data = jax.tree.map(lambda t, d: t.at[:, 0].set(d), traj_data, states.data)
-        base_knots = params.actions[self._knot_indices]
-        knot_actions = jnp.broadcast_to(
-            base_knots, (width,) + base_knots.shape
-        )  # (width, num_knots, act_dim)
 
         def _step_fn(carry, t):
-            (
-                key,
-                states,
-                returns,
-                knot_actions,
-                traj_data,
-                traj_actions,
-                traj_rewards,
-            ) = carry
-            knot_id = self._knot_id[t]
+            key, states, returns, traj_data, traj_actions, traj_rewards = carry
+            key, k_noise, k_sel = jax.random.split(key, 3)
 
-            def _expand_at_knot():
-                key_out, k_noise, k_sel = jax.random.split(key, 3)
+            mu = jnp.broadcast_to(params.actions[t], (width, act_dim))
+            eps = jax.random.normal(k_noise, (width, branch, act_dim))
+            std = jnp.asarray(self.action_noise_std, dtype=jnp.float32)
+            u = mu[:, None, :] + eps * std
+            low = jnp.asarray(self.task.u_min, dtype=u.dtype)
+            high = jnp.asarray(self.task.u_max, dtype=u.dtype)
+            actions = jnp.clip(u, low, high)
 
-                mu = knot_actions[:, knot_id, :]
-                eps = jax.random.normal(k_noise, (width, branch, act_dim))
-                std = jnp.asarray(self.action_noise_std, dtype=jnp.float32)
-                new_knot = mu[:, None, :] + eps * std
+            flat_states = _repeat_tree(states, branch)
+            flat_actions = actions.reshape((width * branch, act_dim))
 
-                exp_states = _repeat_tree(states, branch)
-                exp_returns = jnp.repeat(returns, branch, axis=0)
-                exp_knot_actions = jnp.repeat(knot_actions, branch, axis=0)
-                exp_traj_data = _repeat_tree(traj_data, branch)
-                exp_traj_actions = jnp.repeat(traj_actions, branch, axis=0)
-                exp_traj_rewards = jnp.repeat(traj_rewards, branch, axis=0)
+            def _env_step(s, a):
+                return self.task.env.step(s, a)
 
-                exp_knot_actions = exp_knot_actions.at[:, knot_id, :].set(
-                    new_knot.reshape(width * branch, act_dim)
+            flat_next_states = jax.vmap(_env_step)(flat_states, flat_actions)
+            flat_rewards = flat_next_states.reward
+
+            exp_traj_data = _repeat_tree(traj_data, branch)
+            exp_traj_actions = jnp.repeat(traj_actions, branch, axis=0)
+            exp_traj_rewards = jnp.repeat(traj_rewards, branch, axis=0)
+
+            exp_traj_actions = exp_traj_actions.at[:, t, :].set(flat_actions)
+            exp_traj_rewards = exp_traj_rewards.at[:, t].set(flat_rewards)
+            exp_traj_data = jax.tree.map(
+                lambda td, d: td.at[:, t + 1].set(d),
+                exp_traj_data,
+                flat_next_states.data,
+            )
+
+            scores = jnp.sum(exp_traj_rewards, axis=1)
+            if self.mode == "beam":
+                idx = _topk_indices(scores, width)
+            elif self.mode == "resample":
+                w = _softmax(scores / self.temperature, axis=0).squeeze()
+                idx = jax.random.choice(
+                    k_sel, scores.shape[0], shape=(width,), p=w, replace=True
                 )
+            else:
+                raise ValueError(f"Unknown mode={self.mode}. Use 'beam' or 'resample'.")
 
-                tq = jax.lax.dynamic_slice(self._tq, (t,), (1,))
-                action_t = self.interp_func(tq, self._tk, exp_knot_actions)[:, 0]
-                next_states = jax.vmap(self.task.env.step)(exp_states, action_t)
-                rewards = next_states.reward
+            states = _gather_tree(flat_next_states, idx)
+            traj_data = _gather_tree(exp_traj_data, idx)
+            traj_actions = exp_traj_actions[idx]
+            traj_rewards = exp_traj_rewards[idx]
+            returns = jnp.sum(traj_rewards, axis=1)
 
-                exp_returns = exp_returns + rewards
-                exp_traj_actions = exp_traj_actions.at[:, t, :].set(action_t)
-                exp_traj_rewards = exp_traj_rewards.at[:, t].set(rewards)
-                exp_traj_data = jax.tree.map(
-                    lambda td, d: td.at[:, t + 1].set(d),
-                    exp_traj_data,
-                    next_states.data,
-                )
+            return (key, states, returns, traj_data, traj_actions, traj_rewards), None
 
-                scores = exp_returns
-                if self.mode == "beam":
-                    idx = _topk_indices(scores, width)
-                elif self.mode == "resample":
-                    w = _softmax(scores / self.temperature, axis=0).squeeze()
-                    idx = jax.random.choice(
-                        k_sel, scores.shape[0], shape=(width,), p=w, replace=True
-                    )
-                else:
-                    raise ValueError(
-                        f"Unknown mode={self.mode}. Use 'beam' or 'resample'."
-                    )
-
-                states_out = _gather_tree(next_states, idx)
-                returns_out = exp_returns[idx]
-                knot_actions_out = exp_knot_actions[idx]
-                traj_data_out = _gather_tree(exp_traj_data, idx)
-                traj_actions_out = exp_traj_actions[idx]
-                traj_rewards_out = exp_traj_rewards[idx]
-
-                return (
-                    key_out,
-                    states_out,
-                    returns_out,
-                    knot_actions_out,
-                    traj_data_out,
-                    traj_actions_out,
-                    traj_rewards_out,
-                )
-
-            def _propagate():
-                tq = jax.lax.dynamic_slice(self._tq, (t,), (1,))
-                action_t = self.interp_func(tq, self._tk, knot_actions)[:, 0]
-                next_states = jax.vmap(self.task.env.step)(states, action_t)
-                rewards = next_states.reward
-
-                returns_out = returns + rewards
-                traj_actions_out = traj_actions.at[:, t, :].set(action_t)
-                traj_rewards_out = traj_rewards.at[:, t].set(rewards)
-                traj_data_out = jax.tree.map(
-                    lambda td, d: td.at[:, t + 1].set(d),
-                    traj_data,
-                    next_states.data,
-                )
-                return (
-                    key,
-                    next_states,
-                    returns_out,
-                    knot_actions,
-                    traj_data_out,
-                    traj_actions_out,
-                    traj_rewards_out,
-                )
-
-            out = jax.lax.cond(knot_id >= 0, _expand_at_knot, _propagate)
-            return out, None
-
-        carry0 = (
-            key,
-            states,
-            returns,
-            knot_actions,
-            traj_data,
-            traj_actions,
-            traj_rewards,
-        )
+        carry0 = (key, states, returns, traj_data, traj_actions, traj_rewards)
         carryN, _ = jax.lax.scan(_step_fn, carry0, jnp.arange(horizon))
-        _, states, returns, _, traj_data, traj_actions, traj_rewards = carryN
+        _, states, returns, traj_data, traj_actions, traj_rewards = carryN
 
         return _TreeRollout(  # type: ignore
             traj_data=traj_data,

@@ -51,8 +51,6 @@ def make_controller(
             "width",
             "branch",
             "horizon",
-            "num_knots",
-            "spline_type",
             "gamma",
             "temperature",
             "action_noise_std",
