@@ -2,7 +2,6 @@
 defaults:
   - g1_joystick
   - override /agent/data_collection: hardware
-  - override /agent/penalizer: lagrangian
   - _self_
 
 training:

@@ -1,0 +1,25 @@
+# @package _global_
+defaults:
+  - override /environment: cartpole_swingup
+  - override /agent: hydrax_mpc
+  - _self_
+
+training:
+  num_eval_episodes: 1  
+  episode_length: 200
+  train_domain_randomization: false
+  eval_domain_randomization: false
+
+agent:
+  controller_name: tree
+  controller_kwargs:
+    width: 64
+    branch: 4
+    horizon: 25
+    gamma: 0.99
+    temperature: 0.5
+    action_noise_std: 0.3
+    mode: beam
+    num_randomizations: 1
+    seed: 0
+    iterations: 1

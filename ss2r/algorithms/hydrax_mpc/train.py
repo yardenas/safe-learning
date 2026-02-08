@@ -122,12 +122,17 @@ def train(
     seed: int,
     cfg: DictConfig,
 ):
-    task = make_task(cfg, environment)  # ty:ignore[invalid-argument-type]
+    task = make_task(environment)  # ty:ignore[invalid-argument-type]
     controller = make_controller(
-        cfg, task, env=environment
-    )  # ty:ignore[invalid-argument-type]
+        cfg,
+        task,
+        env=environment,  # ty:ignore[invalid-argument-type]
+    )
     if not getattr(controller, "uses_env_step", False):
-        controller = wrap_controller_for_env_step(controller, environment)
+        controller = wrap_controller_for_env_step(
+            controller,
+            environment,  # ty:ignore[invalid-argument-type]
+        )
     action_low = cfg.agent.get("action_low", None)
     action_high = cfg.agent.get("action_high", None)
 

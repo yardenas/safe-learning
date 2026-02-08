@@ -5,21 +5,13 @@ from ss2r.algorithms.hydrax_mpc.task import MujocoPlaygroundTask
 from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPC
 
 
-def make_task(cfg, env: mjx_env.MjxEnv) -> MujocoPlaygroundTask:
-    task_name = cfg.environment.task_name
-    randomization_cfg = cfg.environment.train_params
-    running_cost_scale = cfg.agent.get("running_cost_scale", 1.0)
-    terminal_cost_scale = cfg.agent.get("terminal_cost_scale", 0.0)
+def make_task(env: mjx_env.MjxEnv) -> MujocoPlaygroundTask:
     env_dt = env._ctrl_dt
     if env_dt is None:
         raise ValueError("Unable to infer controller dt from environment.")
     return MujocoPlaygroundTask(
         env,
         env_dt,
-        task_name=task_name,
-        randomization_cfg=randomization_cfg,
-        running_cost_scale=running_cost_scale,
-        terminal_cost_scale=terminal_cost_scale,
     )
 
 
@@ -31,5 +23,7 @@ def make_controller(
     if controller_name == "mppi":
         return MPPI(task, **controller_kwargs)
     if controller_name == "tree":
+        controller_kwargs.pop("spline_type", None)
+        controller_kwargs.pop("num_knots", None)
         return TreeMPC(task, **controller_kwargs)
     raise ValueError(f"Unknown controller_name: {controller_name}")

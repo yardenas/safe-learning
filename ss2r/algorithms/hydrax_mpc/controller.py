@@ -18,10 +18,7 @@ def wrap_controller_for_env_step(
         state = state_payload
 
         def _scan_fn(x_state: mjx_env.State, u: jax.Array):
-            x_state = env.step(
-                x_state,  # ty:ignore[invalid-argument-type]
-                u,
-            )  # ty:ignore[invalid-assignment]
+            x_state = env.step(x_state, u)
             cost = -x_state.reward
             sites = controller.task.get_trace_sites(x_state.data)
             return x_state, (x_state.data, cost, sites)
