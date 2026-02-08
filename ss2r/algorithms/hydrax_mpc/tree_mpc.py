@@ -167,7 +167,7 @@ class TreeMPC:
             flat_actions_t = jnp.swapaxes(flat_actions, 0, 1)
 
             def _env_step(s, a):
-                s = self.task.env.step(s, a)
+                s = jax.vmap(lambda ss, aa: self.task.env.step(ss, aa))(s, a)
                 return s, (s.data, s.reward)
 
             flat_next_states, (seg_data, seg_rewards) = jax.lax.scan(
