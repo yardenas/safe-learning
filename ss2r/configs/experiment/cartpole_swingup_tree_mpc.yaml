@@ -20,6 +20,4 @@ agent:
     temperature: 0.5
     action_noise_std: 0.3
     mode: beam
-    num_randomizations: 1
-    seed: 0
     iterations: 1

@@ -25,5 +25,7 @@ def make_controller(
     if controller_name == "tree":
         controller_kwargs.pop("spline_type", None)
         controller_kwargs.pop("num_knots", None)
+        controller_kwargs.pop("num_randomizations", None)
+        controller_kwargs.pop("seed", None)
         return TreeMPC(task, **controller_kwargs)
     raise ValueError(f"Unknown controller_name: {controller_name}")

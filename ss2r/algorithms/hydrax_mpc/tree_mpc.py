@@ -5,7 +5,8 @@ from typing import Any, Optional, Protocol
 
 import jax
 import jax.numpy as jnp
-from hydrax.alg_base import SamplingBasedController, Trajectory
+from hydrax.alg_base import SamplingParams, Trajectory
+from hydrax.utils.spline import get_interp_func
 from mujoco_playground._src import mjx_env
 
 from .task import MujocoPlaygroundTask
@@ -56,7 +57,7 @@ class _TreeRollout:
     returns: jax.Array
 
 
-class TreeMPC(SamplingBasedController):
+class TreeMPC:
     """Tree expansion planner with MPPI-style resampling."""
 
     def __init__(
@@ -70,37 +71,31 @@ class TreeMPC(SamplingBasedController):
         temperature: float = 1.0,
         action_noise_std: float = 0.3,
         mode: str = "resample",
-        num_randomizations: int = 1,
-        risk_strategy: Any = None,
-        seed: int = 0,
         plan_horizon: float = 1.0,
         iterations: int = 1,
     ) -> None:
-        derived_plan_horizon = (
-            float(horizon) * float(task.dt) if horizon is not None else plan_horizon
-        )
-        super().__init__(
-            task,
-            num_randomizations=num_randomizations,
-            risk_strategy=risk_strategy,
-            seed=seed,
-            plan_horizon=derived_plan_horizon,
-            spline_type="zero",
-            num_knots=1,
-            iterations=iterations,
-        )
+        self.task = task
+        self.dt = float(self.task.dt)
+
         self.width = int(width)
         self.branch = int(branch)
-        self.horizon = int(horizon) if horizon is not None else int(self.ctrl_steps)
-        # Keep time horizon consistent with discrete rollout length.
-        self.plan_horizon = float(self.horizon) * float(self.task.dt)
+        if horizon is None:
+            self.plan_horizon = float(plan_horizon)
+            self.horizon = int(round(self.plan_horizon / self.dt))
+        else:
+            self.horizon = int(horizon)
+            # Keep time horizon consistent with discrete rollout length.
+            self.plan_horizon = float(self.horizon) * self.dt
+        self.ctrl_steps = int(self.horizon)
         # Force zero-order hold with one knot per timestep.
         self.spline_type = "zero"
         self.num_knots = int(self.horizon)
+        self.interp_func = get_interp_func("zero")
         self.gamma = float(gamma)
         self.temperature = float(temperature)
         self.action_noise_std = action_noise_std
         self.mode = mode
+        self.iterations = int(iterations)
         self.uses_env_step = True
 
     def _tree_expand(
@@ -234,3 +229,9 @@ class TreeMPC(SamplingBasedController):
             costs=costs,
             trace_sites=trace_sites,
         )
+
+    def init_params(self, seed: int = 0) -> SamplingParams:
+        rng = jax.random.key(seed)
+        mean = jnp.zeros((self.num_knots, self.task.u_min.shape[-1]), dtype=jnp.float32)
+        tk = jnp.linspace(0.0, self.plan_horizon, self.num_knots)
+        return SamplingParams(tk=tk, mean=mean, rng=rng)
