@@ -16,6 +16,11 @@ class TreeMPCParams:
     rng: jax.Array
 
 
+def _squash_to_bounds(u: jax.Array, low: jax.Array, high: jax.Array) -> jax.Array:
+    z = jnp.tanh(u)
+    return low + 0.5 * (z + 1.0) * (high - low)
+
+
 def _softmax(x: jax.Array, axis: int = -1) -> jax.Array:
     x = x - jnp.max(x, axis=axis, keepdims=True)
     ex = jnp.exp(x)
@@ -107,9 +112,7 @@ class TreeMPC:
             eps = jax.random.normal(k_noise, (width, branch, act_dim))
             std = jnp.asarray(self.action_noise_std, dtype=jnp.float32)
             u = mu[:, None, :] + eps * std
-            low = jnp.asarray(self.task.u_min, dtype=u.dtype)
-            high = jnp.asarray(self.task.u_max, dtype=u.dtype)
-            actions = jnp.clip(u, low, high)
+            actions = _squash_to_bounds(u, self.task.u_min, self.task.u_max)
 
             flat_states = _repeat_tree(states, branch)
             flat_actions = actions.reshape((width * branch, act_dim))
