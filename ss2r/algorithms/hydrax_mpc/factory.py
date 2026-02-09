@@ -102,6 +102,7 @@ def make_controller(
             "policy_noise_std",
             "gae_lambda",
             "policy_action_only",
+            "use_policy",
             "normalize_observations",
             "policy_hidden_layer_sizes",
             "value_hidden_layer_sizes",

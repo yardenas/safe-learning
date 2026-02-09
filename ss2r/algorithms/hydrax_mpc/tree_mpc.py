@@ -56,6 +56,7 @@ class TreeMPC:
         policy_noise_std: float = 0.05,
         gae_lambda: float = 0.0,
         policy_action_only: bool = False,
+        use_policy: bool = True,
         normalize_observations: bool = True,
         policy_hidden_layer_sizes: Sequence[int] = (256, 256, 256),
         value_hidden_layer_sizes: Sequence[int] = (512, 512),
@@ -91,6 +92,7 @@ class TreeMPC:
         self.policy_noise_std = float(policy_noise_std)
         self.gae_lambda = float(gae_lambda)
         self.policy_action_only = bool(policy_action_only)
+        self.use_policy = bool(use_policy)
 
         self._policy_params = None
         self._qr_params = None
@@ -100,25 +102,26 @@ class TreeMPC:
         self._n_heads = int(n_heads)
         self._normalize_observations = bool(normalize_observations)
 
-        if policy_checkpoint_path is not None:
-            self._load_policy_and_critic(
-                policy_checkpoint_path,
-                policy_hidden_layer_sizes=policy_hidden_layer_sizes,
-                value_hidden_layer_sizes=value_hidden_layer_sizes,
-                activation=activation,
-                use_bro=use_bro,
-                policy_obs_key=policy_obs_key,
-                value_obs_key=value_obs_key,
-            )
-        else:
-            self._init_policy_and_critic(
-                policy_hidden_layer_sizes=policy_hidden_layer_sizes,
-                value_hidden_layer_sizes=value_hidden_layer_sizes,
-                activation=activation,
-                use_bro=use_bro,
-                policy_obs_key=policy_obs_key,
-                value_obs_key=value_obs_key,
-            )
+        if self.use_policy:
+            if policy_checkpoint_path is not None:
+                self._load_policy_and_critic(
+                    policy_checkpoint_path,
+                    policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+                    value_hidden_layer_sizes=value_hidden_layer_sizes,
+                    activation=activation,
+                    use_bro=use_bro,
+                    policy_obs_key=policy_obs_key,
+                    value_obs_key=value_obs_key,
+                )
+            else:
+                self._init_policy_and_critic(
+                    policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+                    value_hidden_layer_sizes=value_hidden_layer_sizes,
+                    activation=activation,
+                    use_bro=use_bro,
+                    policy_obs_key=policy_obs_key,
+                    value_obs_key=value_obs_key,
+                )
 
     def _init_policy_and_critic(
         self,
