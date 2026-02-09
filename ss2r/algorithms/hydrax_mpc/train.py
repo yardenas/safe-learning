@@ -154,12 +154,14 @@ def train(
     episode_length: int,
     seed: int,
     cfg: DictConfig,
+    policy_checkpoint_path: str | None = None,
 ):
     task = make_task(environment)  # ty:ignore[invalid-argument-type]
     controller = make_controller(
         cfg,
         task,
         env=environment,  # ty:ignore[invalid-argument-type]
+        policy_checkpoint_path=policy_checkpoint_path,
     )
     if not getattr(controller, "uses_env_step", False):
         controller = wrap_controller_for_env_step(

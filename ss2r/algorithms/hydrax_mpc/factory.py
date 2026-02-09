@@ -16,8 +16,13 @@ def make_task(env: mjx_env.MjxEnv) -> MujocoPlaygroundTask:
 
 
 def make_controller(
-    cfg, task: MujocoPlaygroundTask, *, env: mjx_env.MjxEnv
+    cfg,
+    task: MujocoPlaygroundTask,
+    *,
+    env: mjx_env.MjxEnv | None = None,
+    policy_checkpoint_path: str | None = None,
 ) -> MPPI | TreeMPC | PredictiveSampling:
+    del env
     controller_kwargs = dict(cfg.agent.get("controller_kwargs", {}))
     controller_name = cfg.agent.get("controller_name", "mppi")
     if controller_name in {"mppi", "predictive_sampling", "ps"}:
@@ -74,5 +79,7 @@ def make_controller(
             for key, value in controller_kwargs.items()
             if key in allowed_keys
         }
+        if policy_checkpoint_path is not None:
+            controller_kwargs["policy_checkpoint_path"] = policy_checkpoint_path
         return TreeMPC(task, **controller_kwargs)
     raise ValueError(f"Unknown controller_name: {controller_name}")
