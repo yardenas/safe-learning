@@ -233,16 +233,10 @@ class TreeMPC:
         def _step_fn(carry, t):
             key, states, returns, traj_data, traj_actions, traj_rewards = carry
             if self._has_policy():
-                key, k_policy, k_noise, k_value, k_sel = jax.random.split(key, 5)
+                key, k_policy, k_value, k_sel = jax.random.split(key, 4)
                 obs = states.obs
                 obs_flat = _repeat_tree(obs, branch)
                 flat_actions = self._sample_policy_actions(obs_flat, k_policy)
-                if self.policy_noise_std > 0.0:
-                    flat_actions = (
-                        flat_actions
-                        + jax.random.normal(k_noise, flat_actions.shape)
-                        * self.policy_noise_std
-                    )
                 flat_actions = jnp.clip(flat_actions, self.task.u_min, self.task.u_max)
                 actions = flat_actions.reshape((width, branch, act_dim))
             else:
@@ -298,7 +292,7 @@ class TreeMPC:
                 traj_data = _gather_tree(exp_traj_data, idx)
                 traj_actions = exp_traj_actions[idx]
                 traj_rewards = exp_traj_rewards[idx]
-                returns = exp_returns[idx]
+                returns = exp_scores[idx]
             elif self.mode == "resample":
                 w = _softmax(exp_scores / self.temperature, axis=0).squeeze()
                 idx = jax.random.choice(
@@ -308,7 +302,7 @@ class TreeMPC:
                 traj_data = _gather_tree(exp_traj_data, idx)
                 traj_actions = exp_traj_actions[idx]
                 traj_rewards = exp_traj_rewards[idx]
-                returns = exp_returns[idx]
+                returns = exp_scores[idx]
             elif self.mode in {"myopic", "per_parent"}:
                 per_parent_scores = exp_scores.reshape((width, branch))
                 per_parent_idx = jnp.argmax(per_parent_scores, axis=1)
@@ -331,9 +325,7 @@ class TreeMPC:
                     ),
                     per_parent_idx,
                 )
-                returns = exp_returns.reshape((width, branch))[
-                    jnp.arange(width), per_parent_idx
-                ]
+                returns = per_parent_scores[jnp.arange(width), per_parent_idx]
             else:
                 raise ValueError(
                     f"Unknown mode={self.mode}. Use 'beam', 'resample', or 'myopic'."
