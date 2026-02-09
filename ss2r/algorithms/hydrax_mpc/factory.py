@@ -32,7 +32,43 @@ def make_controller(
             )
         controller_kwargs.pop("horizon", None)
     if controller_name == "mppi":
-        return MPPI(task, **controller_kwargs)
+        policy_prior_cfg = {}
+        policy_prior_keys = {
+            "normalize_observations",
+            "policy_hidden_layer_sizes",
+            "value_hidden_layer_sizes",
+            "activation",
+            "use_bro",
+            "n_critics",
+            "n_heads",
+            "policy_obs_key",
+            "value_obs_key",
+        }
+        for key in list(controller_kwargs.keys()):
+            if key in policy_prior_keys:
+                policy_prior_cfg[key] = controller_kwargs.pop(key)
+        controller = MPPI(task, **controller_kwargs)
+        if policy_checkpoint_path is not None:
+            policy_prior_cfg = {
+                "checkpoint_path": policy_checkpoint_path,
+                "normalize_observations": policy_prior_cfg.get(
+                    "normalize_observations", True
+                ),
+                "policy_hidden_layer_sizes": policy_prior_cfg.get(
+                    "policy_hidden_layer_sizes", (256, 256, 256)
+                ),
+                "value_hidden_layer_sizes": policy_prior_cfg.get(
+                    "value_hidden_layer_sizes", (512, 512)
+                ),
+                "activation": policy_prior_cfg.get("activation", "swish"),
+                "use_bro": policy_prior_cfg.get("use_bro", True),
+                "n_critics": policy_prior_cfg.get("n_critics", 2),
+                "n_heads": policy_prior_cfg.get("n_heads", 1),
+                "policy_obs_key": policy_prior_cfg.get("policy_obs_key", "state"),
+                "value_obs_key": policy_prior_cfg.get("value_obs_key", "state"),
+            }
+            controller._policy_prior_cfg = policy_prior_cfg
+        return controller
     if controller_name in {"predictive_sampling", "ps"}:
         allowed_keys = {
             "num_samples",

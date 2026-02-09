@@ -2,15 +2,99 @@ from functools import partial
 from typing import Any
 
 import jax
+import jax.nn as jnn
 import jax.numpy as jnp
+from brax.training.acme import running_statistics
+from brax.training.agents.sac import checkpoint as sac_checkpoint
 from hydrax.alg_base import SamplingBasedController, Trajectory
 from mujoco_playground._src import mjx_env
+
+from ss2r.algorithms.sac import networks as sac_networks
+
+
+class PolicyPrior:
+    def __init__(
+        self,
+        *,
+        env: mjx_env.MjxEnv,
+        checkpoint_path: str,
+        normalize_observations: bool = True,
+        policy_hidden_layer_sizes: tuple[int, ...] = (256, 256, 256),
+        value_hidden_layer_sizes: tuple[int, ...] = (512, 512),
+        activation: str = "swish",
+        use_bro: bool = True,
+        n_critics: int = 2,
+        n_heads: int = 1,
+        policy_obs_key: str = "state",
+        value_obs_key: str = "state",
+    ) -> None:
+        self._env = env
+        params = sac_checkpoint.load(checkpoint_path)
+        self._normalizer_params = params[0]
+        self._policy_params = params[1]
+
+        obs_size = env.observation_size
+        action_size = env.action_size
+        preprocess_fn = (
+            running_statistics.normalize if normalize_observations else (lambda x, y: x)
+        )
+        activation_fn = getattr(jnn, activation)
+        self._sac_network = sac_networks.make_sac_networks(  # type: ignore
+            observation_size=obs_size,
+            action_size=action_size,
+            preprocess_observations_fn=preprocess_fn,  # ty:ignore[invalid-argument-type]
+            policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+            value_hidden_layer_sizes=value_hidden_layer_sizes,
+            activation=activation_fn,
+            use_bro=use_bro,
+            n_critics=n_critics,
+            n_heads=n_heads,
+            policy_obs_key=policy_obs_key,
+            value_obs_key=value_obs_key,
+        )
+
+    def _sample_policy_action(self, obs: Any, key: jax.Array) -> jax.Array:
+        dist_params = self._sac_network.policy_network.apply(
+            self._normalizer_params,
+            self._policy_params,
+            obs,
+        )
+        dist = self._sac_network.parametric_action_distribution
+        return dist.sample(dist_params, key)
+
+    def prior_knots(
+        self,
+        state: mjx_env.State,
+        controller: SamplingBasedController,
+        key: jax.Array,
+    ) -> jax.Array:
+        def _scan_fn(carry, _):
+            s, k = carry
+            k, sub = jax.random.split(k)
+            action = self._sample_policy_action(s.obs, sub)
+            action = jnp.clip(action, controller.task.u_min, controller.task.u_max)
+            next_state = self._env.step(s, action)
+            return (next_state, k), action
+
+        (_, _), actions = jax.lax.scan(
+            _scan_fn, (state, key), (), length=controller.ctrl_steps
+        )
+        if controller.num_knots == 1:
+            knot_idx = jnp.asarray([0], dtype=jnp.int32)
+        else:
+            knot_idx = jnp.round(
+                jnp.linspace(0, controller.ctrl_steps - 1, controller.num_knots)
+            ).astype(jnp.int32)
+        return actions[knot_idx]
 
 
 def wrap_controller_for_env_step(
     controller: SamplingBasedController, env: mjx_env.MjxEnv
 ) -> SamplingBasedController:
     """Override controller methods to step the environment State."""
+    policy_prior_cfg = getattr(controller, "_policy_prior_cfg", None)
+    if policy_prior_cfg is not None and not hasattr(controller, "_policy_prior"):
+        controller._policy_prior = PolicyPrior(env=env, **policy_prior_cfg)
 
     @partial(jax.vmap, in_axes=(None, None, 0, 0))
     def eval_rollouts(model, state_payload, controls, knots):
@@ -48,7 +132,13 @@ def wrap_controller_for_env_step(
             jnp.linspace(0.0, controller.plan_horizon, controller.num_knots) + data.time
         )
         new_mean = controller.interp_func(new_tk, tk, params.mean[None, ...])[0]
-        params = params.replace(tk=new_tk, mean=new_mean)
+        policy_prior = getattr(controller, "_policy_prior", None)
+        if policy_prior is not None:
+            rng, prior_rng = jax.random.split(params.rng)
+            prior_knots = policy_prior.prior_knots(state_payload, controller, prior_rng)
+            params = params.replace(tk=new_tk, mean=prior_knots, rng=rng)
+        else:
+            params = params.replace(tk=new_tk, mean=new_mean)
 
         def _optimize_scan_body(params: Any, _: Any):
             knots, params = controller.sample_knots(params)
