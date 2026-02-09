@@ -85,7 +85,7 @@ class TreeMPC:
         policy_checkpoint_path: str | None = None,
         policy_noise_std: float = 0.05,
         td_lambda: float = 0.0,
-        normalize_observations: bool = False,
+        normalize_observations: bool = True,
         policy_hidden_layer_sizes: Sequence[int] = (256, 256, 256),
         value_hidden_layer_sizes: Sequence[int] = (512, 512),
         activation: str = "swish",
