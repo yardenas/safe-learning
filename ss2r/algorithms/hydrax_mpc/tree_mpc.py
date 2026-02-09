@@ -57,6 +57,7 @@ class TreeMPC:
         gae_lambda: float = 0.0,
         policy_action_only: bool = False,
         use_policy: bool = True,
+        resample_every: int = 1,
         normalize_observations: bool = True,
         policy_hidden_layer_sizes: Sequence[int] = (256, 256, 256),
         value_hidden_layer_sizes: Sequence[int] = (512, 512),
@@ -93,6 +94,7 @@ class TreeMPC:
         self.gae_lambda = float(gae_lambda)
         self.policy_action_only = bool(policy_action_only)
         self.use_policy = bool(use_policy)
+        self.resample_every = int(resample_every)
 
         self._policy_params = None
         self._qr_params = None
@@ -276,12 +278,13 @@ class TreeMPC:
                 gae_trace,
                 value_start,
             ) = carry
+            key, k_sel = jax.random.split(key)
             if self._has_policy():
-                key, k_policy, k_value, k_sel = jax.random.split(key, 4)
+                key, k_policy, k_value = jax.random.split(key, 3)
                 actions = self._sample_policy_actions(states.obs, k_policy)
                 actions = jnp.clip(actions, self.task.u_min, self.task.u_max)
             else:
-                key, k_noise, k_sel = jax.random.split(key, 3)
+                key, k_noise = jax.random.split(key, 2)
                 mu = jnp.broadcast_to(params.actions[t], (num_particles, act_dim))
                 eps = jax.random.normal(k_noise, (num_particles, act_dim))
                 std = jnp.asarray(self.action_noise_std, dtype=jnp.float32)
@@ -315,19 +318,76 @@ class TreeMPC:
                 value_start = jnp.where(t == 0, value_s, value_start)
                 advantage = gae_trace
             else:
-                advantage = rewards
+                advantage = returns
 
-            weights = jnn.softmax(advantage / self.temperature, axis=0)
-            idx = jax.random.choice(
-                k_sel, num_particles, shape=(num_particles,), p=weights, replace=True
+            if self._has_policy():
+                score = advantage
+            else:
+                score = advantage
+
+            def _do_resample(carry):
+                (
+                    states,
+                    traj_data,
+                    traj_actions,
+                    traj_rewards,
+                    returns,
+                    gae_trace,
+                    value_start,
+                ) = carry
+                weights = jnn.softmax(score / self.temperature, axis=0)
+                idx = jax.random.choice(
+                    k_sel,
+                    num_particles,
+                    shape=(num_particles,),
+                    p=weights,
+                    replace=True,
+                )
+                states = _gather_tree(states, idx)
+                traj_data = _gather_tree(traj_data, idx)
+                traj_actions = traj_actions[idx]
+                traj_rewards = traj_rewards[idx]
+                returns = returns[idx]
+                gae_trace = gae_trace[idx]
+                value_start = value_start[idx]
+                return (
+                    states,
+                    traj_data,
+                    traj_actions,
+                    traj_rewards,
+                    returns,
+                    gae_trace,
+                    value_start,
+                )
+
+            def _skip_resample(carry):
+                return carry
+
+            do_resample = self.resample_every > 0 and (
+                jnp.remainder(t + 1, self.resample_every) == 0
             )
-            states = _gather_tree(next_states, idx)
-            traj_data = _gather_tree(traj_data, idx)
-            traj_actions = traj_actions[idx]
-            traj_rewards = traj_rewards[idx]
-            returns = returns[idx]
-            gae_trace = gae_trace[idx]
-            value_start = value_start[idx]
+            (
+                states,
+                traj_data,
+                traj_actions,
+                traj_rewards,
+                returns,
+                gae_trace,
+                value_start,
+            ) = jax.lax.cond(
+                do_resample,
+                _do_resample,
+                _skip_resample,
+                (
+                    next_states,
+                    traj_data,
+                    traj_actions,
+                    traj_rewards,
+                    returns,
+                    gae_trace,
+                    value_start,
+                ),
+            )
 
             return (
                 key,
@@ -364,6 +424,17 @@ class TreeMPC:
 
         if self._has_policy():
             returns = value_start + gae_trace
+
+        if self.resample_every <= 0 or (horizon % self.resample_every) != 0:
+            weights = jnn.softmax(returns / self.temperature, axis=0)
+            idx = jax.random.choice(
+                key, num_particles, shape=(num_particles,), p=weights, replace=True
+            )
+            states = _gather_tree(states, idx)
+            traj_data = _gather_tree(traj_data, idx)
+            traj_actions = traj_actions[idx]
+            traj_rewards = traj_rewards[idx]
+            returns = returns[idx]
 
         return _TreeRollout(  # type: ignore
             traj_data=traj_data,
