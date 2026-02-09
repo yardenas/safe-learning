@@ -1,11 +1,16 @@
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import jax
+import jax.nn as jnn
 import jax.numpy as jnp
+from brax.training.acme import running_statistics
+from brax.training.agents.sac import checkpoint as sac_checkpoint
 from flax import struct
 from hydrax.alg_base import Trajectory
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
+
+from ss2r.algorithms.sac import networks as sac_networks
 
 from .task import MujocoPlaygroundTask
 
@@ -77,6 +82,18 @@ class TreeMPC:
         width: int,
         branch: int,
         horizon: Optional[int] = None,
+        policy_checkpoint_path: str | None = None,
+        policy_noise_std: float = 0.05,
+        td_lambda: float = 0.0,
+        normalize_observations: bool = False,
+        policy_hidden_layer_sizes: Sequence[int] = (256, 256),
+        value_hidden_layer_sizes: Sequence[int] = (256, 256),
+        activation: str = "swish",
+        n_critics: int = 2,
+        n_heads: int = 1,
+        use_bro: bool = True,
+        policy_obs_key: str = "state",
+        value_obs_key: str = "state",
         gamma: float = 0.99,
         temperature: float = 1.0,
         action_noise_std: float = 0.3,
@@ -99,6 +116,98 @@ class TreeMPC:
         self.mode = mode
         self.iterations = int(iterations)
         self.uses_env_step = True
+        self.policy_noise_std = float(policy_noise_std)
+        self.td_lambda = float(td_lambda)
+
+        self._policy_params = None
+        self._qr_params = None
+        self._normalizer_params = None
+        self._sac_network = None
+        self._n_critics = int(n_critics)
+        self._n_heads = int(n_heads)
+        self._normalize_observations = bool(normalize_observations)
+
+        if policy_checkpoint_path is not None:
+            self._load_policy_and_critic(
+                policy_checkpoint_path,
+                policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+                value_hidden_layer_sizes=value_hidden_layer_sizes,
+                activation=activation,
+                use_bro=use_bro,
+                policy_obs_key=policy_obs_key,
+                value_obs_key=value_obs_key,
+            )
+
+    def _load_policy_and_critic(
+        self,
+        checkpoint_path: str,
+        *,
+        policy_hidden_layer_sizes: Sequence[int],
+        value_hidden_layer_sizes: Sequence[int],
+        activation: str,
+        use_bro: bool,
+        policy_obs_key: str,
+        value_obs_key: str,
+    ) -> None:
+        params = sac_checkpoint.load(checkpoint_path)
+        self._normalizer_params = params[0]
+        self._policy_params = params[1]
+        self._qr_params = params[3]
+
+        obs_size = self.task.env.observation_size
+        action_size = (
+            self.task.env.action_size
+            if hasattr(self.task.env, "action_size")
+            else self.task.u_min.shape[-1]
+        )
+        preprocess_fn = (
+            running_statistics.normalize
+            if self._normalize_observations
+            else (lambda x, y: x)
+        )
+        activation_fn = getattr(jnn, activation)
+        self._sac_network = sac_networks.make_sac_networks(  # type: ignore
+            observation_size=obs_size,
+            action_size=action_size,
+            preprocess_observations_fn=preprocess_fn,  # ty:ignore[invalid-argument-type]
+            policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+            value_hidden_layer_sizes=value_hidden_layer_sizes,
+            activation=activation_fn,
+            use_bro=use_bro,
+            n_critics=self._n_critics,
+            n_heads=self._n_heads,
+            policy_obs_key=policy_obs_key,
+            value_obs_key=value_obs_key,
+        )
+
+    def _has_policy(self) -> bool:
+        return self._sac_network is not None
+
+    def _sample_policy_actions(self, obs: Any, key: jax.Array) -> jax.Array:
+        assert self._sac_network is not None
+        assert self._policy_params is not None
+        dist_params = self._sac_network.policy_network.apply(
+            self._normalizer_params,
+            self._policy_params,
+            obs,
+        )
+        dist = self._sac_network.parametric_action_distribution.create(dist_params)
+        return dist.sample(seed=key)
+
+    def _critic_value(self, obs: Any, action: jax.Array) -> jax.Array:
+        assert self._sac_network is not None
+        assert self._qr_params is not None
+        q_values = self._sac_network.qr_network.apply(
+            self._normalizer_params,
+            self._qr_params,
+            obs,
+            action,
+        )
+        if q_values.ndim == 1:
+            q_values = q_values[:, None]
+        q_values = q_values.reshape((q_values.shape[0], self._n_critics, self._n_heads))
+        q_values = jnp.min(q_values, axis=1)
+        return jnp.mean(q_values, axis=-1)
 
     def _tree_expand(
         self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
@@ -121,16 +230,31 @@ class TreeMPC:
 
         def _step_fn(carry, t):
             key, states, returns, traj_data, traj_actions, traj_rewards = carry
-            key, k_noise, k_sel = jax.random.split(key, 3)
-
-            mu = jnp.broadcast_to(params.actions[t], (width, act_dim))
-            eps = jax.random.normal(k_noise, (width, branch, act_dim))
-            std = jnp.asarray(self.action_noise_std, dtype=jnp.float32)
-            u = mu[:, None, :] + eps * std
-            actions = _squash_to_bounds(u, self.task.u_min, self.task.u_max)
+            if self._has_policy():
+                key, k_policy, k_noise, k_value, k_sel = jax.random.split(key, 5)
+                obs = states.obs
+                obs_flat = _repeat_tree(obs, branch)
+                flat_actions = self._sample_policy_actions(obs_flat, k_policy)
+                if self.policy_noise_std > 0.0:
+                    flat_actions = (
+                        flat_actions
+                        + jax.random.normal(k_noise, flat_actions.shape)
+                        * self.policy_noise_std
+                    )
+                flat_actions = jnp.clip(flat_actions, self.task.u_min, self.task.u_max)
+                actions = flat_actions.reshape((width, branch, act_dim))
+            else:
+                key, k_noise, k_sel = jax.random.split(key, 3)
+                mu = jnp.broadcast_to(params.actions[t], (width, act_dim))
+                eps = jax.random.normal(k_noise, (width, branch, act_dim))
+                std = jnp.asarray(self.action_noise_std, dtype=jnp.float32)
+                u = mu[:, None, :] + eps * std
+                actions = _squash_to_bounds(u, self.task.u_min, self.task.u_max)
+                flat_actions = actions.reshape((width * branch, act_dim))
 
             flat_states = _repeat_tree(states, branch)
-            flat_actions = actions.reshape((width * branch, act_dim))
+            if self._has_policy():
+                flat_actions = flat_actions.reshape((width * branch, act_dim))
 
             def _env_step(s, a):
                 return self.task.env.step(s, a)
@@ -151,18 +275,32 @@ class TreeMPC:
             )
 
             exp_returns = jnp.repeat(returns, branch, axis=0) + flat_rewards
+            if self._has_policy() and self.td_lambda < 1.0:
+                value_actions = self._sample_policy_actions(
+                    flat_next_states.obs, k_value
+                )
+                value_actions = jnp.clip(
+                    value_actions, self.task.u_min, self.task.u_max
+                )
+                values = self._critic_value(flat_next_states.obs, value_actions)
+                exp_scores = (
+                    exp_returns
+                    + (self.gamma ** (t + 1)) * (1.0 - self.td_lambda) * values
+                )
+            else:
+                exp_scores = exp_returns
 
             if self.mode == "beam":
-                idx = _topk_indices(exp_returns, width)
+                idx = _topk_indices(exp_scores, width)
                 states = _gather_tree(flat_next_states, idx)
                 traj_data = _gather_tree(exp_traj_data, idx)
                 traj_actions = exp_traj_actions[idx]
                 traj_rewards = exp_traj_rewards[idx]
                 returns = exp_returns[idx]
             elif self.mode == "resample":
-                w = _softmax(exp_returns / self.temperature, axis=0).squeeze()
+                w = _softmax(exp_scores / self.temperature, axis=0).squeeze()
                 idx = jax.random.choice(
-                    k_sel, exp_returns.shape[0], shape=(width,), p=w, replace=True
+                    k_sel, exp_scores.shape[0], shape=(width,), p=w, replace=True
                 )
                 states = _gather_tree(flat_next_states, idx)
                 traj_data = _gather_tree(exp_traj_data, idx)
@@ -170,8 +308,8 @@ class TreeMPC:
                 traj_rewards = exp_traj_rewards[idx]
                 returns = exp_returns[idx]
             elif self.mode in {"myopic", "per_parent"}:
-                per_parent_returns = exp_returns.reshape((width, branch))
-                per_parent_idx = jnp.argmax(per_parent_returns, axis=1)
+                per_parent_scores = exp_scores.reshape((width, branch))
+                per_parent_idx = jnp.argmax(per_parent_scores, axis=1)
 
                 states = _take_per_parent(
                     _reshape_tree(flat_next_states, width, branch), per_parent_idx
@@ -191,7 +329,9 @@ class TreeMPC:
                     ),
                     per_parent_idx,
                 )
-                returns = per_parent_returns[jnp.arange(width), per_parent_idx]
+                returns = exp_returns.reshape((width, branch))[
+                    jnp.arange(width), per_parent_idx
+                ]
             else:
                 raise ValueError(
                     f"Unknown mode={self.mode}. Use 'beam', 'resample', or 'myopic'."

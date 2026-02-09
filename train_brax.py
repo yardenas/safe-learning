@@ -84,6 +84,9 @@ def get_train_fn(cfg):
             checkpoint_path=get_state_path(),
         )
     elif cfg.agent.name == "hydrax_mpc":
+        if restore_checkpoint_path and cfg.agent.get("controller_name") == "tree":
+            controller_kwargs = cfg.agent.get("controller_kwargs", {})
+            controller_kwargs["policy_checkpoint_path"] = restore_checkpoint_path
         train_fn = hydrax_mpc.get_train_fn(
             cfg,
             restore_checkpoint_path=restore_checkpoint_path,
