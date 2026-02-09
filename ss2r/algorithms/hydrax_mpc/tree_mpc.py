@@ -1,9 +1,9 @@
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import jax
 import jax.nn as jnn
 import jax.numpy as jnp
-from brax.training.acme import running_statistics
+from brax.training.acme import running_statistics, specs
 from brax.training.agents.sac import checkpoint as sac_checkpoint
 from flax import struct
 from hydrax.alg_base import Trajectory
@@ -11,6 +11,7 @@ from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
 from ss2r.algorithms.sac import networks as sac_networks
+from ss2r.rl.utils import remove_pixels
 
 from .task import MujocoPlaygroundTask
 
@@ -107,6 +108,67 @@ class TreeMPC:
                 policy_obs_key=policy_obs_key,
                 value_obs_key=value_obs_key,
             )
+        else:
+            self._init_policy_and_critic(
+                policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+                value_hidden_layer_sizes=value_hidden_layer_sizes,
+                activation=activation,
+                use_bro=use_bro,
+                policy_obs_key=policy_obs_key,
+                value_obs_key=value_obs_key,
+            )
+
+    def _init_policy_and_critic(
+        self,
+        *,
+        policy_hidden_layer_sizes: Sequence[int],
+        value_hidden_layer_sizes: Sequence[int],
+        activation: str,
+        use_bro: bool,
+        policy_obs_key: str,
+        value_obs_key: str,
+        seed: int = 0,
+    ) -> None:
+        obs_size = self.task.env.observation_size
+        action_size = (
+            self.task.env.action_size
+            if hasattr(self.task.env, "action_size")
+            else self.task.u_min.shape[-1]
+        )
+        preprocess_fn = (
+            running_statistics.normalize
+            if self._normalize_observations
+            else (lambda x, y: x)
+        )
+        activation_fn = getattr(jnn, activation)
+        self._sac_network = sac_networks.make_sac_networks(  # type: ignore
+            observation_size=obs_size,
+            action_size=action_size,
+            preprocess_observations_fn=preprocess_fn,  # ty:ignore[invalid-argument-type]
+            policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+            value_hidden_layer_sizes=value_hidden_layer_sizes,
+            activation=activation_fn,
+            use_bro=use_bro,
+            n_critics=self._n_critics,
+            n_heads=self._n_heads,
+            policy_obs_key=policy_obs_key,
+            value_obs_key=value_obs_key,
+        )
+        rng = jax.random.PRNGKey(seed)
+        rng, key_policy = jax.random.split(rng)
+        rng, key_qr = jax.random.split(rng)
+        self._policy_params = self._sac_network.policy_network.init(key_policy)  # type: ignore
+        self._qr_params = self._sac_network.qr_network.init(key_qr)  # type: ignore
+
+        if isinstance(obs_size, Mapping):
+            obs_shape = {
+                k: specs.Array(v, jnp.dtype("float32")) for k, v in obs_size.items()
+            }
+        else:
+            obs_shape = specs.Array((obs_size,), jnp.dtype("float32"))
+        self._normalizer_params = running_statistics.init_state(
+            remove_pixels(obs_shape)
+        )
 
     def _load_policy_and_critic(
         self,
