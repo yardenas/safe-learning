@@ -103,6 +103,7 @@ def make_controller(
             "gae_lambda",
             "policy_action_only",
             "use_policy",
+            "use_critic",
             "action_repeat",
             "normalize_observations",
             "policy_hidden_layer_sizes",

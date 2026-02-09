@@ -57,6 +57,7 @@ class TreeMPC:
         gae_lambda: float = 0.0,
         policy_action_only: bool = False,
         use_policy: bool = True,
+        use_critic: bool | None = None,
         action_repeat: int = 1,
         normalize_observations: bool = True,
         policy_hidden_layer_sizes: Sequence[int] = (256, 256, 256),
@@ -99,6 +100,9 @@ class TreeMPC:
         self.gae_lambda = float(gae_lambda)
         self.policy_action_only = bool(policy_action_only)
         self.use_policy = bool(use_policy)
+        if use_critic is None:
+            use_critic = use_policy
+        self.use_critic = bool(use_critic)
 
         self._policy_params = None
         self._qr_params = None
@@ -108,7 +112,7 @@ class TreeMPC:
         self._n_heads = int(n_heads)
         self._normalize_observations = bool(normalize_observations)
 
-        if self.use_policy:
+        if self.use_policy or self.use_critic:
             if policy_checkpoint_path is not None:
                 self._load_policy_and_critic(
                     policy_checkpoint_path,
@@ -224,7 +228,10 @@ class TreeMPC:
         )
 
     def _has_policy(self) -> bool:
-        return self._sac_network is not None
+        return self._sac_network is not None and self._policy_params is not None
+
+    def _has_critic(self) -> bool:
+        return self._sac_network is not None and self._qr_params is not None
 
     def _sample_policy_actions(self, obs: Any, key: jax.Array) -> jax.Array:
         assert self._sac_network is not None
@@ -304,7 +311,7 @@ class TreeMPC:
                 value_start,
             ) = carry
             key, k_sel = jax.random.split(key)
-            if self._has_policy():
+            if self.use_policy and self._has_policy():
                 key, k_policy, k_value = jax.random.split(key, 3)
                 actions = self._sample_policy_actions(states.obs, k_policy)
                 actions = jnp.clip(actions, self.task.u_min, self.task.u_max)
@@ -330,12 +337,17 @@ class TreeMPC:
             )
             returns = returns + rewards
 
-            if self._has_policy():
+            if self.use_critic and self._has_critic():
                 value_s = self._critic_value(states.obs, actions)
-                value_actions = self._sample_policy_actions(next_states.obs, k_value)
-                value_actions = jnp.clip(
-                    value_actions, self.task.u_min, self.task.u_max
-                )
+                if self.use_policy and self._has_policy():
+                    value_actions = self._sample_policy_actions(
+                        next_states.obs, k_value
+                    )
+                    value_actions = jnp.clip(
+                        value_actions, self.task.u_min, self.task.u_max
+                    )
+                else:
+                    value_actions = actions
                 value_next = self._critic_value(next_states.obs, value_actions)
                 delta = rewards + self.gamma * value_next - value_s
                 gae_trace = delta + self.gamma * self.gae_lambda * gae_trace
@@ -389,7 +401,7 @@ class TreeMPC:
             value_start,
         ) = carryN
 
-        if self._has_policy():
+        if self.use_critic and self._has_critic():
             returns = value_start + gae_trace
 
         return _TreeRollout(  # type: ignore
@@ -406,7 +418,7 @@ class TreeMPC:
         decision_steps = self.ctrl_steps
         act_dim = self.task.u_min.shape[-1]
 
-        if self._has_policy():
+        if self.use_policy and self._has_policy():
             noise_std = self.policy_noise_std
         else:
             noise_std = self.action_noise_std
@@ -416,7 +428,7 @@ class TreeMPC:
         def _scan_fn(carry, t):
             states, k = carry
             k, k_policy, k_noise = jax.random.split(k, 3)
-            if self._has_policy():
+            if self.use_policy and self._has_policy():
                 policy_keys = jax.random.split(k_policy, num_particles)
                 actions = jax.vmap(self._sample_policy_actions)(states.obs, policy_keys)
             else:
@@ -462,7 +474,7 @@ class TreeMPC:
 
     def optimize(self, state: mjx_env.State, params: TreeMPCParams):
         if self.policy_action_only:
-            if not self._has_policy():
+            if not self.use_policy or not self._has_policy():
                 raise ValueError(
                     "policy_action_only=True requires a loaded policy checkpoint."
                 )
