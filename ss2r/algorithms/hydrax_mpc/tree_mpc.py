@@ -191,8 +191,8 @@ class TreeMPC:
             self._policy_params,
             obs,
         )
-        dist = self._sac_network.parametric_action_distribution.create(dist_params)
-        return dist.sample(seed=key)
+        dist = self._sac_network.parametric_action_distribution
+        return dist.sample(dist_params, key)
 
     def _critic_value(self, obs: Any, action: jax.Array) -> jax.Array:
         assert self._sac_network is not None
