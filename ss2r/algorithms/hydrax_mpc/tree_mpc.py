@@ -26,42 +26,12 @@ def _squash_to_bounds(u: jax.Array, low: jax.Array, high: jax.Array) -> jax.Arra
     return low + 0.5 * (z + 1.0) * (high - low)
 
 
-def _softmax(x: jax.Array, axis: int = -1) -> jax.Array:
-    x = x - jnp.max(x, axis=axis, keepdims=True)
-    ex = jnp.exp(x)
-    return ex / jnp.sum(ex, axis=axis, keepdims=True)
-
-
-def _topk_indices(scores: jax.Array, k: int) -> jax.Array:
-    _, idx = jax.lax.top_k(scores, k)
-    return idx
-
-
-def _repeat_tree(tree: Any, repeats: int) -> Any:
-    return jax.tree.map(lambda x: jnp.repeat(x, repeats, axis=0), tree)
-
-
 def _broadcast_tree(tree: Any, batch: int) -> Any:
     return jax.tree.map(lambda x: jnp.broadcast_to(x, (batch,) + x.shape), tree)
 
 
 def _gather_tree(tree: Any, idx: jax.Array) -> Any:
     return jax.tree.map(lambda x: x[idx], tree)
-
-
-def _reshape_tree(tree: Any, width: int, branch: int) -> Any:
-    return jax.tree.map(
-        lambda x: x.reshape((width, branch) + x.shape[1:]),
-        tree,
-    )
-
-
-def _take_per_parent(tree: Any, idx: jax.Array) -> Any:
-    def _take(x: jax.Array) -> jax.Array:
-        take_idx = idx.reshape((idx.shape[0],) + (1,) * (x.ndim - 1))
-        return jnp.take_along_axis(x, take_idx, axis=1).squeeze(axis=1)
-
-    return jax.tree.map(_take, tree)
 
 
 @struct.dataclass
@@ -73,7 +43,7 @@ class _TreeRollout:
 
 
 class TreeMPC:
-    """Tree expansion planner with MPPI-style resampling."""
+    """SMC planner using SIR-style resampling."""
 
     def __init__(
         self,
@@ -84,7 +54,7 @@ class TreeMPC:
         horizon: Optional[int] = None,
         policy_checkpoint_path: str | None = None,
         policy_noise_std: float = 0.05,
-        td_lambda: float = 0.0,
+        gae_lambda: float = 0.0,
         policy_action_only: bool = False,
         normalize_observations: bool = True,
         policy_hidden_layer_sizes: Sequence[int] = (256, 256, 256),
@@ -118,7 +88,7 @@ class TreeMPC:
         self.iterations = int(iterations)
         self.uses_env_step = True
         self.policy_noise_std = float(policy_noise_std)
-        self.td_lambda = float(td_lambda)
+        self.gae_lambda = float(gae_lambda)
         self.policy_action_only = bool(policy_action_only)
 
         self._policy_params = None
@@ -214,128 +184,121 @@ class TreeMPC:
     def _tree_expand(
         self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
     ) -> _TreeRollout:
-        width = self.width
-        branch = self.branch
+        num_particles = self.width * self.branch
         horizon = self.horizon
         act_dim = self.task.u_min.shape[-1]
-        # Initialize B identical roots
-        states = _broadcast_tree(state, width)
-        returns = jnp.zeros((width,), dtype=jnp.float32)
+        states = _broadcast_tree(state, num_particles)
+        returns = jnp.zeros((num_particles,), dtype=jnp.float32)
+        gae_trace = jnp.zeros((num_particles,), dtype=jnp.float32)
+        value_start = jnp.zeros((num_particles,), dtype=jnp.float32)
 
-        traj_actions = jnp.zeros((width, horizon, act_dim), dtype=jnp.float32)
-        traj_rewards = jnp.zeros((width, horizon), dtype=jnp.float32)
+        traj_actions = jnp.zeros((num_particles, horizon, act_dim), dtype=jnp.float32)
+        traj_rewards = jnp.zeros((num_particles, horizon), dtype=jnp.float32)
         traj_data = jax.tree.map(
-            lambda x: jnp.zeros((width, horizon + 1) + x.shape, dtype=x.dtype),
+            lambda x: jnp.zeros((num_particles, horizon + 1) + x.shape, dtype=x.dtype),
             state.data,
         )
         traj_data = jax.tree.map(lambda t, d: t.at[:, 0].set(d), traj_data, states.data)
 
         def _step_fn(carry, t):
-            key, states, returns, traj_data, traj_actions, traj_rewards = carry
+            (
+                key,
+                states,
+                traj_data,
+                traj_actions,
+                traj_rewards,
+                returns,
+                gae_trace,
+                value_start,
+            ) = carry
             if self._has_policy():
                 key, k_policy, k_value, k_sel = jax.random.split(key, 4)
-                obs = states.obs
-                obs_flat = _repeat_tree(obs, branch)
-                flat_actions = self._sample_policy_actions(obs_flat, k_policy)
-                flat_actions = jnp.clip(flat_actions, self.task.u_min, self.task.u_max)
-                actions = flat_actions.reshape((width, branch, act_dim))
+                actions = self._sample_policy_actions(states.obs, k_policy)
+                actions = jnp.clip(actions, self.task.u_min, self.task.u_max)
             else:
                 key, k_noise, k_sel = jax.random.split(key, 3)
-                mu = jnp.broadcast_to(params.actions[t], (width, act_dim))
-                eps = jax.random.normal(k_noise, (width, branch, act_dim))
+                mu = jnp.broadcast_to(params.actions[t], (num_particles, act_dim))
+                eps = jax.random.normal(k_noise, (num_particles, act_dim))
                 std = jnp.asarray(self.action_noise_std, dtype=jnp.float32)
-                u = mu[:, None, :] + eps * std
+                u = mu + eps * std
                 actions = _squash_to_bounds(u, self.task.u_min, self.task.u_max)
-                flat_actions = actions.reshape((width * branch, act_dim))
-
-            flat_states = _repeat_tree(states, branch)
-            if self._has_policy():
-                flat_actions = flat_actions.reshape((width * branch, act_dim))
 
             def _env_step(s, a):
                 return self.task.env.step(s, a)
 
-            flat_next_states = jax.vmap(_env_step)(flat_states, flat_actions)
-            flat_rewards = flat_next_states.reward
+            next_states = jax.vmap(_env_step)(states, actions)
+            rewards = next_states.reward
 
-            exp_traj_data = _repeat_tree(traj_data, branch)
-            exp_traj_actions = jnp.repeat(traj_actions, branch, axis=0)
-            exp_traj_rewards = jnp.repeat(traj_rewards, branch, axis=0)
-
-            exp_traj_actions = exp_traj_actions.at[:, t, :].set(flat_actions)
-            exp_traj_rewards = exp_traj_rewards.at[:, t].set(flat_rewards)
-            exp_traj_data = jax.tree.map(
+            traj_actions = traj_actions.at[:, t, :].set(actions)
+            traj_rewards = traj_rewards.at[:, t].set(rewards)
+            traj_data = jax.tree.map(
                 lambda td, d: td.at[:, t + 1].set(d),
-                exp_traj_data,
-                flat_next_states.data,
+                traj_data,
+                next_states.data,
             )
+            returns = returns + rewards
 
-            exp_returns = jnp.repeat(returns, branch, axis=0) + flat_rewards
-            if self._has_policy() and self.td_lambda < 1.0:
-                value_actions = self._sample_policy_actions(
-                    flat_next_states.obs, k_value
-                )
+            if self._has_policy():
+                value_s = self._critic_value(states.obs, actions)
+                value_actions = self._sample_policy_actions(next_states.obs, k_value)
                 value_actions = jnp.clip(
                     value_actions, self.task.u_min, self.task.u_max
                 )
-                values = self._critic_value(flat_next_states.obs, value_actions)
-                exp_scores = (
-                    exp_returns
-                    + (self.gamma ** (t + 1)) * (1.0 - self.td_lambda) * values
-                )
+                value_next = self._critic_value(next_states.obs, value_actions)
+                delta = rewards + self.gamma * value_next - value_s
+                gae_trace = delta + self.gamma * self.gae_lambda * gae_trace
+                value_start = jnp.where(t == 0, value_s, value_start)
+                advantage = gae_trace
             else:
-                exp_scores = exp_returns
+                advantage = rewards
 
-            if self.mode == "beam":
-                idx = _topk_indices(exp_scores, width)
-                states = _gather_tree(flat_next_states, idx)
-                traj_data = _gather_tree(exp_traj_data, idx)
-                traj_actions = exp_traj_actions[idx]
-                traj_rewards = exp_traj_rewards[idx]
-                returns = exp_scores[idx]
-            elif self.mode == "resample":
-                w = _softmax(exp_scores / self.temperature, axis=0).squeeze()
-                idx = jax.random.choice(
-                    k_sel, exp_scores.shape[0], shape=(width,), p=w, replace=True
-                )
-                states = _gather_tree(flat_next_states, idx)
-                traj_data = _gather_tree(exp_traj_data, idx)
-                traj_actions = exp_traj_actions[idx]
-                traj_rewards = exp_traj_rewards[idx]
-                returns = exp_scores[idx]
-            elif self.mode in {"myopic", "per_parent"}:
-                per_parent_scores = exp_scores.reshape((width, branch))
-                per_parent_idx = jnp.argmax(per_parent_scores, axis=1)
+            weights = jnn.softmax(advantage / self.temperature, axis=0)
+            idx = jax.random.choice(
+                k_sel, num_particles, shape=(num_particles,), p=weights, replace=True
+            )
+            states = _gather_tree(next_states, idx)
+            traj_data = _gather_tree(traj_data, idx)
+            traj_actions = traj_actions[idx]
+            traj_rewards = traj_rewards[idx]
+            returns = returns[idx]
+            gae_trace = gae_trace[idx]
+            value_start = value_start[idx]
 
-                states = _take_per_parent(
-                    _reshape_tree(flat_next_states, width, branch), per_parent_idx
-                )
-                traj_data = _take_per_parent(
-                    _reshape_tree(exp_traj_data, width, branch), per_parent_idx
-                )
-                traj_actions = _take_per_parent(
-                    exp_traj_actions.reshape(
-                        (width, branch) + exp_traj_actions.shape[1:]
-                    ),
-                    per_parent_idx,
-                )
-                traj_rewards = _take_per_parent(
-                    exp_traj_rewards.reshape(
-                        (width, branch) + exp_traj_rewards.shape[1:]
-                    ),
-                    per_parent_idx,
-                )
-                returns = per_parent_scores[jnp.arange(width), per_parent_idx]
-            else:
-                raise ValueError(
-                    f"Unknown mode={self.mode}. Use 'beam', 'resample', or 'myopic'."
-                )
+            return (
+                key,
+                states,
+                traj_data,
+                traj_actions,
+                traj_rewards,
+                returns,
+                gae_trace,
+                value_start,
+            ), None
 
-            return (key, states, returns, traj_data, traj_actions, traj_rewards), None
-
-        carry0 = (key, states, returns, traj_data, traj_actions, traj_rewards)
+        carry0 = (
+            key,
+            states,
+            traj_data,
+            traj_actions,
+            traj_rewards,
+            returns,
+            gae_trace,
+            value_start,
+        )
         carryN, _ = jax.lax.scan(_step_fn, carry0, jnp.arange(horizon))
-        _, states, returns, traj_data, traj_actions, traj_rewards = carryN
+        (
+            key,
+            states,
+            traj_data,
+            traj_actions,
+            traj_rewards,
+            returns,
+            gae_trace,
+            value_start,
+        ) = carryN
+
+        if self._has_policy():
+            returns = value_start + gae_trace
 
         return _TreeRollout(  # type: ignore
             traj_data=traj_data,
@@ -378,9 +341,10 @@ class TreeMPC:
             rng, tree_rng = jax.random.split(rng)
             rollouts = self._tree_expand(tree_rng, state, params)
 
-            best_idx = jnp.argmax(rollouts.returns)
-            best_actions = rollouts.traj_actions[best_idx]
-            params = params.replace(actions=best_actions, rng=rng)
+            rng, select_rng = jax.random.split(rng)
+            idx = jax.random.randint(select_rng, (), 0, rollouts.traj_actions.shape[0])
+            sampled_actions = rollouts.traj_actions[idx]
+            params = params.replace(actions=sampled_actions, rng=rng)
 
             return (params, rng), rollouts
 
@@ -389,7 +353,8 @@ class TreeMPC:
         )
         rollouts = jax.tree.map(lambda x: x[-1], rollouts)
 
-        costs = -rollouts.traj_rewards
+        costs = jnp.zeros((rollouts.returns.shape[0], self.horizon), dtype=jnp.float32)
+        costs = costs.at[:, -1].set(-rollouts.returns)
 
         def _trace_sites(x):
             return self.task.get_trace_sites(x)

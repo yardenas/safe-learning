@@ -58,7 +58,7 @@ def make_controller(
             "horizon",
             "policy_checkpoint_path",
             "policy_noise_std",
-            "td_lambda",
+            "gae_lambda",
             "policy_action_only",
             "normalize_observations",
             "policy_hidden_layer_sizes",
