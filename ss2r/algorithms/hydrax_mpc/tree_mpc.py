@@ -49,8 +49,7 @@ class TreeMPC:
         self,
         task: MujocoPlaygroundTask,
         *,
-        width: int,
-        branch: int,
+        n_particles: int,
         horizon: Optional[int] = None,
         policy_checkpoint_path: str | None = None,
         policy_noise_std: float = 0.05,
@@ -74,8 +73,7 @@ class TreeMPC:
         self.task = task
         self.dt = float(self.task.dt)
 
-        self.width = int(width)
-        self.branch = int(branch)
+        self.n_particles = int(n_particles)
         if horizon is None:
             raise ValueError("TreeMPC requires horizon to be set explicitly.")
         self.horizon = int(horizon)
@@ -184,7 +182,7 @@ class TreeMPC:
     def _tree_expand(
         self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
     ) -> _TreeRollout:
-        num_particles = self.width * self.branch
+        num_particles = self.n_particles
         horizon = self.horizon
         act_dim = self.task.u_min.shape[-1]
         states = _broadcast_tree(state, num_particles)

@@ -53,8 +53,7 @@ def make_controller(
         return PredictiveSampling(task, **controller_kwargs)
     if controller_name == "tree":
         allowed_keys = {
-            "width",
-            "branch",
+            "n_particles",
             "horizon",
             "policy_checkpoint_path",
             "policy_noise_std",
