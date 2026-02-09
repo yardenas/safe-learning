@@ -82,7 +82,12 @@ class TreeMPC:
             raise ValueError("TreeMPC requires horizon to be set explicitly.")
         self.horizon = int(horizon)
         self.plan_horizon = float(self.horizon) * self.dt
-        self.ctrl_steps = int(self.horizon)
+        self.action_repeat = max(int(action_repeat), 1)
+        if self.horizon % self.action_repeat != 0:
+            raise ValueError(
+                "TreeMPC requires horizon to be divisible by action_repeat."
+            )
+        self.ctrl_steps = self.horizon // self.action_repeat
         self.gamma = float(gamma)
         self.temperature = float(temperature)
         self.action_noise_std = action_noise_std
@@ -94,7 +99,6 @@ class TreeMPC:
         self.gae_lambda = float(gae_lambda)
         self.policy_action_only = bool(policy_action_only)
         self.use_policy = bool(use_policy)
-        self.action_repeat = max(int(action_repeat), 1)
 
         self._policy_params = None
         self._qr_params = None
@@ -269,17 +273,21 @@ class TreeMPC:
         self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
     ) -> _TreeRollout:
         num_particles = self.n_particles
-        horizon = self.horizon
+        decision_steps = self.ctrl_steps
         act_dim = self.task.u_min.shape[-1]
         states = _broadcast_tree(state, num_particles)
         returns = jnp.zeros((num_particles,), dtype=jnp.float32)
         gae_trace = jnp.zeros((num_particles,), dtype=jnp.float32)
         value_start = jnp.zeros((num_particles,), dtype=jnp.float32)
 
-        traj_actions = jnp.zeros((num_particles, horizon, act_dim), dtype=jnp.float32)
-        traj_rewards = jnp.zeros((num_particles, horizon), dtype=jnp.float32)
+        traj_actions = jnp.zeros(
+            (num_particles, decision_steps, act_dim), dtype=jnp.float32
+        )
+        traj_rewards = jnp.zeros((num_particles, decision_steps), dtype=jnp.float32)
         traj_data = jax.tree.map(
-            lambda x: jnp.zeros((num_particles, horizon + 1) + x.shape, dtype=x.dtype),
+            lambda x: jnp.zeros(
+                (num_particles, decision_steps + 1) + x.shape, dtype=x.dtype
+            ),
             state.data,
         )
         traj_data = jax.tree.map(lambda t, d: t.at[:, 0].set(d), traj_data, states.data)
@@ -369,7 +377,7 @@ class TreeMPC:
             gae_trace,
             value_start,
         )
-        carryN, _ = jax.lax.scan(_step_fn, carry0, jnp.arange(horizon))
+        carryN, _ = jax.lax.scan(_step_fn, carry0, jnp.arange(decision_steps))
         (
             key,
             states,
@@ -395,7 +403,7 @@ class TreeMPC:
         self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
     ) -> tuple[_TreeRollout, jax.Array]:
         num_particles = self.n_particles
-        horizon = self.horizon
+        decision_steps = self.ctrl_steps
         act_dim = self.task.u_min.shape[-1]
 
         if self._has_policy():
@@ -416,11 +424,13 @@ class TreeMPC:
                 actions = mu
             noise = jax.random.normal(k_noise, actions.shape) * noise_std
             actions = jnp.clip(actions + noise, self.task.u_min, self.task.u_max)
-            next_states, rewards = jax.vmap(self._step_env_repeat)(states, actions)
+            next_states, rewards = jax.vmap(lambda s, a: self._step_env_repeat(s, a))(
+                states, actions
+            )
             return (next_states, k), (actions, rewards, next_states.data)
 
         (final_states, _), (actions, rewards, traj_data_steps) = jax.lax.scan(
-            _scan_fn, (states0, key), jnp.arange(horizon)
+            _scan_fn, (states0, key), jnp.arange(decision_steps)
         )
         del final_states
 
@@ -462,16 +472,16 @@ class TreeMPC:
             if action.ndim > 1:
                 action = action[0]
             action_seq = jnp.broadcast_to(
-                action, (self.horizon, self.task.u_min.shape[-1])
+                action, (self.ctrl_steps, self.task.u_min.shape[-1])
             )
             params = params.replace(actions=action_seq, rng=rng)  # type: ignore
 
             sites = self.task.get_trace_sites(state.data)
-            trace_sites = jnp.broadcast_to(sites, (self.horizon + 1,) + sites.shape)[
+            trace_sites = jnp.broadcast_to(sites, (self.ctrl_steps + 1,) + sites.shape)[
                 None, ...
             ]
             controls = action_seq[None, ...]
-            costs = jnp.zeros((1, self.horizon), dtype=jnp.float32)
+            costs = jnp.zeros((1, self.ctrl_steps), dtype=jnp.float32)
             return params, Trajectory(
                 controls=controls,
                 knots=controls,
@@ -525,7 +535,9 @@ class TreeMPC:
         )
         rollouts = jax.tree.map(lambda x: x[-1], rollouts)
 
-        costs = jnp.zeros((rollouts.returns.shape[0], self.horizon), dtype=jnp.float32)
+        costs = jnp.zeros(
+            (rollouts.returns.shape[0], self.ctrl_steps), dtype=jnp.float32
+        )
         costs = costs.at[:, -1].set(-rollouts.returns)
 
         def _trace_sites_sir(x):
@@ -544,6 +556,6 @@ class TreeMPC:
     def init_params(self, seed: int = 0) -> TreeMPCParams:
         rng = jax.random.key(seed)
         actions = jnp.zeros(
-            (self.horizon, self.task.u_min.shape[-1]), dtype=jnp.float32
+            (self.ctrl_steps, self.task.u_min.shape[-1]), dtype=jnp.float32
         )
         return TreeMPCParams(actions=actions, rng=rng)  # type: ignore
