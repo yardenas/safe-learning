@@ -59,6 +59,7 @@ def make_controller(
             "policy_checkpoint_path",
             "policy_noise_std",
             "td_lambda",
+            "policy_action_only",
             "normalize_observations",
             "policy_hidden_layer_sizes",
             "value_hidden_layer_sizes",

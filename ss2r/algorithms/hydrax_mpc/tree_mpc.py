@@ -85,6 +85,7 @@ class TreeMPC:
         policy_checkpoint_path: str | None = None,
         policy_noise_std: float = 0.05,
         td_lambda: float = 0.0,
+        policy_action_only: bool = False,
         normalize_observations: bool = True,
         policy_hidden_layer_sizes: Sequence[int] = (256, 256, 256),
         value_hidden_layer_sizes: Sequence[int] = (512, 512),
@@ -118,6 +119,7 @@ class TreeMPC:
         self.uses_env_step = True
         self.policy_noise_std = float(policy_noise_std)
         self.td_lambda = float(td_lambda)
+        self.policy_action_only = bool(policy_action_only)
 
         self._policy_params = None
         self._qr_params = None
@@ -351,6 +353,34 @@ class TreeMPC:
         )
 
     def optimize(self, state: mjx_env.State, params: TreeMPCParams):
+        if self.policy_action_only:
+            if not self._has_policy():
+                raise ValueError(
+                    "policy_action_only=True requires a loaded policy checkpoint."
+                )
+            rng, action_key = jax.random.split(params.rng)
+            action = self._sample_policy_actions(state.obs, action_key)
+            action = jnp.clip(action, self.task.u_min, self.task.u_max)
+            if action.ndim > 1:
+                action = action[0]
+            action_seq = jnp.broadcast_to(
+                action, (self.horizon, self.task.u_min.shape[-1])
+            )
+            params = params.replace(actions=action_seq, rng=rng)  # type: ignore
+
+            sites = self.task.get_trace_sites(state.data)
+            trace_sites = jnp.broadcast_to(sites, (self.horizon + 1,) + sites.shape)[
+                None, ...
+            ]
+            controls = action_seq[None, ...]
+            costs = jnp.zeros((1, self.horizon), dtype=jnp.float32)
+            return params, Trajectory(
+                controls=controls,
+                knots=controls,
+                costs=costs,
+                trace_sites=trace_sites,
+            )
+
         def _iter_step(carry, _):
             params, rng = carry
             rng, tree_rng = jax.random.split(rng)
