@@ -57,7 +57,7 @@ class TreeMPC:
         gae_lambda: float = 0.0,
         policy_action_only: bool = False,
         use_policy: bool = True,
-        resample_every: int = 1,
+        action_repeat: int = 1,
         normalize_observations: bool = True,
         policy_hidden_layer_sizes: Sequence[int] = (256, 256, 256),
         value_hidden_layer_sizes: Sequence[int] = (512, 512),
@@ -94,7 +94,7 @@ class TreeMPC:
         self.gae_lambda = float(gae_lambda)
         self.policy_action_only = bool(policy_action_only)
         self.use_policy = bool(use_policy)
-        self.resample_every = int(resample_every)
+        self.action_repeat = max(int(action_repeat), 1)
 
         self._policy_params = None
         self._qr_params = None
@@ -248,6 +248,23 @@ class TreeMPC:
         q_values = jnp.min(q_values, axis=1)
         return jnp.mean(q_values, axis=-1)
 
+    def _step_env_repeat(
+        self, state: mjx_env.State, action: jax.Array
+    ) -> tuple[mjx_env.State, jax.Array]:
+        if self.action_repeat == 1:
+            next_state = self.task.env.step(state, action)
+            return next_state, next_state.reward
+
+        def _repeat_fn(carry, _):
+            s = carry
+            s = self.task.env.step(s, action)
+            return s, s.reward
+
+        final_state, rewards = jax.lax.scan(
+            _repeat_fn, state, jnp.arange(self.action_repeat)
+        )
+        return final_state, jnp.sum(rewards)
+
     def _tree_expand(
         self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
     ) -> _TreeRollout:
@@ -292,10 +309,9 @@ class TreeMPC:
                 actions = _squash_to_bounds(u, self.task.u_min, self.task.u_max)
 
             def _env_step(s, a):
-                return self.task.env.step(s, a)
+                return self._step_env_repeat(s, a)
 
-            next_states = jax.vmap(_env_step)(states, actions)
-            rewards = next_states.reward
+            next_states, rewards = jax.vmap(_env_step)(states, actions)
 
             traj_actions = traj_actions.at[:, t, :].set(actions)
             traj_rewards = traj_rewards.at[:, t].set(rewards)
@@ -320,74 +336,17 @@ class TreeMPC:
             else:
                 advantage = returns
 
-            if self._has_policy():
-                score = advantage
-            else:
-                score = advantage
-
-            def _do_resample(carry):
-                (
-                    states,
-                    traj_data,
-                    traj_actions,
-                    traj_rewards,
-                    returns,
-                    gae_trace,
-                    value_start,
-                ) = carry
-                weights = jnn.softmax(score / self.temperature, axis=0)
-                idx = jax.random.choice(
-                    k_sel,
-                    num_particles,
-                    shape=(num_particles,),
-                    p=weights,
-                    replace=True,
-                )
-                states = _gather_tree(states, idx)
-                traj_data = _gather_tree(traj_data, idx)
-                traj_actions = traj_actions[idx]
-                traj_rewards = traj_rewards[idx]
-                returns = returns[idx]
-                gae_trace = gae_trace[idx]
-                value_start = value_start[idx]
-                return (
-                    states,
-                    traj_data,
-                    traj_actions,
-                    traj_rewards,
-                    returns,
-                    gae_trace,
-                    value_start,
-                )
-
-            def _skip_resample(carry):
-                return carry
-
-            do_resample = self.resample_every > 0 and (
-                jnp.remainder(t + 1, self.resample_every) == 0
+            weights = jnn.softmax(advantage / self.temperature, axis=0)
+            idx = jax.random.choice(
+                k_sel, num_particles, shape=(num_particles,), p=weights, replace=True
             )
-            (
-                states,
-                traj_data,
-                traj_actions,
-                traj_rewards,
-                returns,
-                gae_trace,
-                value_start,
-            ) = jax.lax.cond(
-                do_resample,
-                _do_resample,
-                _skip_resample,
-                (
-                    next_states,
-                    traj_data,
-                    traj_actions,
-                    traj_rewards,
-                    returns,
-                    gae_trace,
-                    value_start,
-                ),
-            )
+            states = _gather_tree(next_states, idx)
+            traj_data = _gather_tree(traj_data, idx)
+            traj_actions = traj_actions[idx]
+            traj_rewards = traj_rewards[idx]
+            returns = returns[idx]
+            gae_trace = gae_trace[idx]
+            value_start = value_start[idx]
 
             return (
                 key,
@@ -425,17 +384,6 @@ class TreeMPC:
         if self._has_policy():
             returns = value_start + gae_trace
 
-        if self.resample_every <= 0 or (horizon % self.resample_every) != 0:
-            weights = jnn.softmax(returns / self.temperature, axis=0)
-            idx = jax.random.choice(
-                key, num_particles, shape=(num_particles,), p=weights, replace=True
-            )
-            states = _gather_tree(states, idx)
-            traj_data = _gather_tree(traj_data, idx)
-            traj_actions = traj_actions[idx]
-            traj_rewards = traj_rewards[idx]
-            returns = returns[idx]
-
         return _TreeRollout(  # type: ignore
             traj_data=traj_data,
             traj_actions=traj_actions,
@@ -468,8 +416,8 @@ class TreeMPC:
                 actions = mu
             noise = jax.random.normal(k_noise, actions.shape) * noise_std
             actions = jnp.clip(actions + noise, self.task.u_min, self.task.u_max)
-            next_states = jax.vmap(self.task.env.step)(states, actions)
-            return (next_states, k), (actions, next_states.reward, next_states.data)
+            next_states, rewards = jax.vmap(self._step_env_repeat)(states, actions)
+            return (next_states, k), (actions, rewards, next_states.data)
 
         (final_states, _), (actions, rewards, traj_data_steps) = jax.lax.scan(
             _scan_fn, (states0, key), jnp.arange(horizon)
