@@ -1,15 +1,16 @@
 from functools import partial
-from typing import Any
+from typing import Any, Mapping
 
 import jax
 import jax.nn as jnn
 import jax.numpy as jnp
-from brax.training.acme import running_statistics
+from brax.training.acme import running_statistics, specs
 from brax.training.agents.sac import checkpoint as sac_checkpoint
 from hydrax.alg_base import SamplingBasedController, Trajectory
 from mujoco_playground._src import mjx_env
 
 from ss2r.algorithms.sac import networks as sac_networks
+from ss2r.rl.utils import remove_pixels
 
 
 class PolicyPrior:
@@ -17,7 +18,9 @@ class PolicyPrior:
         self,
         *,
         env: mjx_env.MjxEnv,
-        checkpoint_path: str,
+        checkpoint_path: str | None = None,
+        random_init: bool = False,
+        seed: int = 0,
         normalize_observations: bool = True,
         policy_hidden_layer_sizes: tuple[int, ...] = (256, 256, 256),
         value_hidden_layer_sizes: tuple[int, ...] = (512, 512),
@@ -29,10 +32,6 @@ class PolicyPrior:
         value_obs_key: str = "state",
     ) -> None:
         self._env = env
-        params = sac_checkpoint.load(checkpoint_path)
-        self._normalizer_params = params[0]
-        self._policy_params = params[1]
-
         obs_size = env.observation_size
         action_size = env.action_size
         preprocess_fn = (
@@ -52,6 +51,27 @@ class PolicyPrior:
             policy_obs_key=policy_obs_key,
             value_obs_key=value_obs_key,
         )
+        if checkpoint_path is not None:
+            params = sac_checkpoint.load(checkpoint_path)
+            self._normalizer_params = params[0]
+            self._policy_params = params[1]
+        else:
+            if not random_init:
+                raise ValueError(
+                    "PolicyPrior requires checkpoint_path or random_init=True."
+                )
+            rng = jax.random.PRNGKey(seed)
+            rng, key_policy = jax.random.split(rng)
+            self._policy_params = self._sac_network.policy_network.init(key_policy)
+            if isinstance(obs_size, Mapping):
+                obs_shape = {
+                    k: specs.Array(v, jnp.dtype("float32")) for k, v in obs_size.items()
+                }
+            else:
+                obs_shape = specs.Array((obs_size,), jnp.dtype("float32"))
+            self._normalizer_params = running_statistics.init_state(
+                remove_pixels(obs_shape)
+            )
 
     def _sample_policy_action(self, obs: Any, key: jax.Array) -> jax.Array:
         dist_params = self._sac_network.policy_network.apply(
