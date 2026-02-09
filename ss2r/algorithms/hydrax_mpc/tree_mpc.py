@@ -65,6 +65,7 @@ class TreeMPC:
         use_bro: bool = True,
         policy_obs_key: str = "state",
         value_obs_key: str = "state",
+        planner: str = "sir",
         gamma: float = 0.99,
         temperature: float = 1.0,
         action_noise_std: float = 0.3,
@@ -83,6 +84,7 @@ class TreeMPC:
         self.gamma = float(gamma)
         self.temperature = float(temperature)
         self.action_noise_std = action_noise_std
+        self.planner = planner
         self.mode = mode
         self.iterations = int(iterations)
         self.uses_env_step = True
@@ -367,6 +369,65 @@ class TreeMPC:
             returns=returns,
         )
 
+    def _mppi_expand(
+        self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
+    ) -> tuple[_TreeRollout, jax.Array]:
+        num_particles = self.n_particles
+        horizon = self.horizon
+        act_dim = self.task.u_min.shape[-1]
+
+        if self._has_policy():
+            noise_std = self.policy_noise_std
+        else:
+            noise_std = self.action_noise_std
+
+        states0 = _broadcast_tree(state, num_particles)
+
+        def _scan_fn(carry, t):
+            states, k = carry
+            k, k_policy, k_noise = jax.random.split(k, 3)
+            if self._has_policy():
+                policy_keys = jax.random.split(k_policy, num_particles)
+                actions = jax.vmap(self._sample_policy_actions)(states.obs, policy_keys)
+            else:
+                mu = jnp.broadcast_to(params.actions[t], (num_particles, act_dim))
+                actions = mu
+            noise = jax.random.normal(k_noise, actions.shape) * noise_std
+            actions = jnp.clip(actions + noise, self.task.u_min, self.task.u_max)
+            next_states = jax.vmap(self.task.env.step)(states, actions)
+            return (next_states, k), (actions, next_states.reward, next_states.data)
+
+        (final_states, _), (actions, rewards, traj_data_steps) = jax.lax.scan(
+            _scan_fn, (states0, key), jnp.arange(horizon)
+        )
+        del final_states
+
+        actions = jnp.swapaxes(actions, 0, 1)
+        traj_rewards = jnp.swapaxes(rewards, 0, 1)
+        traj_data_steps = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), traj_data_steps)
+
+        traj_data = jax.tree.map(
+            lambda step_data, s0: jnp.concatenate(
+                [s0[:, None, ...], step_data], axis=1
+            ),
+            traj_data_steps,
+            states0.data,
+        )
+        returns = jnp.sum(traj_rewards, axis=1)
+
+        weights = jnn.softmax(returns / self.temperature, axis=0)
+        mean_actions = jnp.sum(weights[:, None, None] * actions, axis=0)
+
+        return (
+            _TreeRollout(  # type: ignore
+                traj_data=traj_data,
+                traj_actions=actions,
+                traj_rewards=traj_rewards,
+                returns=returns,
+            ),
+            mean_actions,
+        )
+
     def optimize(self, state: mjx_env.State, params: TreeMPCParams):
         if self.policy_action_only:
             if not self._has_policy():
@@ -396,7 +457,36 @@ class TreeMPC:
                 trace_sites=trace_sites,
             )
 
-        def _iter_step(carry, _):
+        if self.planner == "mppi":
+
+            def _mppi_iter_step(carry, _):
+                params, rng = carry
+                rng, mppi_rng = jax.random.split(rng)
+                rollouts, mean_actions = self._mppi_expand(mppi_rng, state, params)
+                params = params.replace(actions=mean_actions, rng=rng)
+                return (params, rng), rollouts
+
+            (params, _), rollouts = jax.lax.scan(
+                _mppi_iter_step, (params, params.rng), jnp.arange(self.iterations)
+            )
+            rollouts = jax.tree.map(lambda x: x[-1], rollouts)
+
+            costs = -rollouts.traj_rewards
+
+            def _trace_sites_mppi(x):
+                return self.task.get_trace_sites(x)
+
+            trace_sites = jax.vmap(jax.vmap(_trace_sites_mppi))(rollouts.traj_data)
+            traj_knots = rollouts.traj_actions
+
+            return params, Trajectory(
+                controls=rollouts.traj_actions,
+                knots=traj_knots,
+                costs=costs,
+                trace_sites=trace_sites,
+            )
+
+        def _sir_iter_step(carry, _):
             params, rng = carry
             rng, tree_rng = jax.random.split(rng)
             rollouts = self._tree_expand(tree_rng, state, params)
@@ -409,17 +499,17 @@ class TreeMPC:
             return (params, rng), rollouts
 
         (params, _), rollouts = jax.lax.scan(
-            _iter_step, (params, params.rng), jnp.arange(self.iterations)
+            _sir_iter_step, (params, params.rng), jnp.arange(self.iterations)
         )
         rollouts = jax.tree.map(lambda x: x[-1], rollouts)
 
         costs = jnp.zeros((rollouts.returns.shape[0], self.horizon), dtype=jnp.float32)
         costs = costs.at[:, -1].set(-rollouts.returns)
 
-        def _trace_sites(x):
+        def _trace_sites_sir(x):
             return self.task.get_trace_sites(x)
 
-        trace_sites = jax.vmap(jax.vmap(_trace_sites))(rollouts.traj_data)
+        trace_sites = jax.vmap(jax.vmap(_trace_sites_sir))(rollouts.traj_data)
         traj_knots = rollouts.traj_actions
 
         return params, Trajectory(

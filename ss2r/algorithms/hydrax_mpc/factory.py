@@ -68,6 +68,7 @@ def make_controller(
             "use_bro",
             "policy_obs_key",
             "value_obs_key",
+            "planner",
             "gamma",
             "temperature",
             "action_noise_std",
