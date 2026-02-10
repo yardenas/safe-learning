@@ -12,6 +12,21 @@ from ss2r.algorithms.sac.networks import SafeSACNetworks
 Transition: TypeAlias = types.Transition
 
 
+def atanh_with_slack(y: jnp.ndarray, eps: float = 1e-5) -> jnp.ndarray:
+    """
+    Stable inverse tanh with configurable slack.
+    Clips y to [-1+eps, 1-eps] before applying atanh.
+    """
+    y = y.astype(jnp.float32)
+    eps_arr = jnp.asarray(eps, dtype=jnp.float32)
+
+    # Clip with "extra" margin away from ±1
+    y = jnp.clip(y, -1.0 + eps_arr, 1.0 - eps_arr)
+
+    # Equivalent to jnp.arctanh(y) but explicitly uses log1p (stable near 0 and 1)
+    return 0.5 * (jnp.log1p(y) - jnp.log1p(-y))
+
+
 def _reduce_q(q_values: jax.Array, use_bro: bool) -> jax.Array:
     if use_bro:
         return jnp.mean(q_values, axis=-1)
@@ -47,10 +62,7 @@ def make_losses(
         next_dist_params = policy_network.apply(
             normalizer_params, policy_params, transitions.next_observation
         )
-        next_raw_action = parametric_action_distribution.sample_no_postprocessing(
-            next_dist_params, next_key
-        )
-        next_action = parametric_action_distribution.postprocess(next_raw_action)
+        next_action = parametric_action_distribution.sample(next_dist_params, next_key)
         next_q = qr_network.apply(
             normalizer_params,
             target_q_params,
@@ -89,28 +101,24 @@ def make_losses(
         dist_params = policy_network.apply(
             normalizer_params, policy_params, transitions.observation
         )
-        raw_actions = parametric_action_distribution.inverse_postprocess(
-            transitions.action
-        )
-        log_prob = parametric_action_distribution.log_prob(dist_params, raw_actions)
-        pi_raw_action = parametric_action_distribution.sample_no_postprocessing(
-            dist_params, key
-        )
-        pi_action = parametric_action_distribution.postprocess(pi_raw_action)
+        pi_action = parametric_action_distribution.sample(dist_params, key)
         q_pi = qr_network.apply(
             normalizer_params, q_params, transitions.observation, pi_action
         )
         v = _reduce_q(q_pi, use_bro)
-        q_data = qr_network.apply(
+        q = qr_network.apply(
             normalizer_params, q_params, transitions.observation, transitions.action
         )
-        q_data = _reduce_q(q_data, use_bro)
-        advantage = q_data - v
+        q = _reduce_q(q, use_bro)
+        advantage = q - v
         unclipped_weights = jnp.exp(advantage / awac_lambda)
         weights = unclipped_weights
         if max_weight is not None:
             weights = jnp.minimum(weights, max_weight)
         weights = jax.lax.stop_gradient(weights)
+        log_prob = parametric_action_distribution.log_prob(
+            dist_params, atanh_with_slack(transitions.action)
+        )
         loss = -(log_prob * weights).mean()
         clip_fraction = (
             jnp.mean((unclipped_weights > max_weight).astype(jnp.float32))
@@ -138,7 +146,7 @@ def make_losses(
             "log_prob_min": jnp.min(log_prob),
             "log_prob_max": jnp.max(log_prob),
             "v_pi_mean": jnp.mean(v),
-            "q_data_mean": jnp.mean(q_data),
+            "q_data_mean": jnp.mean(q),
             "policy_action_abs_mean": jnp.mean(jnp.abs(pi_action)),
             "data_action_abs_mean": jnp.mean(jnp.abs(transitions.action)),
         }
