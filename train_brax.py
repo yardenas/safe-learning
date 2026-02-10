@@ -8,7 +8,7 @@ from brax import envs
 from omegaconf import OmegaConf
 
 from ss2r import benchmark_suites
-from ss2r.algorithms import hydrax_mpc, mbpo, ppo, sac, sbsrl
+from ss2r.algorithms import awac_mpc, hydrax_mpc, mbpo, ppo, sac, sbsrl
 from ss2r.common.logging import TrainingLogger
 from ss2r.common.wandb import get_state_path, get_wandb_checkpoint
 
@@ -89,6 +89,12 @@ def get_train_fn(cfg):
             restore_checkpoint_path=restore_checkpoint_path,
             checkpoint_path=get_state_path(),
         )
+    elif cfg.agent.name == "awac_mpc":
+        train_fn = awac_mpc.get_train_fn(
+            cfg,
+            restore_checkpoint_path=restore_checkpoint_path,
+            checkpoint_path=get_state_path(),
+        )
     else:
         raise ValueError(f"Unknown agent name: {cfg.agent.name}")
     return train_fn
@@ -113,6 +119,7 @@ def main(cfg):
     )
     logger = TrainingLogger(cfg)
     train_fn = get_train_fn(cfg)
+    planner_env = None
     if cfg.agent.name == "hydrax_mpc":
         train_env, eval_env = benchmark_suites.make_real_env(cfg)
         use_vision = False
@@ -122,6 +129,10 @@ def main(cfg):
         train_env, eval_env = benchmark_suites.make(
             cfg, train_env_wrap_fn, eval_env_wrap_fn
         )
+        if cfg.agent.name == "awac_mpc":
+            actor_update_source = cfg.agent.get("actor_update_source", "planner_online")
+            if actor_update_source in ("planner_replay", "planner_online"):
+                planner_env, _ = benchmark_suites.make_real_env(cfg)
     if use_vision:
         _validate_madrona_args(
             train_env,
@@ -133,11 +144,19 @@ def main(cfg):
         )
     steps = Counter()
     with jax.disable_jit(not cfg.jit):
-        make_policy, params, _ = train_fn(
-            environment=train_env,
-            eval_env=eval_env,
-            progress_fn=functools.partial(report, logger, steps),
-        )
+        if cfg.agent.name == "awac_mpc":
+            make_policy, params, _ = train_fn(
+                environment=train_env,
+                eval_env=eval_env,
+                planner_environment=planner_env,
+                progress_fn=functools.partial(report, logger, steps),
+            )
+        else:
+            make_policy, params, _ = train_fn(
+                environment=train_env,
+                eval_env=eval_env,
+                progress_fn=functools.partial(report, logger, steps),
+            )
         if cfg.training.render:
             rng = jax.random.split(
                 jax.random.PRNGKey(cfg.training.seed), cfg.training.num_eval_envs

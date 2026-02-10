@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - mujoco_playground_dm_control
+  - override /environment: cartpole_swingup
+  - override /agent: awac_mpc
+  - _self_
+
+training:
+  num_timesteps: 5000000
+  action_repeat: 4
+  safe: false
+  train_domain_randomization: false
+  eval_domain_randomization: false
+  num_eval_episodes: 1
+
+agent:
+  actor_update_source: critic_replay
