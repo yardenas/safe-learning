@@ -617,26 +617,36 @@ def train(
         )
         new_target_qr_params = polyak(training_state.target_qr_params, qr_params)
 
-        (actor_loss, aux), new_policy_params, new_policy_optimizer_state = actor_update(
-            training_state.policy_params,
-            training_state.normalizer_params,
-            qr_params,
-            actor_transitions,
-            key_actor,
-            optimizer_state=training_state.policy_optimizer_state,
-            params=training_state.policy_params,
-        )
+        if False:
+            (
+                (actor_loss, aux),
+                new_policy_params,
+                new_policy_optimizer_state,
+            ) = actor_update(
+                training_state.policy_params,
+                training_state.normalizer_params,
+                qr_params,
+                actor_transitions,
+                key_actor,
+                optimizer_state=training_state.policy_optimizer_state,
+                params=training_state.policy_params,
+            )
 
-        should_update_actor = count % num_critic_updates_per_actor_update == 0
-        update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
-        policy_params = jax.tree_map(
-            update_if_needed, new_policy_params, training_state.policy_params
-        )
-        policy_optimizer_state = jax.tree_map(
-            update_if_needed,
-            new_policy_optimizer_state,
-            training_state.policy_optimizer_state,
-        )
+            should_update_actor = count % num_critic_updates_per_actor_update == 0
+            update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
+            policy_params = jax.tree_map(
+                update_if_needed, new_policy_params, training_state.policy_params
+            )
+            policy_optimizer_state = jax.tree_map(
+                update_if_needed,
+                new_policy_optimizer_state,
+                training_state.policy_optimizer_state,
+            )
+        else:
+            actor_loss = jnp.asarray(0.0, dtype=jnp.float32)
+            aux = {"update_skipped": jnp.asarray(1.0, dtype=jnp.float32)}
+            policy_params = training_state.policy_params
+            policy_optimizer_state = training_state.policy_optimizer_state
 
         new_training_state = training_state.replace(  # type: ignore
             policy_optimizer_state=policy_optimizer_state,
