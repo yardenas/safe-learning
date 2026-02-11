@@ -787,10 +787,8 @@ def train(
         planner_horizon = int(planner_params_template.actions.shape[-2])
 
     sim_prefill_steps_effective = 0
-    if planner_mode:
-        sim_prefill_steps_effective = (
-            sim_prefill_steps if sim_prefill_steps > 0 else min_replay_size
-        )
+    if planner_mode and sim_prefill_steps > 0:
+        sim_prefill_steps_effective = sim_prefill_steps
     sim_prefill_calls = 0
     sim_transitions = 0
     if sim_prefill_steps_effective > 0:
