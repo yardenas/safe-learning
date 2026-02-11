@@ -17,4 +17,4 @@ training:
 agent:
   actor_update_source: critic_replay
   max_replay_size: 1000000
-  grad_updates_per_step: 40
+  grad_updates_per_step: 10
