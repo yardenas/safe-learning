@@ -108,6 +108,10 @@ def _flatten_time_batch_tree(tree: Any, time_len: int, batch_size: int) -> Any:
     return jax.tree.map(_flatten_leaf, tree)
 
 
+def _concat_transition_batches(a: Transition, b: Transition) -> Transition:
+    return jax.tree.map(lambda x, y: jnp.concatenate([x, y], axis=0), a, b)
+
+
 def _init_planner_params(
     controller, seed: int, batch_size: int | None
 ) -> TreeMPCParams:
@@ -613,8 +617,9 @@ def train(
 
         key, planner_key = jax.random.split(key)
         buffer_state, sampled = replay_buffer.sample(buffer_state)
+        sampled_real = float32(_strip_policy_extras(sampled))
         planner_model_params = _planner_model_params(training_state)
-        sampled = _planner_supervised_batch(
+        sampled_planner = _planner_supervised_batch(
             sampled,
             controller,
             planner_params_template,
@@ -622,9 +627,12 @@ def train(
             planner_supervision_mode,
             planner_model_params,
         )
-        sampled = _strip_policy_extras(sampled)
-        sampled = _to_storage_transition(sampled, planner_states=None)
-        actor_buffer_state = actor_replay_buffer.insert(actor_buffer_state, sampled)
+        sampled_planner = float32(_strip_policy_extras(sampled_planner))
+
+        # Keep the original real transition in actor replay in addition to planner data.
+        actor_batch = _concat_transition_batches(sampled_planner, sampled_real)
+        actor_batch = _to_storage_transition(actor_batch, planner_states=None)
+        actor_buffer_state = actor_replay_buffer.insert(actor_buffer_state, actor_batch)
         return buffer_state, actor_buffer_state, key
 
     def sgd_step(
