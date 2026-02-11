@@ -332,8 +332,6 @@ def train(
         sim_env = sim_environment
         if sim_env is None:
             raise ValueError("sim_environment is required for planner modes.")
-        if wrap_env_fn is not None:
-            sim_env = wrap_env_fn(sim_env)
     else:
         sim_env = env
 
