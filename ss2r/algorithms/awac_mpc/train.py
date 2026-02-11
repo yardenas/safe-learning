@@ -36,7 +36,7 @@ make_networks = sac_networks.make_sac_networks
 
 
 ActorUpdateSource = Literal["planner_replay", "planner_online", "critic_replay"]
-PlannerSupervisionMode = Literal["first_action", "all_planner_actions"]
+PlannerSupervisionMode = Literal["all_planner_actions"]
 
 
 @struct.dataclass
@@ -135,30 +135,12 @@ def _planner_params_for_batch(
     return base_params.replace(actions=actions, rng=keys)  # type: ignore
 
 
-def _first_action(params: TreeMPCParams) -> jax.Array:
-    actions = params.actions
-    if actions.ndim == 3:
-        return actions[:, 0]
-    return actions[0]
-
-
 def _planner_model_params(training_state: TrainingState) -> TreeMPCModelParams:
     return TreeMPCModelParams(  # type: ignore
         normalizer_params=training_state.normalizer_params,
         policy_params=training_state.policy_params,
         qr_params=training_state.qr_params,
     )
-
-
-def _optimize_and_action(
-    controller,
-    state: envs.State,
-    params: TreeMPCParams,
-    model_params: TreeMPCModelParams | None = None,
-):
-    params_out, _ = controller.optimize(state, params, model_params)
-    action = _first_action(params_out)
-    return action, params_out
 
 
 def _build_extras(state_info: dict[str, Any], done: jax.Array):
@@ -205,7 +187,7 @@ def _planner_supervised_batch(
     controller,
     planner_params_template: TreeMPCParams,
     key: PRNGKey,
-    supervision_mode: PlannerSupervisionMode = "first_action",
+    supervision_mode: PlannerSupervisionMode = "all_planner_actions",
     planner_model_params: TreeMPCModelParams | None = None,
 ) -> Transition:
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
@@ -215,56 +197,53 @@ def _planner_supervised_batch(
         )
     batch_size = transitions.reward.shape[0]
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
-    if supervision_mode == "first_action":
-        planner_actions, _ = jax.vmap(
-            lambda s, p: _optimize_and_action(controller, s, p, planner_model_params)
-        )(planner_states, planner_params)
-        return transitions._replace(action=planner_actions)
-    if supervision_mode == "all_planner_actions":
-        if not hasattr(controller, "optimize_with_rollouts"):
-            raise ValueError("Controller must implement optimize_with_rollouts.")
-
-        _, rollouts = jax.vmap(
-            lambda s, p: controller.optimize_with_rollouts(s, p, planner_model_params)
-        )(planner_states, planner_params)
-        traj_actions = rollouts.all_traj_actions
-        rewards = rollouts.all_traj_rewards
-        obs = rollouts.all_traj_obs
-        next_obs = rollouts.all_traj_next_obs
-
-        if traj_actions.ndim != 4:
-            raise ValueError(
-                "Expected rollout actions with shape [B, P, T, A] for all_planner_actions."
-            )
-        discount = jnp.ones_like(rewards)
-        truncation = jnp.zeros_like(rewards)
-
-        def _flatten_rollout(x):
-            if not hasattr(x, "shape"):
-                return x
-            if x.ndim < 3:
-                return x
-            return x.reshape((-1,) + x.shape[3:])
-
-        obs_flat = jax.tree.map(_flatten_rollout, obs)
-        next_obs_flat = jax.tree.map(_flatten_rollout, next_obs)
-        action_flat = _flatten_rollout(traj_actions)
-        reward_flat = _flatten_rollout(rewards)
-        discount_flat = _flatten_rollout(discount)
-        truncation_flat = _flatten_rollout(truncation)
-
-        return Transition(
-            observation=obs_flat,
-            action=action_flat,
-            reward=reward_flat,
-            discount=discount_flat,
-            next_observation=next_obs_flat,
-            extras={
-                "state_extras": {"truncation": truncation_flat},
-                "policy_extras": {},
-            },
+    if supervision_mode != "all_planner_actions":
+        raise ValueError(
+            "Only planner_supervision_mode='all_planner_actions' is supported."
         )
-    raise ValueError(f"Unknown supervision_mode: {supervision_mode}")
+    if not hasattr(controller, "optimize_with_rollouts"):
+        raise ValueError("Controller must implement optimize_with_rollouts.")
+
+    _, rollouts = jax.vmap(
+        lambda s, p: controller.optimize_with_rollouts(s, p, planner_model_params)
+    )(planner_states, planner_params)
+    traj_actions = rollouts.all_traj_actions
+    rewards = rollouts.all_traj_rewards
+    obs = rollouts.all_traj_obs
+    next_obs = rollouts.all_traj_next_obs
+
+    if traj_actions.ndim != 4:
+        raise ValueError(
+            "Expected rollout actions with shape [B, P, T, A] for all_planner_actions."
+        )
+    discount = jnp.ones_like(rewards)
+    truncation = jnp.zeros_like(rewards)
+
+    def _flatten_rollout(x):
+        if not hasattr(x, "shape"):
+            return x
+        if x.ndim < 3:
+            return x
+        return x.reshape((-1,) + x.shape[3:])
+
+    obs_flat = jax.tree.map(_flatten_rollout, obs)
+    next_obs_flat = jax.tree.map(_flatten_rollout, next_obs)
+    action_flat = _flatten_rollout(traj_actions)
+    reward_flat = _flatten_rollout(rewards)
+    discount_flat = _flatten_rollout(discount)
+    truncation_flat = _flatten_rollout(truncation)
+
+    return Transition(
+        observation=obs_flat,
+        action=action_flat,
+        reward=reward_flat,
+        discount=discount_flat,
+        next_observation=next_obs_flat,
+        extras={
+            "state_extras": {"truncation": truncation_flat},
+            "policy_extras": {},
+        },
+    )
 
 
 def _tree_finite_fraction(tree: Any) -> jax.Array:
@@ -311,7 +290,7 @@ def train(
     n_heads: int = 1,
     use_bro: bool = True,
     actor_update_source: ActorUpdateSource = "planner_online",
-    planner_supervision_mode: PlannerSupervisionMode = "first_action",
+    planner_supervision_mode: PlannerSupervisionMode = "all_planner_actions",
     planner_batches_per_step: int = 1,
     min_actor_replay_size: int | None = None,
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
@@ -328,7 +307,7 @@ def train(
     value_obs_key: str = "state",
 ):
     valid_actor_sources = {"planner_replay", "planner_online", "critic_replay"}
-    valid_supervision_modes = {"first_action", "all_planner_actions"}
+    valid_supervision_modes = {"all_planner_actions"}
     if actor_update_source not in valid_actor_sources:
         raise ValueError(
             f"Unknown actor_update_source: {actor_update_source}, expected one of {valid_actor_sources}."
@@ -691,19 +670,79 @@ def train(
         )
         new_target_qr_params = polyak(training_state.target_qr_params, qr_params)
 
-        (
-            (actor_loss, aux),
-            new_policy_params,
-            new_policy_optimizer_state,
-        ) = actor_update(
-            training_state.policy_params,
-            training_state.normalizer_params,
-            qr_params,
-            actor_transitions,
-            key_actor,
-            optimizer_state=training_state.policy_optimizer_state,
-            params=training_state.policy_params,
-        )
+        if actor_update_source == "planner_online":
+            total_actor_samples = actor_transitions.reward.shape[0]
+            if total_actor_samples % batch_size != 0:
+                raise ValueError(
+                    "planner_online/all_planner_actions expects actor transitions "
+                    f"divisible by batch_size. got={total_actor_samples}, batch_size={batch_size}"
+                )
+            key_actor, key_perm, key_grad = jax.random.split(key_actor, 3)
+            num_actor_minibatches = total_actor_samples // batch_size
+
+            def _convert_actor_data(x: jnp.ndarray):
+                x = jax.random.permutation(key_perm, x)
+                x = jnp.reshape(x, (num_actor_minibatches, -1) + x.shape[1:])
+                return x
+
+            shuffled_actor_data = jax.tree_util.tree_map(
+                _convert_actor_data, actor_transitions
+            )
+
+            def _actor_step(carry, minibatch):
+                policy_params, policy_optimizer_state, k = carry
+                k, step_key = jax.random.split(k)
+                (
+                    (actor_loss_i, aux_i),
+                    new_policy_params_i,
+                    new_policy_optimizer_state_i,
+                ) = actor_update(
+                    policy_params,
+                    training_state.normalizer_params,
+                    qr_params,
+                    minibatch,
+                    step_key,
+                    optimizer_state=policy_optimizer_state,
+                    params=policy_params,
+                )
+                return (
+                    new_policy_params_i,
+                    new_policy_optimizer_state_i,
+                    k,
+                ), (
+                    actor_loss_i,
+                    aux_i,
+                )
+
+            (
+                (new_policy_params, new_policy_optimizer_state, _),
+                (actor_losses, actor_auxes),
+            ) = jax.lax.scan(
+                _actor_step,
+                (
+                    training_state.policy_params,
+                    training_state.policy_optimizer_state,
+                    key_grad,
+                ),
+                shuffled_actor_data,
+                length=num_actor_minibatches,
+            )
+            actor_loss = jnp.mean(actor_losses)
+            aux = jax.tree.map(jnp.mean, actor_auxes)
+        else:
+            (
+                (actor_loss, aux),
+                new_policy_params,
+                new_policy_optimizer_state,
+            ) = actor_update(
+                training_state.policy_params,
+                training_state.normalizer_params,
+                qr_params,
+                actor_transitions,
+                key_actor,
+                optimizer_state=training_state.policy_optimizer_state,
+                params=training_state.policy_params,
+            )
 
         should_update_actor = count % num_critic_updates_per_actor_update == 0
         update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
