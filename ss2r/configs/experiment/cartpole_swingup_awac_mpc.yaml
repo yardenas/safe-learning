@@ -16,5 +16,4 @@ training:
 
 agent:
   actor_update_source: critic_replay
-  max_replay_size: 25000
-  min_replay_size: 5000
+  max_replay_size: 1000000
