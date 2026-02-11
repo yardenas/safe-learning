@@ -209,18 +209,15 @@ def _planner_supervised_batch(
         _, rollouts = jax.vmap(lambda s, p: controller.optimize_with_rollouts(s, p))(
             planner_states, planner_params
         )
-        traj_obs = rollouts.traj_obs
-        traj_actions = rollouts.traj_actions
-        traj_rewards = rollouts.traj_rewards
+        traj_actions = rollouts.all_traj_actions
+        rewards = rollouts.all_traj_rewards
+        obs = rollouts.all_traj_obs
+        next_obs = rollouts.all_traj_next_obs
 
         if traj_actions.ndim != 4:
             raise ValueError(
                 "Expected rollout actions with shape [B, P, T, A] for all_planner_actions."
             )
-
-        obs = jax.tree.map(lambda x: x[:, :, :-1], traj_obs)
-        next_obs = jax.tree.map(lambda x: x[:, :, 1:], traj_obs)
-        rewards = traj_rewards
         discount = jnp.ones_like(rewards)
         truncation = jnp.zeros_like(rewards)
 

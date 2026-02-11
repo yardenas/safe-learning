@@ -38,9 +38,12 @@ def _gather_tree(tree: Any, idx: jax.Array) -> Any:
 @struct.dataclass
 class _TreeRollout:
     traj_data: mjx.Data
-    traj_obs: Any
     traj_actions: jax.Array
     traj_rewards: jax.Array
+    all_traj_obs: Any
+    all_traj_next_obs: Any
+    all_traj_actions: jax.Array
+    all_traj_rewards: jax.Array
     returns: jax.Array
 
 
@@ -292,6 +295,10 @@ class TreeMPC:
             (num_particles, decision_steps, act_dim), dtype=jnp.float32
         )
         traj_rewards = jnp.zeros((num_particles, decision_steps), dtype=jnp.float32)
+        all_traj_actions = jnp.zeros(
+            (num_particles, decision_steps, act_dim), dtype=jnp.float32
+        )
+        all_traj_rewards = jnp.zeros((num_particles, decision_steps), dtype=jnp.float32)
         traj_data = jax.tree.map(
             lambda x: jnp.zeros(
                 (num_particles, decision_steps + 1) + x.shape, dtype=x.dtype
@@ -299,22 +306,30 @@ class TreeMPC:
             state.data,
         )
         traj_data = jax.tree.map(lambda t, d: t.at[:, 0].set(d), traj_data, states.data)
-        traj_obs = jax.tree.map(
+        all_traj_obs = jax.tree.map(
             lambda x: jnp.zeros(
-                (num_particles, decision_steps + 1) + x.shape, dtype=x.dtype
+                (num_particles, decision_steps) + x.shape, dtype=x.dtype
             ),
-            states.obs,
+            state.obs,
         )
-        traj_obs = jax.tree.map(lambda t, d: t.at[:, 0].set(d), traj_obs, states.obs)
+        all_traj_next_obs = jax.tree.map(
+            lambda x: jnp.zeros(
+                (num_particles, decision_steps) + x.shape, dtype=x.dtype
+            ),
+            state.obs,
+        )
 
         def _step_fn(carry, t):
             (
                 key,
                 states,
                 traj_data,
-                traj_obs,
                 traj_actions,
                 traj_rewards,
+                all_traj_obs,
+                all_traj_next_obs,
+                all_traj_actions,
+                all_traj_rewards,
                 returns,
                 gae_trace,
                 value_start,
@@ -339,15 +354,22 @@ class TreeMPC:
 
             traj_actions = traj_actions.at[:, t, :].set(actions)
             traj_rewards = traj_rewards.at[:, t].set(rewards)
+            all_traj_actions = all_traj_actions.at[:, t, :].set(actions)
+            all_traj_rewards = all_traj_rewards.at[:, t].set(rewards)
+            all_traj_obs = jax.tree.map(
+                lambda to, o: to.at[:, t].set(o),
+                all_traj_obs,
+                states.obs,
+            )
+            all_traj_next_obs = jax.tree.map(
+                lambda to, o: to.at[:, t].set(o),
+                all_traj_next_obs,
+                next_states.obs,
+            )
             traj_data = jax.tree.map(
                 lambda td, d: td.at[:, t + 1].set(d),
                 traj_data,
                 next_states.data,
-            )
-            traj_obs = jax.tree.map(
-                lambda to, d: to.at[:, t + 1].set(d),
-                traj_obs,
-                next_states.obs,
             )
             returns = returns + rewards
 
@@ -386,9 +408,12 @@ class TreeMPC:
                 key,
                 states,
                 traj_data,
-                traj_obs,
                 traj_actions,
                 traj_rewards,
+                all_traj_obs,
+                all_traj_next_obs,
+                all_traj_actions,
+                all_traj_rewards,
                 returns,
                 gae_trace,
                 value_start,
@@ -398,9 +423,12 @@ class TreeMPC:
             key,
             states,
             traj_data,
-            traj_obs,
             traj_actions,
             traj_rewards,
+            all_traj_obs,
+            all_traj_next_obs,
+            all_traj_actions,
+            all_traj_rewards,
             returns,
             gae_trace,
             value_start,
@@ -410,9 +438,12 @@ class TreeMPC:
             key,
             states,
             traj_data,
-            traj_obs,
             traj_actions,
             traj_rewards,
+            all_traj_obs,
+            all_traj_next_obs,
+            all_traj_actions,
+            all_traj_rewards,
             returns,
             gae_trace,
             value_start,
@@ -423,9 +454,12 @@ class TreeMPC:
 
         return _TreeRollout(  # type: ignore
             traj_data=traj_data,
-            traj_obs=traj_obs,
             traj_actions=traj_actions,
             traj_rewards=traj_rewards,
+            all_traj_obs=all_traj_obs,
+            all_traj_next_obs=all_traj_next_obs,
+            all_traj_actions=all_traj_actions,
+            all_traj_rewards=all_traj_rewards,
             returns=returns,
         )
 
@@ -482,22 +516,28 @@ class TreeMPC:
             traj_data_steps,
             states0.data,
         )
-        traj_obs = jax.tree.map(
-            lambda step_obs, o0: jnp.concatenate([o0[:, None, ...], step_obs], axis=1),
-            traj_obs_steps,
-            states0.obs,
-        )
         returns = jnp.sum(traj_rewards, axis=1)
 
         weights = jnn.softmax(returns / self.temperature, axis=0)
         mean_actions = jnp.sum(weights[:, None, None] * actions, axis=0)
+        all_traj_obs = jax.tree.map(
+            lambda step_obs, o0: jnp.concatenate(
+                [o0[:, None, ...], step_obs[:, :-1, ...]], axis=1
+            ),
+            traj_obs_steps,
+            states0.obs,
+        )
+        all_traj_next_obs = traj_obs_steps
 
         return (
             _TreeRollout(  # type: ignore
                 traj_data=traj_data,
-                traj_obs=traj_obs,
                 traj_actions=actions,
                 traj_rewards=traj_rewards,
+                all_traj_obs=all_traj_obs,
+                all_traj_next_obs=all_traj_next_obs,
+                all_traj_actions=actions,
+                all_traj_rewards=traj_rewards,
                 returns=returns,
             ),
             mean_actions,
