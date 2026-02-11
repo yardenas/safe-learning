@@ -801,12 +801,7 @@ def train(
             -sim_prefill_steps_effective // sim_transitions_per_prefill_call
         )
         sim_transitions = sim_prefill_calls * sim_transitions_per_prefill_call
-    if planner_mode:
-        num_prefill_experience_call = 0
-    else:
-        num_prefill_experience_call = -(
-            -min_replay_size // env_steps_per_experience_call
-        )
+    num_prefill_experience_call = -(-min_replay_size // env_steps_per_experience_call)
     num_prefill_env_steps = num_prefill_experience_call * env_steps_per_experience_call
     assert num_timesteps - num_prefill_env_steps >= 0
     num_evals_after_init = max(num_evals - 1, 1)
