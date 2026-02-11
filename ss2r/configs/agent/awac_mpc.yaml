@@ -9,6 +9,8 @@ reward_scaling: 1.0
 tau: 0.005
 min_replay_size: 8192
 max_replay_size: 1000000
+sim_prefill_steps: 0
+critic_pretrain_ratio: 0.0
 grad_updates_per_step: 512
 num_critic_updates_per_actor_update: 1
 deterministic_eval: true

@@ -257,6 +257,9 @@ def train(
     tau: float = 0.005,
     min_replay_size: int = 0,
     max_replay_size: Optional[int] = None,
+    sim_prefill_steps: int = 0,
+    critic_pretrain_ratio: float = 0.0,
+    sim_environment: Optional[envs.Env] = None,
     grad_updates_per_step: int = 1,
     num_critic_updates_per_actor_update: int = 1,
     deterministic_eval: bool = False,
@@ -297,6 +300,10 @@ def train(
         raise ValueError(
             "No training will happen because min_replay_size >= num_timesteps"
         )
+    if sim_prefill_steps < 0:
+        raise ValueError("sim_prefill_steps must be >= 0.")
+    if critic_pretrain_ratio < 0:
+        raise ValueError("critic_pretrain_ratio must be >= 0.")
     if max_replay_size is None:
         max_replay_size = num_timesteps
     if min_actor_replay_size is None:
@@ -313,10 +320,22 @@ def train(
         raise ValueError(
             "planner_environment is required for planner_replay/planner_online modes."
         )
+    if planner_mode and sim_environment is None:
+        raise ValueError(
+            "sim_environment is required for planner_replay/planner_online modes."
+        )
 
     env = environment
     if wrap_env_fn is not None:
         env = wrap_env_fn(env)
+    if planner_mode:
+        sim_env = sim_environment
+        if sim_env is None:
+            raise ValueError("sim_environment is required for planner modes.")
+        if wrap_env_fn is not None:
+            sim_env = wrap_env_fn(sim_env)
+    else:
+        sim_env = env
 
     rng = jax.random.PRNGKey(seed)
     obs_size = env.observation_size
@@ -401,10 +420,22 @@ def train(
                 ),
             )
 
+    sim_prefill_required = planner_mode and (
+        sim_prefill_steps > 0 or min_replay_size > 0
+    )
+
     env_keys = jax.random.split(rng, num_envs)
     reset_fn = jax.jit(env.reset)
     env_state = reset_fn(env_keys)
     env_batched = _is_batched(env_state)
+    sim_env_state = None
+    sim_env_batched = False
+    if sim_prefill_required:
+        rng, sim_reset_key = jax.random.split(rng)
+        sim_env_keys = jax.random.split(sim_reset_key, num_envs)
+        sim_reset_fn = jax.jit(sim_env.reset)
+        sim_env_state = sim_reset_fn(sim_env_keys)
+        sim_env_batched = _is_batched(sim_env_state)
 
     planner_params_template = None
     controller = None
@@ -478,11 +509,14 @@ def train(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
     )
 
-    def collect_real_experience(
+    def _collect_experience(
         training_state: TrainingState,
+        env_local: envs.Env,
         env_state: envs.State,
+        env_batched_local: bool,
         buffer_state: ReplayBufferState,
         key: PRNGKey,
+        count_env_steps: bool,
     ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
         policy = make_policy(
             (training_state.normalizer_params, training_state.policy_params),
@@ -493,7 +527,7 @@ def train(
             state, k = carry
             k, action_key = jax.random.split(k)
             action, _ = policy(state.obs, action_key)
-            next_state = env.step(state, action)
+            next_state = env_local.step(state, action)
             extras = _build_extras(next_state.info, next_state.done)
             if planner_mode:
                 extras["policy_extras"]["planner_state"] = state
@@ -515,7 +549,7 @@ def train(
         if planner_mode:
             raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
             transitions = _strip_policy_extras(transitions)
-            if env_batched:
+            if env_batched_local:
                 time_len, batch_dim = raw_planner_states.reward.shape[:2]
                 planner_states = _flatten_time_batch_tree(
                     raw_planner_states, time_len, batch_dim
@@ -523,7 +557,7 @@ def train(
             else:
                 planner_states = raw_planner_states
 
-        transitions = _flatten_transition_batch(transitions, env_batched)
+        transitions = _flatten_transition_batch(transitions, env_batched_local)
         normalizer_params = running_statistics.update(
             training_state.normalizer_params,
             remove_pixels(transitions.observation),
@@ -531,12 +565,30 @@ def train(
         transitions = _to_storage_transition(transitions, planner_states)
 
         buffer_state = replay_buffer.insert(buffer_state, transitions)
+        env_steps = training_state.env_steps
+        if count_env_steps:
+            env_steps = env_steps + rollout_length * action_repeat * num_envs
         training_state = training_state.replace(  # type: ignore
             normalizer_params=normalizer_params,
-            env_steps=training_state.env_steps
-            + rollout_length * action_repeat * num_envs,
+            env_steps=env_steps,
         )
         return training_state, env_state, buffer_state, key
+
+    def collect_real_experience(
+        training_state: TrainingState,
+        env_state: envs.State,
+        buffer_state: ReplayBufferState,
+        key: PRNGKey,
+    ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
+        return _collect_experience(
+            training_state,
+            env,
+            env_state,
+            env_batched,
+            buffer_state,
+            key,
+            True,
+        )
 
     def push_planner_batch_to_actor_buffer(
         buffer_state: ReplayBufferState,
@@ -703,7 +755,24 @@ def train(
         return training_state, buffer_state, actor_buffer_state, metrics
 
     env_steps_per_experience_call = rollout_length * action_repeat * num_envs
-    num_prefill_experience_call = -(-min_replay_size // env_steps_per_experience_call)
+    sim_prefill_steps_effective = 0
+    if planner_mode:
+        sim_prefill_steps_effective = (
+            sim_prefill_steps if sim_prefill_steps > 0 else min_replay_size
+        )
+    sim_prefill_calls = 0
+    sim_transitions = 0
+    if sim_prefill_steps_effective > 0:
+        sim_prefill_calls = -(
+            -sim_prefill_steps_effective // env_steps_per_experience_call
+        )
+        sim_transitions = sim_prefill_calls * env_steps_per_experience_call
+    if planner_mode:
+        num_prefill_experience_call = 0
+    else:
+        num_prefill_experience_call = -(
+            -min_replay_size // env_steps_per_experience_call
+        )
     num_prefill_env_steps = num_prefill_experience_call * env_steps_per_experience_call
     assert num_timesteps - num_prefill_env_steps >= 0
     num_evals_after_init = max(num_evals - 1, 1)
@@ -733,6 +802,52 @@ def train(
         logging.info(metrics)
         progress_fn(0, metrics)
 
+    def pretrain_critic(
+        training_state: TrainingState,
+        buffer_state: ReplayBufferState,
+        key: PRNGKey,
+        steps: int,
+    ) -> Tuple[TrainingState, ReplayBufferState, PRNGKey, dict[str, jnp.ndarray]]:
+        if steps <= 0:
+            return training_state, buffer_state, key, {}
+
+        def step_fn(carry, _):
+            ts, bs, k = carry
+            k, k_critic = jax.random.split(k)
+            bs, sampled = replay_buffer.sample(bs)
+            sampled = float32(sampled)
+            critic_transitions = _strip_policy_extras(sampled)
+            (critic_loss, _), qr_params, qr_optimizer_state = critic_update(
+                ts.qr_params,
+                ts.policy_params,
+                ts.normalizer_params,
+                ts.target_qr_params,
+                critic_transitions,
+                k_critic,
+                optimizer_state=ts.qr_optimizer_state,
+                params=ts.qr_params,
+            )
+            polyak = lambda target, new: jax.tree.map(
+                lambda x, y: x * (1 - tau) + y * tau, target, new
+            )
+            new_target_qr_params = polyak(ts.target_qr_params, qr_params)
+            ts = ts.replace(  # type: ignore
+                qr_optimizer_state=qr_optimizer_state,
+                qr_params=qr_params,
+                target_qr_params=new_target_qr_params,
+                gradient_steps=ts.gradient_steps + 1,
+            )
+            return (ts, bs, k), critic_loss
+
+        (training_state, buffer_state, key), losses = jax.lax.scan(
+            step_fn,
+            (training_state, buffer_state, key),
+            (),
+            length=steps,
+        )
+        metrics = {"pretrain/critic_loss": jnp.mean(losses)}
+        return training_state, buffer_state, key, metrics
+
     def prefill_real_replay_buffer(
         training_state: TrainingState,
         env_state: envs.State,
@@ -753,10 +868,75 @@ def train(
         )[0]
 
     t = time.time()
+    if sim_prefill_calls > 0:
+        logging.info(
+            "prefill from sim only: sim_prefill_steps=%s sim_prefill_calls=%s",
+            sim_prefill_steps_effective,
+            sim_prefill_calls,
+        )
+        if sim_env_state is None:
+            raise ValueError("sim_prefill_steps > 0 requires a sim_env_state.")
+
+        def prefill_sim_replay_buffer(
+            training_state: TrainingState,
+            env_state: envs.State,
+            buffer_state: ReplayBufferState,
+            key: PRNGKey,
+        ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
+            def f(carry, _):
+                ts, es, bs, k = carry
+                k, new_key = jax.random.split(k)
+                ts, es, bs, _ = _collect_experience(
+                    ts,
+                    sim_env,
+                    es,
+                    sim_env_batched,
+                    bs,
+                    k,
+                    False,
+                )
+                return (ts, es, bs, new_key), ()
+
+            return jax.lax.scan(
+                f,
+                (training_state, env_state, buffer_state, key),
+                (),
+                length=sim_prefill_calls,
+            )[0]
+
+        rng, sim_prefill_key = jax.random.split(rng)
+        training_state, sim_env_state, buffer_state, _ = prefill_sim_replay_buffer(
+            training_state, sim_env_state, buffer_state, sim_prefill_key
+        )
+        if critic_pretrain_ratio > 0:
+            critic_pretrain_steps = int(
+                jnp.ceil(sim_transitions * critic_pretrain_ratio)
+            )
+            rng, pretrain_key = jax.random.split(rng)
+            (
+                training_state,
+                buffer_state,
+                rng,
+                pretrain_metrics,
+            ) = pretrain_critic(
+                training_state, buffer_state, pretrain_key, critic_pretrain_steps
+            )
+            if pretrain_metrics:
+                logging.info(
+                    "critic pretrain steps %s loss %s",
+                    critic_pretrain_steps,
+                    pretrain_metrics["pretrain/critic_loss"],
+                )
     rng, prefill_key = jax.random.split(rng)
-    training_state, env_state, buffer_state, _ = prefill_real_replay_buffer(
-        training_state, env_state, buffer_state, prefill_key
-    )
+    if num_prefill_experience_call > 0:
+        logging.info(
+            "prefill from real: min_replay_size=%s prefill_calls=%s",
+            min_replay_size,
+            num_prefill_experience_call,
+        )
+        training_state, env_state, buffer_state, _ = prefill_real_replay_buffer(
+            training_state, env_state, buffer_state, prefill_key
+        )
 
     if actor_update_source == "planner_replay":
         planner_actions_per_state = (

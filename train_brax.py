@@ -133,6 +133,9 @@ def main(cfg):
             actor_update_source = cfg.agent.get("actor_update_source", "planner_online")
             if actor_update_source in ("planner_replay", "planner_online"):
                 planner_env, _ = benchmark_suites.make_real_env(cfg)
+                sim_env = train_env
+            else:
+                sim_env = None
     if use_vision:
         _validate_madrona_args(
             train_env,
@@ -149,6 +152,7 @@ def main(cfg):
                 environment=train_env,
                 eval_env=eval_env,
                 planner_environment=planner_env,
+                sim_environment=sim_env,
                 progress_fn=functools.partial(report, logger, steps),
             )
         else:
