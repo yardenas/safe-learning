@@ -6,6 +6,7 @@ defaults:
   - _self_
 
 training:
+  num_envs: 10
   num_timesteps: 100000
   action_repeat: 4
   safe: false
