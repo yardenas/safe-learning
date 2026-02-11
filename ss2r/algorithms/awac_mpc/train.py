@@ -286,7 +286,6 @@ def train(
     max_replay_size: Optional[int] = None,
     sim_prefill_steps: int = 0,
     critic_pretrain_ratio: float = 0.0,
-    sim_environment: Optional[envs.Env] = None,
     grad_updates_per_step: int = 1,
     num_critic_updates_per_actor_update: int = 1,
     deterministic_eval: bool = False,
@@ -347,20 +346,10 @@ def train(
         raise ValueError(
             "planner_environment is required for planner_replay/planner_online modes."
         )
-    if planner_mode and sim_environment is None:
-        raise ValueError(
-            "sim_environment is required for planner_replay/planner_online modes."
-        )
 
     env = environment
     if wrap_env_fn is not None:
         env = wrap_env_fn(env)
-    if planner_mode:
-        sim_env = sim_environment
-        if sim_env is None:
-            raise ValueError("sim_environment is required for planner modes.")
-    else:
-        sim_env = env
 
     rng = jax.random.PRNGKey(seed)
     obs_size = env.observation_size
@@ -445,10 +434,6 @@ def train(
                 ),
             )
 
-    sim_prefill_required = planner_mode and (
-        sim_prefill_steps > 0 or min_replay_size > 0
-    )
-
     env_keys = jax.random.split(rng, num_envs)
     reset_fn = jax.jit(env.reset)
     env_state = reset_fn(env_keys)
@@ -457,12 +442,6 @@ def train(
             "AWAC-MPC expects a batched training environment state. "
             "Use a vectorized/wrapped env with batch dimension."
         )
-    sim_env_state = None
-    if sim_prefill_required:
-        rng, sim_reset_key = jax.random.split(rng)
-        sim_env_keys = jax.random.split(sim_reset_key, num_envs)
-        sim_reset_fn = jax.jit(sim_env.reset)
-        sim_env_state = sim_reset_fn(sim_env_keys)
 
     planner_params_template = None
     controller = None
@@ -903,17 +882,14 @@ def train(
             sim_prefill_calls,
             sim_transitions,
         )
-        if sim_env_state is None:
-            raise ValueError("sim_prefill_steps > 0 requires a sim_env_state.")
 
         def prefill_sim_replay_buffer(
             training_state: TrainingState,
-            env_state: envs.State,
             buffer_state: ReplayBufferState,
             key: PRNGKey,
-        ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
+        ) -> Tuple[TrainingState, ReplayBufferState, PRNGKey]:
             def f(carry, _):
-                ts, es, bs, k = carry
+                ts, bs, k = carry
                 k, reset_key, plan_key, new_key = jax.random.split(k, 4)
                 real_keys = jax.random.split(reset_key, num_envs)
                 real_state = reset_fn(real_keys)
@@ -954,18 +930,18 @@ def train(
                 )
                 bs = replay_buffer.insert(bs, sim_transitions)
                 ts = ts.replace(normalizer_params=normalizer_params)  # type: ignore
-                return (ts, es, bs, new_key), ()
+                return (ts, bs, new_key), ()
 
             return jax.lax.scan(
                 f,
-                (training_state, env_state, buffer_state, key),
+                (training_state, buffer_state, key),
                 (),
                 length=sim_prefill_calls,
             )[0]
 
         rng, sim_prefill_key = jax.random.split(rng)
-        training_state, sim_env_state, buffer_state, _ = prefill_sim_replay_buffer(
-            training_state, sim_env_state, buffer_state, sim_prefill_key
+        training_state, buffer_state, _ = prefill_sim_replay_buffer(
+            training_state, buffer_state, sim_prefill_key
         )
         if critic_pretrain_ratio > 0:
             critic_pretrain_steps = int(
