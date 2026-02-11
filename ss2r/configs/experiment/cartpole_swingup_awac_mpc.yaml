@@ -6,8 +6,7 @@ defaults:
   - _self_
 
 training:
-  num_envs: 5
-  num_timesteps: 25000
+  num_timesteps: 5000000
   action_repeat: 4
   safe: false
   train_domain_randomization: false
@@ -16,4 +15,3 @@ training:
 
 agent:
   actor_update_source: critic_replay
-  max_replay_size: 1000000

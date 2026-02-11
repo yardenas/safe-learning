@@ -22,6 +22,13 @@ class TreeMPCParams:
     rng: jax.Array
 
 
+@struct.dataclass
+class TreeMPCModelParams:
+    normalizer_params: Any
+    policy_params: Any
+    qr_params: Any
+
+
 def _squash_to_bounds(u: jax.Array, low: jax.Array, high: jax.Array) -> jax.Array:
     z = jnp.tanh(u)
     return low + 0.5 * (z + 1.0) * (high - low)
@@ -231,29 +238,66 @@ class TreeMPC:
             value_obs_key=value_obs_key,
         )
 
-    def _has_policy(self) -> bool:
+    def bind_sac_network(self, sac_network: Any) -> None:
+        self._sac_network = sac_network
+
+    def _has_policy(self, model_params: TreeMPCModelParams | None = None) -> bool:
+        if model_params is not None:
+            return (
+                self._sac_network is not None and model_params.policy_params is not None
+            )
         return self._sac_network is not None and self._policy_params is not None
 
-    def _has_critic(self) -> bool:
+    def _has_critic(self, model_params: TreeMPCModelParams | None = None) -> bool:
+        if model_params is not None:
+            return self._sac_network is not None and model_params.qr_params is not None
         return self._sac_network is not None and self._qr_params is not None
 
-    def _sample_policy_actions(self, obs: Any, key: jax.Array) -> jax.Array:
+    def _sample_policy_actions(
+        self,
+        obs: Any,
+        key: jax.Array,
+        model_params: TreeMPCModelParams | None = None,
+    ) -> jax.Array:
         assert self._sac_network is not None
-        assert self._policy_params is not None
+        normalizer_params = (
+            model_params.normalizer_params
+            if model_params is not None
+            else self._normalizer_params
+        )
+        policy_params = (
+            model_params.policy_params
+            if model_params is not None
+            else self._policy_params
+        )
+        assert policy_params is not None
         dist_params = self._sac_network.policy_network.apply(
-            self._normalizer_params,
-            self._policy_params,
+            normalizer_params,
+            policy_params,
             obs,
         )
         dist = self._sac_network.parametric_action_distribution
         return dist.sample(dist_params, key)
 
-    def _critic_value(self, obs: Any, action: jax.Array) -> jax.Array:
+    def _critic_value(
+        self,
+        obs: Any,
+        action: jax.Array,
+        model_params: TreeMPCModelParams | None = None,
+    ) -> jax.Array:
         assert self._sac_network is not None
-        assert self._qr_params is not None
+        normalizer_params = (
+            model_params.normalizer_params
+            if model_params is not None
+            else self._normalizer_params
+        )
+        qr_params = (
+            model_params.qr_params if model_params is not None else self._qr_params
+        )
+        assert qr_params is not None
         q_values = self._sac_network.qr_network.apply(
-            self._normalizer_params,
-            self._qr_params,
+            normalizer_params,
+            qr_params,
             obs,
             action,
         )
@@ -281,7 +325,11 @@ class TreeMPC:
         return final_state, jnp.sum(rewards)
 
     def _tree_expand(
-        self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
+        self,
+        key: jax.Array,
+        state: mjx_env.State,
+        params: TreeMPCParams,
+        model_params: TreeMPCModelParams | None = None,
     ) -> _TreeRollout:
         num_particles = self.n_particles
         decision_steps = self.ctrl_steps
@@ -335,9 +383,11 @@ class TreeMPC:
                 value_start,
             ) = carry
             key, k_sel = jax.random.split(key)
-            if self.use_policy and self._has_policy():
+            if self.use_policy and self._has_policy(model_params):
                 key, k_policy, k_value = jax.random.split(key, 3)
-                actions = self._sample_policy_actions(states.obs, k_policy)
+                actions = self._sample_policy_actions(
+                    states.obs, k_policy, model_params
+                )
                 actions = jnp.clip(actions, self.task.u_min, self.task.u_max)
             else:
                 key, k_noise = jax.random.split(key, 2)
@@ -373,18 +423,20 @@ class TreeMPC:
             )
             returns = returns + rewards
 
-            if self.use_critic and self._has_critic():
-                value_s = self._critic_value(states.obs, actions)
-                if self.use_policy and self._has_policy():
+            if self.use_critic and self._has_critic(model_params):
+                value_s = self._critic_value(states.obs, actions, model_params)
+                if self.use_policy and self._has_policy(model_params):
                     value_actions = self._sample_policy_actions(
-                        next_states.obs, k_value
+                        next_states.obs, k_value, model_params
                     )
                     value_actions = jnp.clip(
                         value_actions, self.task.u_min, self.task.u_max
                     )
                 else:
                     value_actions = actions
-                value_next = self._critic_value(next_states.obs, value_actions)
+                value_next = self._critic_value(
+                    next_states.obs, value_actions, model_params
+                )
                 delta = rewards + self.gamma * value_next - value_s
                 gae_trace = delta + self.gamma * self.gae_lambda * gae_trace
                 value_start = jnp.where(t == 0, value_s, value_start)
@@ -449,7 +501,7 @@ class TreeMPC:
             value_start,
         ) = carryN
 
-        if self.use_critic and self._has_critic():
+        if self.use_critic and self._has_critic(model_params):
             returns = value_start + gae_trace
 
         return _TreeRollout(  # type: ignore
@@ -464,13 +516,17 @@ class TreeMPC:
         )
 
     def _mppi_expand(
-        self, key: jax.Array, state: mjx_env.State, params: TreeMPCParams
+        self,
+        key: jax.Array,
+        state: mjx_env.State,
+        params: TreeMPCParams,
+        model_params: TreeMPCModelParams | None = None,
     ) -> tuple[_TreeRollout, jax.Array]:
         num_particles = self.n_particles
         decision_steps = self.ctrl_steps
         act_dim = self.task.u_min.shape[-1]
 
-        if self.use_policy and self._has_policy():
+        if self.use_policy and self._has_policy(model_params):
             noise_std = self.policy_noise_std
         else:
             noise_std = self.action_noise_std
@@ -480,9 +536,11 @@ class TreeMPC:
         def _scan_fn(carry, t):
             states, k = carry
             k, k_policy, k_noise = jax.random.split(k, 3)
-            if self.use_policy and self._has_policy():
+            if self.use_policy and self._has_policy(model_params):
                 policy_keys = jax.random.split(k_policy, num_particles)
-                actions = jax.vmap(self._sample_policy_actions)(states.obs, policy_keys)
+                actions = jax.vmap(
+                    lambda o, pk: self._sample_policy_actions(o, pk, model_params)
+                )(states.obs, policy_keys)
             else:
                 mu = jnp.broadcast_to(params.actions[t], (num_particles, act_dim))
                 actions = mu
@@ -543,14 +601,19 @@ class TreeMPC:
             mean_actions,
         )
 
-    def optimize(self, state: mjx_env.State, params: TreeMPCParams):
+    def optimize(
+        self,
+        state: mjx_env.State,
+        params: TreeMPCParams,
+        model_params: TreeMPCModelParams | None = None,
+    ):
         if self.policy_action_only:
-            if not self.use_policy or not self._has_policy():
+            if not self.use_policy or not self._has_policy(model_params):
                 raise ValueError(
                     "policy_action_only=True requires a loaded policy checkpoint."
                 )
             rng, action_key = jax.random.split(params.rng)
-            action = self._sample_policy_actions(state.obs, action_key)
+            action = self._sample_policy_actions(state.obs, action_key, model_params)
             action = jnp.clip(action, self.task.u_min, self.task.u_max)
             if action.ndim > 1:
                 action = action[0]
@@ -577,7 +640,9 @@ class TreeMPC:
             def _mppi_iter_step(carry, _):
                 params, rng = carry
                 rng, mppi_rng = jax.random.split(rng)
-                rollouts, mean_actions = self._mppi_expand(mppi_rng, state, params)
+                rollouts, mean_actions = self._mppi_expand(
+                    mppi_rng, state, params, model_params
+                )
                 params = params.replace(actions=mean_actions, rng=rng)
                 return (params, rng), rollouts
 
@@ -604,7 +669,7 @@ class TreeMPC:
         def _sir_iter_step(carry, _):
             params, rng = carry
             rng, tree_rng = jax.random.split(rng)
-            rollouts = self._tree_expand(tree_rng, state, params)
+            rollouts = self._tree_expand(tree_rng, state, params, model_params)
 
             rng, select_rng = jax.random.split(rng)
             idx = jax.random.randint(select_rng, (), 0, rollouts.traj_actions.shape[0])
@@ -637,7 +702,10 @@ class TreeMPC:
         )
 
     def optimize_with_rollouts(
-        self, state: mjx_env.State, params: TreeMPCParams
+        self,
+        state: mjx_env.State,
+        params: TreeMPCParams,
+        model_params: TreeMPCModelParams | None = None,
     ) -> tuple[TreeMPCParams, _TreeRollout]:
         if self.policy_action_only:
             raise ValueError(
@@ -649,7 +717,9 @@ class TreeMPC:
             def _mppi_iter_step(carry, _):
                 params, rng = carry
                 rng, mppi_rng = jax.random.split(rng)
-                rollouts, mean_actions = self._mppi_expand(mppi_rng, state, params)
+                rollouts, mean_actions = self._mppi_expand(
+                    mppi_rng, state, params, model_params
+                )
                 params = params.replace(actions=mean_actions, rng=rng)
                 return (params, rng), rollouts
 
@@ -662,7 +732,7 @@ class TreeMPC:
         def _sir_iter_step(carry, _):
             params, rng = carry
             rng, tree_rng = jax.random.split(rng)
-            rollouts = self._tree_expand(tree_rng, state, params)
+            rollouts = self._tree_expand(tree_rng, state, params, model_params)
 
             rng, select_rng = jax.random.split(rng)
             idx = jax.random.randint(select_rng, (), 0, rollouts.traj_actions.shape[0])

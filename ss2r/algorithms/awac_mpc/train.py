@@ -19,7 +19,7 @@ from ml_collections import config_dict
 import ss2r.algorithms.sac.networks as sac_networks
 from ss2r.algorithms.awac_mpc import losses as awac_losses
 from ss2r.algorithms.hydrax_mpc.factory import make_controller, make_task
-from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPCParams
+from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPCModelParams, TreeMPCParams
 from ss2r.algorithms.sac import gradients
 from ss2r.algorithms.sac.types import (
     Metrics,
@@ -138,8 +138,21 @@ def _first_action(params: TreeMPCParams) -> jax.Array:
     return actions[0]
 
 
-def _optimize_and_action(controller, state: envs.State, params: TreeMPCParams):
-    params_out, _ = controller.optimize(state, params)
+def _planner_model_params(training_state: TrainingState) -> TreeMPCModelParams:
+    return TreeMPCModelParams(  # type: ignore
+        normalizer_params=training_state.normalizer_params,
+        policy_params=training_state.policy_params,
+        qr_params=training_state.qr_params,
+    )
+
+
+def _optimize_and_action(
+    controller,
+    state: envs.State,
+    params: TreeMPCParams,
+    model_params: TreeMPCModelParams | None = None,
+):
+    params_out, _ = controller.optimize(state, params, model_params)
     action = _first_action(params_out)
     return action, params_out
 
@@ -189,6 +202,7 @@ def _planner_supervised_batch(
     planner_params_template: TreeMPCParams,
     key: PRNGKey,
     supervision_mode: PlannerSupervisionMode = "first_action",
+    planner_model_params: TreeMPCModelParams | None = None,
 ) -> Transition:
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
     if planner_states is None:
@@ -199,16 +213,16 @@ def _planner_supervised_batch(
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
     if supervision_mode == "first_action":
         planner_actions, _ = jax.vmap(
-            lambda s, p: _optimize_and_action(controller, s, p)
+            lambda s, p: _optimize_and_action(controller, s, p, planner_model_params)
         )(planner_states, planner_params)
         return transitions._replace(action=planner_actions)
     if supervision_mode == "all_planner_actions":
         if not hasattr(controller, "optimize_with_rollouts"):
             raise ValueError("Controller must implement optimize_with_rollouts.")
 
-        _, rollouts = jax.vmap(lambda s, p: controller.optimize_with_rollouts(s, p))(
-            planner_states, planner_params
-        )
+        _, rollouts = jax.vmap(
+            lambda s, p: controller.optimize_with_rollouts(s, p, planner_model_params)
+        )(planner_states, planner_params)
         traj_actions = rollouts.all_traj_actions
         rewards = rollouts.all_traj_rewards
         obs = rollouts.all_traj_obs
@@ -458,6 +472,8 @@ def train(
         )
         task = make_task(planner_env)  # type: ignore[arg-type]
         controller = make_controller(controller_cfg, task, env=planner_env)  # type: ignore[arg-type]
+        if hasattr(controller, "bind_sac_network"):
+            controller.bind_sac_network(sac_network)
         planner_params_template = _init_planner_params(controller, seed, None)
 
     dummy_planner_state = None
@@ -585,6 +601,7 @@ def train(
         )
 
     def push_planner_batch_to_actor_buffer(
+        training_state: TrainingState,
         buffer_state: ReplayBufferState,
         actor_buffer_state: ReplayBufferState,
         key: PRNGKey,
@@ -596,12 +613,14 @@ def train(
 
         key, planner_key = jax.random.split(key)
         buffer_state, sampled = replay_buffer.sample(buffer_state)
+        planner_model_params = _planner_model_params(training_state)
         sampled = _planner_supervised_batch(
             sampled,
             controller,
             planner_params_template,
             planner_key,
             planner_supervision_mode,
+            planner_model_params,
         )
         sampled = _strip_policy_extras(sampled)
         sampled = _to_storage_transition(sampled, planner_states=None)
@@ -641,6 +660,7 @@ def train(
                 planner_params_template,
                 key_planner,
                 planner_supervision_mode,
+                _planner_model_params(training_state),
             )
             actor_transitions = _strip_policy_extras(actor_transitions)
             actor_transitions = float32(actor_transitions)
@@ -927,6 +947,7 @@ def train(
                 planner_params_template,
                 plan_key,
                 "all_planner_actions",
+                _planner_model_params(training_state),
             )
             sim_transitions = _strip_policy_extras(sim_transitions)
             normalizer_params = running_statistics.update(
@@ -1002,6 +1023,7 @@ def train(
                     actor_buffer_state,
                     rng,
                 ) = push_planner_batch_to_actor_buffer(
+                    training_state,
                     buffer_state,
                     actor_buffer_state,
                     rng,
@@ -1033,6 +1055,7 @@ def train(
                     actor_buffer_state,
                     key,
                 ) = push_planner_batch_to_actor_buffer(
+                    training_state,
                     buffer_state,
                     actor_buffer_state,
                     key,
