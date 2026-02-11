@@ -14,7 +14,7 @@ training:
 agent:
   controller_name: tree
   controller_kwargs:
-    n_particles: 256
+    num_samples: 256
     gamma: 0.99
     gae_lambda: 0.0
     temperature: 0.5

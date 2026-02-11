@@ -442,10 +442,18 @@ def train(
     if planner_mode:
         planner_env = planner_environment
         assert planner_env is not None
-        controller_kwargs = {
-            **(controller_kwargs or {}),
-            "gamma": discounting,
-        }
+        controller_kwargs = dict(controller_kwargs or {})
+        configured_action_repeat = controller_kwargs.get("action_repeat")
+        if configured_action_repeat is not None and int(
+            configured_action_repeat
+        ) != int(action_repeat):
+            logging.warning(
+                "Overriding controller action_repeat=%s with training.action_repeat=%s.",
+                configured_action_repeat,
+                action_repeat,
+            )
+        controller_kwargs["action_repeat"] = int(action_repeat)
+        controller_kwargs["gamma"] = discounting
         controller_cfg = SimpleNamespace(
             agent={
                 "controller_name": controller_name,
@@ -822,7 +830,7 @@ def train(
     if planner_mode:
         assert controller is not None
         assert planner_params_template is not None
-        planner_particles = int(controller.n_particles)  # type: ignore[arg-type]
+        planner_particles = int(controller.num_samples)  # type: ignore[arg-type]
         planner_horizon = int(planner_params_template.actions.shape[-2])
 
     sim_prefill_steps_effective = 0
