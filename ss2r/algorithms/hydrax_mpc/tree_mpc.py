@@ -38,6 +38,7 @@ def _gather_tree(tree: Any, idx: jax.Array) -> Any:
 @struct.dataclass
 class _TreeRollout:
     traj_data: mjx.Data
+    traj_obs: Any
     traj_actions: jax.Array
     traj_rewards: jax.Array
     returns: jax.Array
@@ -298,12 +299,20 @@ class TreeMPC:
             state.data,
         )
         traj_data = jax.tree.map(lambda t, d: t.at[:, 0].set(d), traj_data, states.data)
+        traj_obs = jax.tree.map(
+            lambda x: jnp.zeros(
+                (num_particles, decision_steps + 1) + x.shape, dtype=x.dtype
+            ),
+            states.obs,
+        )
+        traj_obs = jax.tree.map(lambda t, d: t.at[:, 0].set(d), traj_obs, states.obs)
 
         def _step_fn(carry, t):
             (
                 key,
                 states,
                 traj_data,
+                traj_obs,
                 traj_actions,
                 traj_rewards,
                 returns,
@@ -334,6 +343,11 @@ class TreeMPC:
                 lambda td, d: td.at[:, t + 1].set(d),
                 traj_data,
                 next_states.data,
+            )
+            traj_obs = jax.tree.map(
+                lambda to, d: to.at[:, t + 1].set(d),
+                traj_obs,
+                next_states.obs,
             )
             returns = returns + rewards
 
@@ -372,6 +386,7 @@ class TreeMPC:
                 key,
                 states,
                 traj_data,
+                traj_obs,
                 traj_actions,
                 traj_rewards,
                 returns,
@@ -383,6 +398,7 @@ class TreeMPC:
             key,
             states,
             traj_data,
+            traj_obs,
             traj_actions,
             traj_rewards,
             returns,
@@ -394,6 +410,7 @@ class TreeMPC:
             key,
             states,
             traj_data,
+            traj_obs,
             traj_actions,
             traj_rewards,
             returns,
@@ -406,6 +423,7 @@ class TreeMPC:
 
         return _TreeRollout(  # type: ignore
             traj_data=traj_data,
+            traj_obs=traj_obs,
             traj_actions=traj_actions,
             traj_rewards=traj_rewards,
             returns=returns,
@@ -439,16 +457,23 @@ class TreeMPC:
             next_states, rewards = jax.vmap(lambda s, a: self._step_env_repeat(s, a))(
                 states, actions
             )
-            return (next_states, k), (actions, rewards, next_states.data)
+            return (next_states, k), (
+                actions,
+                rewards,
+                next_states.data,
+                next_states.obs,
+            )
 
-        (final_states, _), (actions, rewards, traj_data_steps) = jax.lax.scan(
-            _scan_fn, (states0, key), jnp.arange(decision_steps)
-        )
+        (
+            (final_states, _),
+            (actions, rewards, traj_data_steps, traj_obs_steps),
+        ) = jax.lax.scan(_scan_fn, (states0, key), jnp.arange(decision_steps))
         del final_states
 
         actions = jnp.swapaxes(actions, 0, 1)
         traj_rewards = jnp.swapaxes(rewards, 0, 1)
         traj_data_steps = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), traj_data_steps)
+        traj_obs_steps = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), traj_obs_steps)
 
         traj_data = jax.tree.map(
             lambda step_data, s0: jnp.concatenate(
@@ -456,6 +481,11 @@ class TreeMPC:
             ),
             traj_data_steps,
             states0.data,
+        )
+        traj_obs = jax.tree.map(
+            lambda step_obs, o0: jnp.concatenate([o0[:, None, ...], step_obs], axis=1),
+            traj_obs_steps,
+            states0.obs,
         )
         returns = jnp.sum(traj_rewards, axis=1)
 
@@ -465,6 +495,7 @@ class TreeMPC:
         return (
             _TreeRollout(  # type: ignore
                 traj_data=traj_data,
+                traj_obs=traj_obs,
                 traj_actions=actions,
                 traj_rewards=traj_rewards,
                 returns=returns,
@@ -564,6 +595,47 @@ class TreeMPC:
             costs=costs,
             trace_sites=trace_sites,
         )
+
+    def optimize_with_rollouts(
+        self, state: mjx_env.State, params: TreeMPCParams
+    ) -> tuple[TreeMPCParams, _TreeRollout]:
+        if self.policy_action_only:
+            raise ValueError(
+                "optimize_with_rollouts does not support policy_action_only."
+            )
+
+        if self.planner == "mppi":
+
+            def _mppi_iter_step(carry, _):
+                params, rng = carry
+                rng, mppi_rng = jax.random.split(rng)
+                rollouts, mean_actions = self._mppi_expand(mppi_rng, state, params)
+                params = params.replace(actions=mean_actions, rng=rng)
+                return (params, rng), rollouts
+
+            (params, _), rollouts = jax.lax.scan(
+                _mppi_iter_step, (params, params.rng), jnp.arange(self.iterations)
+            )
+            rollouts = jax.tree.map(lambda x: x[-1], rollouts)
+            return params, rollouts
+
+        def _sir_iter_step(carry, _):
+            params, rng = carry
+            rng, tree_rng = jax.random.split(rng)
+            rollouts = self._tree_expand(tree_rng, state, params)
+
+            rng, select_rng = jax.random.split(rng)
+            idx = jax.random.randint(select_rng, (), 0, rollouts.traj_actions.shape[0])
+            sampled_actions = rollouts.traj_actions[idx]
+            params = params.replace(actions=sampled_actions, rng=rng)
+
+            return (params, rng), rollouts
+
+        (params, _), rollouts = jax.lax.scan(
+            _sir_iter_step, (params, params.rng), jnp.arange(self.iterations)
+        )
+        rollouts = jax.tree.map(lambda x: x[-1], rollouts)
+        return params, rollouts
 
     def init_params(self, seed: int = 0) -> TreeMPCParams:
         rng = jax.random.key(seed)
