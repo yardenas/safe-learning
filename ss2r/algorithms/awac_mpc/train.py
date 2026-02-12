@@ -443,16 +443,15 @@ def train(
         planner_env = planner_environment
         assert planner_env is not None
         controller_kwargs = dict(controller_kwargs or {})
-        configured_action_repeat = controller_kwargs.get("action_repeat")
+        configured_action_repeat = controller_kwargs.get("action_repeat", action_repeat)
         if configured_action_repeat is not None and int(
             configured_action_repeat
         ) != int(action_repeat):
             logging.warning(
-                "Overriding controller action_repeat=%s with training.action_repeat=%s.",
+                "controller action_repeat=%s with training.action_repeat=%s.",
                 configured_action_repeat,
                 action_repeat,
             )
-        controller_kwargs["action_repeat"] = int(action_repeat)
         controller_kwargs["n_critics"] = int(n_critics)
         controller_kwargs["n_heads"] = int(n_heads)
         controller_kwargs["gamma"] = discounting
