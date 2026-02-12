@@ -7,6 +7,7 @@ from omegaconf import DictConfig
 
 from ss2r.algorithms.hydrax_mpc.controller import wrap_controller_for_env_step
 from ss2r.algorithms.hydrax_mpc.factory import make_controller, make_task
+from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPC
 from ss2r.rl.evaluation import Evaluator
 
 
@@ -163,6 +164,14 @@ def train(
         env=environment,  # ty:ignore[invalid-argument-type]
         policy_checkpoint_path=policy_checkpoint_path,
     )
+    if isinstance(controller, TreeMPC) and (
+        controller.use_policy or controller.use_critic
+    ):
+        raise ValueError(
+            "hydrax_mpc/train.py runs planning-only controllers. "
+            "TreeMPC use_policy/use_critic require passing model_params each planning step; "
+            "use awac_mpc/train.py for policy/critic-guided tree planning."
+        )
     if not getattr(controller, "uses_env_step", False):
         controller = wrap_controller_for_env_step(
             controller,
