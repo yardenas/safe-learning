@@ -28,7 +28,7 @@ from ss2r.algorithms.sac.types import (
     float16,
     float32,
 )
-from ss2r.rl.evaluation import ConstraintsEvaluator
+from ss2r.rl.evaluation import ConstraintsEvaluator, Evaluator
 from ss2r.rl.utils import quantize_images, remove_pixels, restore_state
 
 make_inference_fn = sac_networks.make_inference_fn
@@ -869,12 +869,78 @@ def train(
         budget=float("inf"),
         num_episodes=num_eval_episodes,
     )
+    planner_eval_enabled = (
+        planner_mode and controller is not None and planner_params_template is not None
+    )
+
+    planner_evaluator = None
+    if planner_eval_enabled:
+
+        def _planner_eval_policy_fn(_):
+            def _planner_eval_policy(state: envs.State, rng: PRNGKey, params):
+                assert controller is not None
+                assert planner_params_template is not None
+                del rng
+                model_params, planner_params = params
+                if _is_batched(state):
+                    planner_params_out, _ = jax.vmap(
+                        lambda s, p: controller.optimize(s, p, model_params)
+                    )(state, planner_params)
+                    action = planner_params_out.actions[:, 0, :]
+                else:
+                    planner_params_out, _ = controller.optimize(
+                        state, planner_params, model_params
+                    )
+                    action = planner_params_out.actions[0]
+                return action, (model_params, planner_params_out), {}
+
+            return _planner_eval_policy
+
+        planner_evaluator = Evaluator(
+            eval_env,
+            _planner_eval_policy_fn,
+            num_eval_envs=num_eval_envs,
+            episode_length=episode_length,
+            action_repeat=action_repeat,
+            key=jax.random.PRNGKey(seed + 2),
+        )
+
+    def run_planner_evaluation(
+        training_state: TrainingState,
+        key: PRNGKey,
+        prefix: str = "planner",
+    ) -> tuple[dict[str, float], PRNGKey]:
+        if not planner_eval_enabled or planner_evaluator is None:
+            return {}, key
+        assert planner_params_template is not None
+
+        model_params = _planner_model_params(training_state)
+        key, params_key = jax.random.split(key)
+        planner_params = _planner_params_for_batch(
+            planner_params_template, params_key, num_eval_envs
+        )
+        planner_eval_params = (model_params, planner_params)
+        raw_metrics = planner_evaluator.run_evaluation(
+            planner_eval_params,
+            training_metrics={},
+        )
+        metrics: dict[str, float] = {}
+        for name, value in raw_metrics.items():
+            if "cost" in name:
+                continue
+            if name.startswith("eval/"):
+                metrics[f"eval/{prefix}/{name[5:]}"] = float(value)
+            else:
+                metrics[f"{prefix}/{name}"] = float(value)
+        return metrics, key
 
     if num_evals > 1:
         metrics = evaluator.run_evaluation(
             (training_state.normalizer_params, training_state.policy_params),
             training_metrics={},
         )
+        planner_eval_metrics, rng = run_planner_evaluation(training_state, rng)
+        metrics = {**metrics, **planner_eval_metrics}
         logging.info(metrics)
         progress_fn(0, metrics)
 
@@ -1250,6 +1316,8 @@ def train(
             (training_state.normalizer_params, training_state.policy_params),
             training_metrics,
         )
+        planner_eval_metrics, rng = run_planner_evaluation(training_state, rng)
+        metrics = {**metrics, **planner_eval_metrics}
         logging.info(metrics)
         progress_fn(current_step, metrics)
 
