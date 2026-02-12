@@ -189,12 +189,15 @@ def _planner_supervised_batch(
     key: PRNGKey,
     supervision_mode: PlannerSupervisionMode = "all_planner_actions",
     planner_model_params: TreeMPCModelParams | None = None,
-) -> Transition:
+    planner_rollout_steps: int = 1,
+) -> tuple[Transition, jax.Array]:
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
     if planner_states is None:
         raise ValueError(
             "Planner-supervised mode requires planner_state in replay data."
         )
+    if planner_rollout_steps < 1:
+        raise ValueError("planner_rollout_steps must be >= 1.")
     batch_size = transitions.reward.shape[0]
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
     if supervision_mode != "all_planner_actions":
@@ -204,27 +207,45 @@ def _planner_supervised_batch(
     if not hasattr(controller, "optimize_with_rollouts"):
         raise ValueError("Controller must implement optimize_with_rollouts.")
 
-    _, rollouts = jax.vmap(
-        lambda s, p: controller.optimize_with_rollouts(s, p, planner_model_params)
-    )(planner_states, planner_params)
+    def _rollout_step(carry, _):
+        current_states, current_params = carry
+        next_params, rollouts = jax.vmap(
+            lambda s, p: controller.optimize_with_rollouts(s, p, planner_model_params)
+        )(current_states, current_params)
+        first_actions = next_params.actions[:, 0, :]
+        next_states, _ = jax.vmap(lambda s, a: controller._step_env_repeat(s, a))(
+            current_states, first_actions
+        )
+        return (next_states, next_params), rollouts
+
+    (_, _), rollouts = jax.lax.scan(
+        _rollout_step,
+        (planner_states, planner_params),
+        (),
+        length=planner_rollout_steps,
+    )
     traj_actions = rollouts.all_traj_actions
     rewards = rollouts.all_traj_rewards
     obs = rollouts.all_traj_obs
     next_obs = rollouts.all_traj_next_obs
 
-    if traj_actions.ndim != 4:
+    if traj_actions.ndim != 5:
         raise ValueError(
-            "Expected rollout actions with shape [B, P, T, A] for all_planner_actions."
+            "Expected rollout actions with shape [R, B, P, T, A] for all_planner_actions."
         )
     discount = jnp.ones_like(rewards)
     truncation = jnp.zeros_like(rewards)
+    # Sum rewards over planning horizon, then average over all rollout dims.
+    avg_rollout_return = jnp.mean(jnp.sum(rewards, axis=-1))
 
     def _flatten_rollout(x):
         if not hasattr(x, "shape"):
             return x
-        if x.ndim < 3:
-            return x
-        return x.reshape((-1,) + x.shape[3:])
+        if x.ndim < 4:
+            raise ValueError(
+                "Expected rollout tensors with shape [R, B, P, T, ...] for planner supervision."
+            )
+        return x.reshape((-1,) + x.shape[4:])
 
     obs_flat = jax.tree.map(_flatten_rollout, obs)
     next_obs_flat = jax.tree.map(_flatten_rollout, next_obs)
@@ -243,7 +264,7 @@ def _planner_supervised_batch(
             "state_extras": {"truncation": truncation_flat},
             "policy_extras": {},
         },
-    )
+    ), avg_rollout_return
 
 
 def _tree_finite_fraction(tree: Any) -> jax.Array:
@@ -292,6 +313,7 @@ def train(
     actor_update_source: ActorUpdateSource = "planner_online",
     planner_supervision_mode: PlannerSupervisionMode = "all_planner_actions",
     planner_batches_per_step: int = 1,
+    planner_rollout_steps: int = 1,
     min_actor_replay_size: int | None = None,
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     checkpoint_logdir: Optional[str] = None,
@@ -332,6 +354,8 @@ def train(
     planner_mode = actor_update_source in {"planner_replay", "planner_online"}
     if planner_batches_per_step < 1:
         raise ValueError("planner_batches_per_step must be >= 1.")
+    if planner_rollout_steps < 1:
+        raise ValueError("planner_rollout_steps must be >= 1.")
     if planner_mode and controller_name != "tree":
         raise ValueError(
             "Planner-supervised modes only support controller_name='tree'."
@@ -597,9 +621,14 @@ def train(
         buffer_state: ReplayBufferState,
         actor_buffer_state: ReplayBufferState,
         key: PRNGKey,
-    ) -> Tuple[ReplayBufferState, ReplayBufferState, PRNGKey]:
+    ) -> Tuple[ReplayBufferState, ReplayBufferState, PRNGKey, jax.Array]:
         if not planner_mode:
-            return buffer_state, actor_buffer_state, key
+            return (
+                buffer_state,
+                actor_buffer_state,
+                key,
+                jnp.asarray(0.0, dtype=jnp.float32),
+            )
         assert controller is not None
         assert planner_params_template is not None
 
@@ -607,13 +636,14 @@ def train(
         buffer_state, sampled = replay_buffer.sample(buffer_state)
         sampled_real = float32(_strip_policy_extras(sampled))
         planner_model_params = _planner_model_params(training_state)
-        sampled_planner = _planner_supervised_batch(
+        sampled_planner, avg_rollout_return = _planner_supervised_batch(
             sampled,
             controller,
             planner_params_template,
             planner_key,
             planner_supervision_mode,
             planner_model_params,
+            planner_rollout_steps,
         )
         sampled_planner = float32(_strip_policy_extras(sampled_planner))
 
@@ -621,7 +651,7 @@ def train(
         actor_batch = _concat_transition_batches(sampled_planner, sampled_real)
         actor_batch = _to_storage_transition(actor_batch, planner_states=None)
         actor_buffer_state = actor_replay_buffer.insert(actor_buffer_state, actor_batch)
-        return buffer_state, actor_buffer_state, key
+        return buffer_state, actor_buffer_state, key, avg_rollout_return
 
     def sgd_step(
         carry: Tuple[TrainingState, ReplayBufferState, ReplayBufferState, PRNGKey, int],
@@ -638,6 +668,7 @@ def train(
         sampled = float32(sampled)
 
         critic_transitions = _strip_policy_extras(sampled)
+        planner_avg_rollout_return = jnp.asarray(0.0, dtype=jnp.float32)
 
         if actor_update_source == "planner_replay":
             actor_buffer_state, actor_transitions = actor_replay_buffer.sample(
@@ -650,13 +681,14 @@ def train(
                 and controller is not None
                 and planner_params_template is not None
             )
-            actor_transitions = _planner_supervised_batch(
+            actor_transitions, planner_avg_rollout_return = _planner_supervised_batch(
                 sampled_for_planner,
                 controller,
                 planner_params_template,
                 key_planner,
                 planner_supervision_mode,
                 _planner_model_params(training_state),
+                planner_rollout_steps,
             )
             actor_transitions = _strip_policy_extras(actor_transitions)
             actor_transitions = float32(actor_transitions)
@@ -777,6 +809,7 @@ def train(
         metrics = {
             "critic_loss": critic_loss,
             "actor_loss": actor_loss,
+            "planner/avg_rollout_return": planner_avg_rollout_return,
             "actor/loss_is_finite": jnp.isfinite(actor_loss).astype(jnp.float32),
             "critic/loss_is_finite": jnp.isfinite(critic_loss).astype(jnp.float32),
             "batch/reward_mean": jnp.mean(critic_transitions.reward),
@@ -1056,7 +1089,7 @@ def train(
                 },
             )
             assert planner_params_template is not None
-            sim_transitions = _planner_supervised_batch(
+            sim_transitions, _ = _planner_supervised_batch(
                 seed_transitions,
                 controller,
                 planner_params_template,
@@ -1118,7 +1151,7 @@ def train(
 
     if actor_update_source == "planner_replay":
         planner_transitions_per_state = (
-            planner_particles * planner_horizon
+            planner_rollout_steps * planner_particles * planner_horizon
             if planner_mode and planner_supervision_mode == "all_planner_actions"
             else 1
         )
@@ -1137,6 +1170,7 @@ def train(
                     buffer_state,
                     actor_buffer_state,
                     rng,
+                    _,
                 ) = push_planner_batch_to_actor_buffer(
                     training_state,
                     buffer_state,
@@ -1163,18 +1197,26 @@ def train(
         training_state, env_state, buffer_state, key = collect_real_experience(
             training_state, env_state, buffer_state, key
         )
+        planner_replay_rollout_return = jnp.asarray(0.0, dtype=jnp.float32)
         if actor_update_source == "planner_replay":
             for _ in range(planner_batches_per_step):
                 (
                     buffer_state,
                     actor_buffer_state,
                     key,
+                    planner_return,
                 ) = push_planner_batch_to_actor_buffer(
                     training_state,
                     buffer_state,
                     actor_buffer_state,
                     key,
                 )
+                planner_replay_rollout_return = (
+                    planner_replay_rollout_return + planner_return
+                )
+            planner_replay_rollout_return = (
+                planner_replay_rollout_return / planner_batches_per_step
+            )
 
         (
             training_state,
@@ -1192,6 +1234,9 @@ def train(
             training_metrics["actor_buffer_current_size"] = actor_replay_buffer.size(
                 actor_buffer_state
             )
+            training_metrics[
+                "planner/avg_rollout_return"
+            ] = planner_replay_rollout_return
         return (
             training_state,
             env_state,
