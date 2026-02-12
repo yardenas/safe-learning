@@ -36,9 +36,7 @@ controller_kwargs:
   horizon: 100
   use_policy: true
   use_critic: true
-  action_repeat: ${training.action_repeat}
   planner: sir
-  gamma: ${discounting}
   action_noise_std: 0.3
   mode: resample
   gae_lambda: 0.0
