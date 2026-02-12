@@ -98,22 +98,12 @@ def make_controller(
         allowed_keys = {
             "num_samples",
             "horizon",
-            "policy_checkpoint_path",
-            "policy_noise_std",
             "gae_lambda",
-            "policy_action_only",
             "use_policy",
             "use_critic",
-            "action_repeat",
-            "normalize_observations",
-            "policy_hidden_layer_sizes",
-            "value_hidden_layer_sizes",
-            "activation",
             "n_critics",
             "n_heads",
-            "use_bro",
-            "policy_obs_key",
-            "value_obs_key",
+            "action_repeat",
             "planner",
             "gamma",
             "temperature",
@@ -126,7 +116,5 @@ def make_controller(
             for key, value in controller_kwargs.items()
             if key in allowed_keys
         }
-        if policy_checkpoint_path is not None:
-            controller_kwargs["policy_checkpoint_path"] = policy_checkpoint_path
         return TreeMPC(task, **controller_kwargs)
     raise ValueError(f"Unknown controller_name: {controller_name}")

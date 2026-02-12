@@ -1,17 +1,12 @@
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Optional
 
 import jax
 import jax.nn as jnn
 import jax.numpy as jnp
-from brax.training.acme import running_statistics, specs
-from brax.training.agents.sac import checkpoint as sac_checkpoint
 from flax import struct
 from hydrax.alg_base import Trajectory
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
-
-from ss2r.algorithms.sac import networks as sac_networks
-from ss2r.rl.utils import remove_pixels
 
 from .task import MujocoPlaygroundTask
 
@@ -63,22 +58,12 @@ class TreeMPC:
         *,
         num_samples: int,
         horizon: Optional[int] = None,
-        policy_checkpoint_path: str | None = None,
-        policy_noise_std: float = 0.05,
         gae_lambda: float = 0.0,
-        policy_action_only: bool = False,
-        use_policy: bool = True,
-        use_critic: bool | None = None,
-        action_repeat: int = 1,
-        normalize_observations: bool = True,
-        policy_hidden_layer_sizes: Sequence[int] = (256, 256, 256),
-        value_hidden_layer_sizes: Sequence[int] = (512, 512),
-        activation: str = "swish",
+        use_policy: bool = False,
+        use_critic: bool = False,
         n_critics: int = 2,
         n_heads: int = 1,
-        use_bro: bool = True,
-        policy_obs_key: str = "state",
-        value_obs_key: str = "state",
+        action_repeat: int = 1,
         planner: str = "sir",
         gamma: float = 0.99,
         temperature: float = 1.0,
@@ -107,151 +92,44 @@ class TreeMPC:
         self.mode = mode
         self.iterations = int(iterations)
         self.uses_env_step = True
-        self.policy_noise_std = float(policy_noise_std)
         self.gae_lambda = float(gae_lambda)
-        self.policy_action_only = bool(policy_action_only)
         self.use_policy = bool(use_policy)
-        if use_critic is None:
-            use_critic = use_policy
         self.use_critic = bool(use_critic)
-
-        self._policy_params = None
-        self._qr_params = None
-        self._normalizer_params = None
-        self._sac_network = None
         self._n_critics = int(n_critics)
         self._n_heads = int(n_heads)
-        self._normalize_observations = bool(normalize_observations)
+        if self._n_critics < 1 or self._n_heads < 1:
+            raise ValueError("TreeMPC requires n_critics >= 1 and n_heads >= 1.")
 
-        if self.use_policy or self.use_critic:
-            if policy_checkpoint_path is not None:
-                self._load_policy_and_critic(
-                    policy_checkpoint_path,
-                    policy_hidden_layer_sizes=policy_hidden_layer_sizes,
-                    value_hidden_layer_sizes=value_hidden_layer_sizes,
-                    activation=activation,
-                    use_bro=use_bro,
-                    policy_obs_key=policy_obs_key,
-                    value_obs_key=value_obs_key,
-                )
-            else:
-                self._init_policy_and_critic(
-                    policy_hidden_layer_sizes=policy_hidden_layer_sizes,
-                    value_hidden_layer_sizes=value_hidden_layer_sizes,
-                    activation=activation,
-                    use_bro=use_bro,
-                    policy_obs_key=policy_obs_key,
-                    value_obs_key=value_obs_key,
-                )
-
-    def _init_policy_and_critic(
-        self,
-        *,
-        policy_hidden_layer_sizes: Sequence[int],
-        value_hidden_layer_sizes: Sequence[int],
-        activation: str,
-        use_bro: bool,
-        policy_obs_key: str,
-        value_obs_key: str,
-        seed: int = 0,
-    ) -> None:
-        obs_size = self.task.env.observation_size
-        action_size = (
-            self.task.env.action_size
-            if hasattr(self.task.env, "action_size")
-            else self.task.u_min.shape[-1]
-        )
-        preprocess_fn = (
-            running_statistics.normalize
-            if self._normalize_observations
-            else (lambda x, y: x)
-        )
-        activation_fn = getattr(jnn, activation)
-        self._sac_network = sac_networks.make_sac_networks(  # type: ignore
-            observation_size=obs_size,
-            action_size=action_size,
-            preprocess_observations_fn=preprocess_fn,  # ty:ignore[invalid-argument-type]
-            policy_hidden_layer_sizes=policy_hidden_layer_sizes,
-            value_hidden_layer_sizes=value_hidden_layer_sizes,
-            activation=activation_fn,
-            use_bro=use_bro,
-            n_critics=self._n_critics,
-            n_heads=self._n_heads,
-            policy_obs_key=policy_obs_key,
-            value_obs_key=value_obs_key,
-        )
-        rng = jax.random.PRNGKey(seed)
-        rng, key_policy = jax.random.split(rng)
-        rng, key_qr = jax.random.split(rng)
-        self._policy_params = self._sac_network.policy_network.init(key_policy)  # type: ignore
-        self._qr_params = self._sac_network.qr_network.init(key_qr)  # type: ignore
-
-        if isinstance(obs_size, Mapping):
-            obs_shape = {
-                k: specs.Array(v, jnp.dtype("float32")) for k, v in obs_size.items()
-            }
-        else:
-            obs_shape = specs.Array((obs_size,), jnp.dtype("float32"))
-        self._normalizer_params = running_statistics.init_state(
-            remove_pixels(obs_shape)
-        )
-
-    def _load_policy_and_critic(
-        self,
-        checkpoint_path: str,
-        *,
-        policy_hidden_layer_sizes: Sequence[int],
-        value_hidden_layer_sizes: Sequence[int],
-        activation: str,
-        use_bro: bool,
-        policy_obs_key: str,
-        value_obs_key: str,
-    ) -> None:
-        params = sac_checkpoint.load(checkpoint_path)
-        self._normalizer_params = params[0]
-        self._policy_params = params[1]
-        self._qr_params = params[3]
-
-        obs_size = self.task.env.observation_size
-        action_size = (
-            self.task.env.action_size
-            if hasattr(self.task.env, "action_size")
-            else self.task.u_min.shape[-1]
-        )
-        preprocess_fn = (
-            running_statistics.normalize
-            if self._normalize_observations
-            else (lambda x, y: x)
-        )
-        activation_fn = getattr(jnn, activation)
-        self._sac_network = sac_networks.make_sac_networks(  # type: ignore
-            observation_size=obs_size,
-            action_size=action_size,
-            preprocess_observations_fn=preprocess_fn,  # ty:ignore[invalid-argument-type]
-            policy_hidden_layer_sizes=policy_hidden_layer_sizes,
-            value_hidden_layer_sizes=value_hidden_layer_sizes,
-            activation=activation_fn,
-            use_bro=use_bro,
-            n_critics=self._n_critics,
-            n_heads=self._n_heads,
-            policy_obs_key=policy_obs_key,
-            value_obs_key=value_obs_key,
-        )
+        self._sac_network = None
 
     def bind_sac_network(self, sac_network: Any) -> None:
         self._sac_network = sac_network
 
     def _has_policy(self, model_params: TreeMPCModelParams | None = None) -> bool:
-        if model_params is not None:
-            return (
-                self._sac_network is not None and model_params.policy_params is not None
-            )
-        return self._sac_network is not None and self._policy_params is not None
+        return (
+            self._sac_network is not None
+            and model_params is not None
+            and model_params.policy_params is not None
+        )
 
     def _has_critic(self, model_params: TreeMPCModelParams | None = None) -> bool:
-        if model_params is not None:
-            return self._sac_network is not None and model_params.qr_params is not None
-        return self._sac_network is not None and self._qr_params is not None
+        return (
+            self._sac_network is not None
+            and model_params is not None
+            and model_params.qr_params is not None
+        )
+
+    def _validate_model_params(self, model_params: TreeMPCModelParams | None) -> None:
+        if self.use_policy and not self._has_policy(model_params):
+            raise ValueError(
+                "TreeMPC with use_policy=True requires a bound SAC network and "
+                "model_params with policy_params."
+            )
+        if self.use_critic and not self._has_critic(model_params):
+            raise ValueError(
+                "TreeMPC with use_critic=True requires a bound SAC network and "
+                "model_params with qr_params."
+            )
 
     def _sample_policy_actions(
         self,
@@ -259,20 +137,17 @@ class TreeMPC:
         key: jax.Array,
         model_params: TreeMPCModelParams | None = None,
     ) -> jax.Array:
-        assert self._sac_network is not None
-        normalizer_params = (
-            model_params.normalizer_params
-            if model_params is not None
-            else self._normalizer_params
-        )
-        policy_params = (
-            model_params.policy_params
-            if model_params is not None
-            else self._policy_params
-        )
-        assert policy_params is not None
+        if self._sac_network is None or model_params is None:
+            raise ValueError(
+                "_sample_policy_actions requires a bound SAC network and model_params."
+            )
+        policy_params = model_params.policy_params
+        if policy_params is None:
+            raise ValueError(
+                "_sample_policy_actions requires model_params.policy_params."
+            )
         dist_params = self._sac_network.policy_network.apply(
-            normalizer_params,
+            model_params.normalizer_params,
             policy_params,
             obs,
         )
@@ -285,24 +160,28 @@ class TreeMPC:
         action: jax.Array,
         model_params: TreeMPCModelParams | None = None,
     ) -> jax.Array:
-        assert self._sac_network is not None
-        normalizer_params = (
-            model_params.normalizer_params
-            if model_params is not None
-            else self._normalizer_params
-        )
-        qr_params = (
-            model_params.qr_params if model_params is not None else self._qr_params
-        )
-        assert qr_params is not None
+        if self._sac_network is None or model_params is None:
+            raise ValueError(
+                "_critic_value requires a bound SAC network and model_params."
+            )
+        qr_params = model_params.qr_params
+        if qr_params is None:
+            raise ValueError("_critic_value requires model_params.qr_params.")
         q_values = self._sac_network.qr_network.apply(
-            normalizer_params,
+            model_params.normalizer_params,
             qr_params,
             obs,
             action,
         )
         if q_values.ndim == 1:
             q_values = q_values[:, None]
+        expected_width = self._n_critics * self._n_heads
+        if q_values.shape[-1] != expected_width:
+            raise ValueError(
+                "Unexpected critic output width for TreeMPC. "
+                f"got={q_values.shape[-1]}, expected={expected_width} "
+                "(n_critics * n_heads)."
+            )
         q_values = q_values.reshape((q_values.shape[0], self._n_critics, self._n_heads))
         q_values = jnp.min(q_values, axis=1)
         return jnp.mean(q_values, axis=-1)
@@ -526,11 +405,6 @@ class TreeMPC:
         decision_steps = self.ctrl_steps
         act_dim = self.task.u_min.shape[-1]
 
-        if self.use_policy and self._has_policy(model_params):
-            noise_std = self.policy_noise_std
-        else:
-            noise_std = self.action_noise_std
-
         states0 = _broadcast_tree(state, num_particles)
 
         def _scan_fn(carry, t):
@@ -544,8 +418,10 @@ class TreeMPC:
             else:
                 mu = jnp.broadcast_to(params.actions[t], (num_particles, act_dim))
                 actions = mu
-            noise = jax.random.normal(k_noise, actions.shape) * noise_std
-            actions = jnp.clip(actions + noise, self.task.u_min, self.task.u_max)
+                noise = (
+                    jax.random.normal(k_noise, actions.shape) * self.action_noise_std
+                )
+                actions = jnp.clip(actions + noise, self.task.u_min, self.task.u_max)
             next_states, rewards = jax.vmap(lambda s, a: self._step_env_repeat(s, a))(
                 states, actions
             )
@@ -557,7 +433,7 @@ class TreeMPC:
             )
 
         (
-            (final_states, _),
+            (final_states, post_rollout_key),
             (actions, rewards, traj_data_steps, traj_obs_steps),
         ) = jax.lax.scan(_scan_fn, (states0, key), jnp.arange(decision_steps))
         del final_states
@@ -575,6 +451,54 @@ class TreeMPC:
             states0.data,
         )
         returns = jnp.sum(traj_rewards, axis=1)
+        if self.use_critic and self._has_critic(model_params):
+            if self.use_policy and self._has_policy(model_params):
+                value_keys = jax.random.split(
+                    post_rollout_key, num_particles * decision_steps
+                )
+                value_keys = value_keys.reshape(
+                    (num_particles, decision_steps) + value_keys.shape[1:]
+                )
+                value_actions = jax.vmap(
+                    lambda obs_p, keys_p: jax.vmap(
+                        lambda o, k: self._sample_policy_actions(o, k, model_params)
+                    )(obs_p, keys_p)
+                )(traj_obs_steps, value_keys)
+                value_actions = jnp.clip(
+                    value_actions, self.task.u_min, self.task.u_max
+                )
+            else:
+                value_actions = actions
+
+            flat_next_obs = jax.tree.map(
+                lambda x: x.reshape((num_particles * decision_steps,) + x.shape[2:]),
+                traj_obs_steps,
+            )
+            flat_value_actions = value_actions.reshape(
+                (num_particles * decision_steps, act_dim)
+            )
+            flat_values_next = self._critic_value(
+                flat_next_obs,
+                flat_value_actions,
+                model_params,
+            )
+            values_next = flat_values_next.reshape((num_particles, decision_steps))
+
+            # Direct TD(lambda) return recursion:
+            # G_t = r_t + gamma * ((1 - lambda) * V_{t+1} + lambda * G_{t+1})
+            rev_ts = jnp.arange(decision_steps - 1, -1, -1)
+
+            def _td_lambda_step(g_next, t):
+                r_t = traj_rewards[:, t]
+                v_tp1 = values_next[:, t]
+                g_t = r_t + self.gamma * (
+                    (1.0 - self.gae_lambda) * v_tp1 + self.gae_lambda * g_next
+                )
+                return g_t, g_t
+
+            bootstrap = values_next[:, -1]
+            td_lambda_return, _ = jax.lax.scan(_td_lambda_step, bootstrap, rev_ts)
+            returns = td_lambda_return
 
         weights = jnn.softmax(returns / self.temperature, axis=0)
         mean_actions = jnp.sum(weights[:, None, None] * actions, axis=0)
@@ -607,34 +531,7 @@ class TreeMPC:
         params: TreeMPCParams,
         model_params: TreeMPCModelParams | None = None,
     ):
-        if self.policy_action_only:
-            if not self.use_policy or not self._has_policy(model_params):
-                raise ValueError(
-                    "policy_action_only=True requires a loaded policy checkpoint."
-                )
-            rng, action_key = jax.random.split(params.rng)
-            action = self._sample_policy_actions(state.obs, action_key, model_params)
-            action = jnp.clip(action, self.task.u_min, self.task.u_max)
-            if action.ndim > 1:
-                action = action[0]
-            action_seq = jnp.broadcast_to(
-                action, (self.ctrl_steps, self.task.u_min.shape[-1])
-            )
-            params = params.replace(actions=action_seq, rng=rng)  # type: ignore
-
-            sites = self.task.get_trace_sites(state.data)
-            trace_sites = jnp.broadcast_to(sites, (self.ctrl_steps + 1,) + sites.shape)[
-                None, ...
-            ]
-            controls = action_seq[None, ...]
-            costs = jnp.zeros((1, self.ctrl_steps), dtype=jnp.float32)
-            return params, Trajectory(
-                controls=controls,
-                knots=controls,
-                costs=costs,
-                trace_sites=trace_sites,
-            )
-
+        self._validate_model_params(model_params)
         if self.planner == "mppi":
 
             def _mppi_iter_step(carry, _):
@@ -707,11 +604,7 @@ class TreeMPC:
         params: TreeMPCParams,
         model_params: TreeMPCModelParams | None = None,
     ) -> tuple[TreeMPCParams, _TreeRollout]:
-        if self.policy_action_only:
-            raise ValueError(
-                "optimize_with_rollouts does not support policy_action_only."
-            )
-
+        self._validate_model_params(model_params)
         if self.planner == "mppi":
 
             def _mppi_iter_step(carry, _):

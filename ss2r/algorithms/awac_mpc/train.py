@@ -453,6 +453,8 @@ def train(
                 action_repeat,
             )
         controller_kwargs["action_repeat"] = int(action_repeat)
+        controller_kwargs["n_critics"] = int(n_critics)
+        controller_kwargs["n_heads"] = int(n_heads)
         controller_kwargs["gamma"] = discounting
         controller_cfg = SimpleNamespace(
             agent={
