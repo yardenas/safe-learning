@@ -204,52 +204,63 @@ def _planner_supervised_batch(
         raise ValueError(
             "Only planner_supervision_mode='all_planner_actions' is supported."
         )
-    if not hasattr(controller, "optimize_with_rollouts"):
-        raise ValueError("Controller must implement optimize_with_rollouts.")
 
     def _rollout_step(carry, _):
         current_states, current_params = carry
-        next_params, rollouts = jax.vmap(
-            lambda s, p: controller.optimize_with_rollouts(s, p, planner_model_params)
+        next_params, _ = jax.vmap(
+            lambda s, p: controller.optimize(s, p, planner_model_params)
         )(current_states, current_params)
-        first_actions = next_params.actions[:, 0, :]
-        next_states, _ = jax.vmap(lambda s, a: controller._step_env_repeat(s, a))(
-            current_states, first_actions
+        action = next_params.actions[:, 0, :]
+        next_states, rewards = jax.vmap(lambda s, a: controller._step_env_repeat(s, a))(
+            current_states, action
         )
-        return (next_states, next_params), rollouts
+        discount = 1.0 - next_states.done.astype(jnp.float32)
+        if "truncation" in next_states.info:
+            truncation = next_states.info["truncation"]
+        else:
+            truncation = jnp.zeros_like(rewards)
+        step_transition = (
+            current_states.obs,
+            action,
+            rewards,
+            next_states.obs,
+            discount,
+            truncation,
+        )
+        return (next_states, next_params), step_transition
 
-    (_, _), rollouts = jax.lax.scan(
+    (
+        (_, _),
+        (
+            obs,
+            actions,
+            rewards,
+            next_obs,
+            discount,
+            truncation,
+        ),
+    ) = jax.lax.scan(
         _rollout_step,
         (planner_states, planner_params),
         (),
         length=planner_rollout_steps,
     )
-    traj_actions = rollouts.all_traj_actions
-    rewards = rollouts.all_traj_rewards
-    obs = rollouts.all_traj_obs
-    next_obs = rollouts.all_traj_next_obs
 
-    if traj_actions.ndim != 5:
-        raise ValueError(
-            "Expected rollout actions with shape [R, B, P, T, A] for all_planner_actions."
-        )
-    discount = jnp.ones_like(rewards)
-    truncation = jnp.zeros_like(rewards)
-    # Sum rewards over planning horizon, then average over all rollout dims.
-    avg_rollout_return = jnp.mean(jnp.sum(rewards, axis=-1))
+    # Sum rewards over rollout steps and average over batch.
+    avg_rollout_return = jnp.mean(jnp.sum(rewards, axis=0))
 
     def _flatten_rollout(x):
         if not hasattr(x, "shape"):
             return x
-        if x.ndim < 4:
+        if x.ndim < 2:
             raise ValueError(
-                "Expected rollout tensors with shape [R, B, P, T, ...] for planner supervision."
+                "Expected rollout tensors with shape [R, B, ...] for planner supervision."
             )
-        return x.reshape((-1,) + x.shape[4:])
+        return x.reshape((-1,) + x.shape[2:])
 
     obs_flat = jax.tree.map(_flatten_rollout, obs)
     next_obs_flat = jax.tree.map(_flatten_rollout, next_obs)
-    action_flat = _flatten_rollout(traj_actions)
+    action_flat = _flatten_rollout(actions)
     reward_flat = _flatten_rollout(rewards)
     discount_flat = _flatten_rollout(discount)
     truncation_flat = _flatten_rollout(truncation)
@@ -858,14 +869,7 @@ def train(
         return training_state, buffer_state, actor_buffer_state, metrics
 
     env_steps_per_experience_call = rollout_length * action_repeat * num_envs
-    planner_particles = 1
-    planner_horizon = 1
     planner_prefill_batch_size = num_envs
-    if planner_mode:
-        assert controller is not None
-        assert planner_params_template is not None
-        planner_particles = int(controller.num_samples)  # type: ignore[arg-type]
-        planner_horizon = int(planner_params_template.actions.shape[-2])
 
     sim_prefill_steps_effective = 0
     if planner_mode and sim_prefill_steps > 0:
@@ -874,7 +878,7 @@ def train(
     sim_transitions = 0
     if sim_prefill_steps_effective > 0:
         sim_transitions_per_prefill_call = (
-            planner_prefill_batch_size * planner_particles * planner_horizon
+            planner_prefill_batch_size * planner_rollout_steps
         )
         sim_prefill_calls = -(
             -sim_prefill_steps_effective // sim_transitions_per_prefill_call
@@ -1067,9 +1071,9 @@ def train(
             key, reset_key, plan_key = jax.random.split(key, 3)
             real_keys = jax.random.split(reset_key, num_envs)
             real_state = reset_fn(real_keys)
-            if not hasattr(controller, "optimize_with_rollouts"):
+            if not hasattr(controller, "optimize"):
                 raise ValueError(
-                    "Controller must implement optimize_with_rollouts for planner prefill."
+                    "Controller must implement optimize for planner prefill."
                 )
             planner_state = real_state
             prefill_batch_size = num_envs
@@ -1096,6 +1100,7 @@ def train(
                 plan_key,
                 "all_planner_actions",
                 _planner_model_params(training_state),
+                planner_rollout_steps,
             )
             sim_transitions = _strip_policy_extras(sim_transitions)
             normalizer_params = running_statistics.update(
@@ -1151,7 +1156,7 @@ def train(
 
     if actor_update_source == "planner_replay":
         planner_transitions_per_state = (
-            planner_rollout_steps * planner_particles * planner_horizon
+            planner_rollout_steps
             if planner_mode and planner_supervision_mode == "all_planner_actions"
             else 1
         )
