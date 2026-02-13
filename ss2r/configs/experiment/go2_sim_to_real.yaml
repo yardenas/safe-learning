@@ -1,23 +1,16 @@
 # @package _global_
 defaults:
   - go2_sim_to_real_sac
-  - override /agent/replay_buffer: pytree
   - _self_
-  
-
 
 training:
   num_timesteps: 100000000
   train_domain_randomization: true
   eval_domain_randomization: true
-  
+
 environment:
-  task_params:
-    command_config:
-      a: [0.5, 0.8, 1.2] 
   train_params:
     floor_friction: [0.7, 0.7]
-  
 
 agent:
   n_critics: 2
