@@ -35,7 +35,7 @@ make_inference_fn = sac_networks.make_inference_fn
 make_networks = sac_networks.make_sac_networks
 
 
-ActorUpdateSource = Literal["planner_replay", "planner_online", "critic_replay"]
+ActorUpdateSource = Literal["planner_online", "critic_replay"]
 
 
 @struct.dataclass
@@ -316,9 +316,7 @@ def train(
     n_heads: int = 1,
     use_bro: bool = True,
     actor_update_source: ActorUpdateSource = "planner_online",
-    planner_batches_per_step: int = 1,
     planner_rollout_steps: int = 1,
-    min_actor_replay_size: int | None = None,
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     checkpoint_logdir: Optional[str] = None,
     restore_checkpoint_path: Optional[str] = None,
@@ -332,7 +330,7 @@ def train(
     policy_obs_key: str = "state",
     value_obs_key: str = "state",
 ):
-    valid_actor_sources = {"planner_replay", "planner_online", "critic_replay"}
+    valid_actor_sources = {"planner_online", "critic_replay"}
     if actor_update_source not in valid_actor_sources:
         raise ValueError(
             f"Unknown actor_update_source: {actor_update_source}, expected one of {valid_actor_sources}."
@@ -347,12 +345,7 @@ def train(
         raise ValueError("critic_pretrain_ratio must be >= 0.")
     if max_replay_size is None:
         max_replay_size = num_timesteps
-    if min_actor_replay_size is None:
-        min_actor_replay_size = batch_size
-
-    planner_mode = actor_update_source in {"planner_replay", "planner_online"}
-    if planner_batches_per_step < 1:
-        raise ValueError("planner_batches_per_step must be >= 1.")
+    planner_mode = actor_update_source == "planner_online"
     if planner_rollout_steps < 1:
         raise ValueError("planner_rollout_steps must be >= 1.")
     if planner_mode and controller_name != "tree":
@@ -360,9 +353,7 @@ def train(
             "Planner-supervised modes only support controller_name='tree'."
         )
     if planner_mode and planner_environment is None:
-        raise ValueError(
-            "planner_environment is required for planner_replay/planner_online modes."
-        )
+        raise ValueError("planner_environment is required for planner_online mode.")
 
     env = environment
     if wrap_env_fn is not None:
@@ -510,19 +501,8 @@ def train(
         sample_batch_size=batch_size,
     )
 
-    actor_dummy_transition = _to_storage_transition(
-        base_dummy_transition,
-        planner_states=None,
-    )
-    actor_replay_buffer = replay_buffers.UniformSamplingQueue(
-        max_replay_size=max_replay_size,
-        dummy_data_sample=actor_dummy_transition,
-        sample_batch_size=batch_size,
-    )
-
-    rng, rb_key, actor_rb_key = jax.random.split(rng, 3)
+    rng, rb_key = jax.random.split(rng)
     buffer_state = replay_buffer.init(rb_key)
-    actor_buffer_state = actor_replay_buffer.init(actor_rb_key)
 
     critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
         sac_network,
@@ -615,51 +595,11 @@ def train(
             True,
         )
 
-    def push_planner_batch_to_actor_buffer(
-        training_state: TrainingState,
-        buffer_state: ReplayBufferState,
-        actor_buffer_state: ReplayBufferState,
-        key: PRNGKey,
-    ) -> Tuple[ReplayBufferState, ReplayBufferState, PRNGKey, jax.Array]:
-        if not planner_mode:
-            return (
-                buffer_state,
-                actor_buffer_state,
-                key,
-                jnp.asarray(0.0, dtype=jnp.float32),
-            )
-        assert controller is not None
-        assert planner_params_template is not None
-
-        key, planner_key = jax.random.split(key)
-        buffer_state, sampled = replay_buffer.sample(buffer_state)
-        sampled_real = float32(_strip_policy_extras(sampled))
-        planner_model_params = _planner_model_params(training_state)
-        sampled_planner, avg_rollout_return = _planner_supervised_batch(
-            sampled,
-            controller,
-            planner_params_template,
-            planner_key,
-            planner_model_params,
-            planner_rollout_steps,
-            action_repeat,
-        )
-        sampled_planner = float32(_strip_policy_extras(sampled_planner))
-
-        # Keep the original real transition in actor replay in addition to planner data.
-        actor_batch = _concat_transition_batches(sampled_planner, sampled_real)
-        actor_batch = _to_storage_transition(actor_batch, planner_states=None)
-        actor_buffer_state = actor_replay_buffer.insert(actor_buffer_state, actor_batch)
-        return buffer_state, actor_buffer_state, key, avg_rollout_return
-
     def sgd_step(
-        carry: Tuple[TrainingState, ReplayBufferState, ReplayBufferState, PRNGKey, int],
+        carry: Tuple[TrainingState, ReplayBufferState, PRNGKey, int],
         unused_t,
-    ) -> Tuple[
-        Tuple[TrainingState, ReplayBufferState, ReplayBufferState, PRNGKey, int],
-        Metrics,
-    ]:
-        training_state, buffer_state, actor_buffer_state, key, count = carry
+    ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
+        training_state, buffer_state, key, count = carry
         key, key_critic, key_actor, key_planner = jax.random.split(key, 4)
 
         buffer_state, sampled = replay_buffer.sample(buffer_state)
@@ -685,12 +625,7 @@ def train(
 
         planner_avg_rollout_return = jnp.asarray(0.0, dtype=jnp.float32)
 
-        if actor_update_source == "planner_replay":
-            actor_buffer_state, actor_transitions = actor_replay_buffer.sample(
-                actor_buffer_state
-            )
-            actor_transitions = float32(actor_transitions)
-        elif actor_update_source == "planner_online":
+        if actor_update_source == "planner_online":
             assert (
                 planner_mode
                 and controller is not None
@@ -818,7 +753,6 @@ def train(
         return (
             new_training_state,
             buffer_state,
-            actor_buffer_state,
             key,
             count + 1,
         ), metrics
@@ -826,24 +760,22 @@ def train(
     def training_step_jitted(
         training_state: TrainingState,
         buffer_state: ReplayBufferState,
-        actor_buffer_state: ReplayBufferState,
         training_key: PRNGKey,
-    ) -> Tuple[TrainingState, ReplayBufferState, ReplayBufferState, Metrics]:
+    ) -> Tuple[TrainingState, ReplayBufferState, Metrics]:
         (
             (
                 training_state,
                 buffer_state,
-                actor_buffer_state,
                 *_,
             ),
             metrics,
         ) = jax.lax.scan(
             sgd_step,
-            (training_state, buffer_state, actor_buffer_state, training_key, 0),
+            (training_state, buffer_state, training_key, 0),
             (),
             length=grad_updates_per_step,
         )
-        return training_state, buffer_state, actor_buffer_state, metrics
+        return training_state, buffer_state, metrics
 
     env_steps_per_experience_call = rollout_length * action_repeat * num_envs
     planner_prefill_batch_size = num_envs
@@ -1125,95 +1057,34 @@ def train(
             training_state, env_state, buffer_state, prefill_key
         )
 
-    if actor_update_source == "planner_replay":
-        planner_transitions_per_state = planner_rollout_steps if planner_mode else 1
-        actor_transitions_per_planner_batch = batch_size * planner_transitions_per_state
-        num_actor_prefill_batches = -(
-            -min_actor_replay_size // actor_transitions_per_planner_batch
-        )
-        replay_size_for_actor_prefill = int(jnp.sum(replay_buffer.size(buffer_state)))
-        if replay_size_for_actor_prefill == 0:
-            logging.info(
-                "skipping actor replay prefill because critic replay buffer is empty."
-            )
-        else:
-            for _ in range(num_actor_prefill_batches):
-                (
-                    buffer_state,
-                    actor_buffer_state,
-                    rng,
-                    _,
-                ) = push_planner_batch_to_actor_buffer(
-                    training_state,
-                    buffer_state,
-                    actor_buffer_state,
-                    rng,
-                )
-
     replay_size = jnp.sum(replay_buffer.size(buffer_state))
     logging.info("replay size after prefill %s", replay_size)
-    if actor_update_source == "planner_replay":
-        actor_replay_size = jnp.sum(actor_replay_buffer.size(actor_buffer_state))
-        logging.info("actor replay size after prefill %s", actor_replay_size)
     training_walltime = time.time() - t
 
     def training_step(
         training_state: TrainingState,
         env_state: envs.State,
         buffer_state: ReplayBufferState,
-        actor_buffer_state: ReplayBufferState,
         key: PRNGKey,
-    ) -> Tuple[
-        TrainingState, envs.State, ReplayBufferState, ReplayBufferState, Metrics
-    ]:
+    ) -> Tuple[TrainingState, envs.State, ReplayBufferState, Metrics]:
         training_state, env_state, buffer_state, key = collect_real_experience(
             training_state, env_state, buffer_state, key
         )
-        planner_replay_rollout_return = jnp.asarray(0.0, dtype=jnp.float32)
-        if actor_update_source == "planner_replay":
-            for _ in range(planner_batches_per_step):
-                (
-                    buffer_state,
-                    actor_buffer_state,
-                    key,
-                    planner_return,
-                ) = push_planner_batch_to_actor_buffer(
-                    training_state,
-                    buffer_state,
-                    actor_buffer_state,
-                    key,
-                )
-                planner_replay_rollout_return = (
-                    planner_replay_rollout_return + planner_return
-                )
-            planner_replay_rollout_return = (
-                planner_replay_rollout_return / planner_batches_per_step
-            )
 
         (
             training_state,
             buffer_state,
-            actor_buffer_state,
             training_metrics,
         ) = training_step_jitted(
             training_state,
             buffer_state,
-            actor_buffer_state,
             key,
         )
         training_metrics["buffer_current_size"] = replay_buffer.size(buffer_state)
-        if actor_update_source == "planner_replay":
-            training_metrics["actor_buffer_current_size"] = actor_replay_buffer.size(
-                actor_buffer_state
-            )
-            training_metrics[
-                "planner/avg_rollout_return"
-            ] = planner_replay_rollout_return
         return (
             training_state,
             env_state,
             buffer_state,
-            actor_buffer_state,
             training_metrics,
         )
 
@@ -1221,65 +1092,48 @@ def train(
         training_state: TrainingState,
         env_state: envs.State,
         buffer_state: ReplayBufferState,
-        actor_buffer_state: ReplayBufferState,
         key: PRNGKey,
-    ) -> Tuple[
-        TrainingState,
-        envs.State,
-        ReplayBufferState,
-        ReplayBufferState,
-        Metrics,
-    ]:
+    ) -> Tuple[TrainingState, envs.State, ReplayBufferState, Metrics]:
         def f(carry, _):
-            ts, es, bs, abs_, k = carry
+            ts, es, bs, k = carry
             k, new_key = jax.random.split(k)
-            ts, es, bs, abs_, metrics = training_step(ts, es, bs, abs_, k)
-            return (ts, es, bs, abs_, new_key), metrics
+            ts, es, bs, metrics = training_step(ts, es, bs, k)
+            return (ts, es, bs, new_key), metrics
 
         (
             (
                 training_state,
                 env_state,
                 buffer_state,
-                actor_buffer_state,
                 key,
             ),
             metrics,
         ) = jax.lax.scan(
             f,
-            (training_state, env_state, buffer_state, actor_buffer_state, key),
+            (training_state, env_state, buffer_state, key),
             (),
             length=num_training_steps_per_epoch,
         )
         metrics = jax.tree_util.tree_map(jnp.mean, metrics)
-        return training_state, env_state, buffer_state, actor_buffer_state, metrics
+        return training_state, env_state, buffer_state, metrics
 
     def training_epoch_with_timing(
         training_state: TrainingState,
         env_state: envs.State,
         buffer_state: ReplayBufferState,
-        actor_buffer_state: ReplayBufferState,
         key: PRNGKey,
-    ) -> Tuple[
-        TrainingState,
-        envs.State,
-        ReplayBufferState,
-        ReplayBufferState,
-        Metrics,
-    ]:
+    ) -> Tuple[TrainingState, envs.State, ReplayBufferState, Metrics]:
         nonlocal training_walltime
         t0 = time.time()
         (
             training_state,
             env_state,
             buffer_state,
-            actor_buffer_state,
             metrics,
         ) = training_epoch(
             training_state,
             env_state,
             buffer_state,
-            actor_buffer_state,
             key,
         )
         metrics = jax.tree_util.tree_map(jnp.mean, metrics)
@@ -1294,7 +1148,7 @@ def train(
             "training/walltime": training_walltime,
             **{f"training/{name}": value for name, value in metrics.items()},
         }
-        return training_state, env_state, buffer_state, actor_buffer_state, metrics
+        return training_state, env_state, buffer_state, metrics
 
     current_step = 0
     metrics = {}
@@ -1305,13 +1159,11 @@ def train(
             training_state,
             env_state,
             buffer_state,
-            actor_buffer_state,
             training_metrics,
         ) = training_epoch_with_timing(
             training_state,
             env_state,
             buffer_state,
-            actor_buffer_state,
             epoch_key,
         )
         current_step = int(training_state.env_steps)

@@ -131,7 +131,7 @@ def main(cfg):
         )
         if cfg.agent.name == "awac_mpc":
             actor_update_source = cfg.agent.get("actor_update_source", "planner_online")
-            if actor_update_source in ("planner_replay", "planner_online"):
+            if actor_update_source == "planner_online":
                 planner_env, _ = benchmark_suites.make_real_env(cfg)
     if use_vision:
         _validate_madrona_args(
