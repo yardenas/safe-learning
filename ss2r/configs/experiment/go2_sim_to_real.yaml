@@ -16,6 +16,8 @@ environment:
   task_params:
     command_config:
       a: [0.5, 0.8, 1.2] 
+  train_params:
+    floor_friction: [0.7, 0.7]
   
 
 agent:
