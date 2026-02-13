@@ -3,7 +3,6 @@ defaults:
   - go1_joystick
   - override /agent/data_collection: hardware
   - override /agent/replay_buffer: rae
-  - override /agent/penalizer: null
   - _self_
 
 training:
