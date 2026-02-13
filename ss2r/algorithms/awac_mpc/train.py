@@ -189,6 +189,7 @@ def _planner_supervised_batch(
     planner_model_params: TreeMPCModelParams | None = None,
     planner_rollout_steps: int = 1,
     real_action_repeat: int = 1,
+    flatten_rollouts: bool = True,
 ) -> tuple[Transition, jax.Array]:
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
     if planner_states is None:
@@ -255,30 +256,32 @@ def _planner_supervised_batch(
     # Sum rewards over rollout steps and average over batch.
     avg_rollout_return = jnp.mean(jnp.sum(rewards, axis=0))
 
-    def _flatten_rollout(x):
-        if not hasattr(x, "shape"):
-            return x
-        if x.ndim < 2:
-            raise ValueError(
-                "Expected rollout tensors with shape [R, B, ...] for planner supervision."
-            )
-        return x.reshape((-1,) + x.shape[2:])
+    if flatten_rollouts:
 
-    obs_flat = jax.tree.map(_flatten_rollout, obs)
-    next_obs_flat = jax.tree.map(_flatten_rollout, next_obs)
-    action_flat = _flatten_rollout(actions)
-    reward_flat = _flatten_rollout(rewards)
-    discount_flat = _flatten_rollout(discount)
-    truncation_flat = _flatten_rollout(truncation)
+        def _flatten_rollout(x):
+            if not hasattr(x, "shape"):
+                return x
+            if x.ndim < 2:
+                raise ValueError(
+                    "Expected rollout tensors with shape [R, B, ...] for planner supervision."
+                )
+            return x.reshape((-1,) + x.shape[2:])
+
+        obs = jax.tree.map(_flatten_rollout, obs)
+        next_obs = jax.tree.map(_flatten_rollout, next_obs)
+        actions = _flatten_rollout(actions)
+        rewards = _flatten_rollout(rewards)
+        discount = _flatten_rollout(discount)
+        truncation = _flatten_rollout(truncation)
 
     return Transition(
-        observation=obs_flat,
-        action=action_flat,
-        reward=reward_flat,
-        discount=discount_flat,
-        next_observation=next_obs_flat,
+        observation=obs,
+        action=actions,
+        reward=rewards,
+        discount=discount,
+        next_observation=next_obs,
         extras={
-            "state_extras": {"truncation": truncation_flat},
+            "state_extras": {"truncation": truncation},
             "policy_extras": {},
         },
     ), avg_rollout_return
@@ -311,12 +314,15 @@ def train(
     deterministic_eval: bool = False,
     rollout_length: int = 1,
     awac_lambda: float = 1.0,
+    rollout_gae_lambda: float = 0.95,
+    normalize_advantage: bool = False,
     max_weight: float | None = None,
     n_critics: int = 2,
     n_heads: int = 1,
     use_bro: bool = True,
     actor_update_source: ActorUpdateSource = "planner_online",
     planner_rollout_steps: int = 1,
+    planner_use_rollout_advantage: bool = False,
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     checkpoint_logdir: Optional[str] = None,
     restore_checkpoint_path: Optional[str] = None,
@@ -354,6 +360,12 @@ def train(
         )
     if planner_mode and planner_environment is None:
         raise ValueError("planner_environment is required for planner_online mode.")
+    if not 0.0 <= rollout_gae_lambda <= 1.0:
+        raise ValueError("rollout_gae_lambda must be in [0, 1].")
+    if planner_use_rollout_advantage and not planner_mode:
+        raise ValueError(
+            "planner_use_rollout_advantage requires actor_update_source='planner_online'."
+        )
 
     env = environment
     if wrap_env_fn is not None:
@@ -509,6 +521,8 @@ def train(
         reward_scaling=reward_scaling,
         discounting=discounting,
         awac_lambda=awac_lambda,
+        rollout_gae_lambda=rollout_gae_lambda,
+        normalize_advantage=normalize_advantage,
         use_bro=use_bro,
         max_weight=max_weight,
     )
@@ -639,17 +653,33 @@ def train(
                 _planner_model_params(training_state),
                 planner_rollout_steps,
                 action_repeat,
+                flatten_rollouts=not planner_use_rollout_advantage,
             )
             actor_transitions = _strip_policy_extras(actor_transitions)
             actor_transitions = float32(actor_transitions)
-            # Include real transitions alongside planner rollouts for actor updates.
-            actor_transitions = _concat_transition_batches(
-                actor_transitions, critic_transitions
-            )
+            if planner_use_rollout_advantage:
+                # Prepend the sampled real transition as t=0 of the rollout.
+                real_first_transition = jax.tree.map(
+                    lambda x: jnp.expand_dims(float32(x), axis=0),
+                    critic_transitions,
+                )
+                actor_transitions = jax.tree.map(
+                    lambda x0, x: jnp.concatenate([x0, x], axis=0),
+                    real_first_transition,
+                    actor_transitions,
+                )
+            else:
+                # Include real transitions alongside planner rollouts for actor updates.
+                actor_transitions = _concat_transition_batches(
+                    actor_transitions, critic_transitions
+                )
         else:
             actor_transitions = critic_transitions
 
-        if actor_update_source == "planner_online":
+        if (
+            actor_update_source == "planner_online"
+            and not planner_use_rollout_advantage
+        ):
             total_actor_samples = actor_transitions.reward.shape[0]
             if total_actor_samples % batch_size != 0:
                 raise ValueError(
@@ -1004,6 +1034,7 @@ def train(
                 _planner_model_params(training_state),
                 planner_rollout_steps,
                 action_repeat,
+                flatten_rollouts=True,
             )
             sim_transitions = _strip_policy_extras(sim_transitions)
             normalizer_params = running_statistics.update(

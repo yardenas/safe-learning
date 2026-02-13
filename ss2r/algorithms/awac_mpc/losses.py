@@ -39,6 +39,8 @@ def make_losses(
     reward_scaling: float,
     discounting: float,
     awac_lambda: float,
+    rollout_gae_lambda: float,
+    normalize_advantage: bool,
     use_bro: bool,
     max_weight: float | None = None,
 ):
@@ -95,6 +97,100 @@ def make_losses(
         transitions: Transition,
         key: PRNGKey,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
+        if transitions.reward.ndim == 2:
+            key_pi, key_next = jax.random.split(key)
+            dist_params = policy_network.apply(
+                normalizer_params, policy_params, transitions.observation
+            )
+            pi_action = parametric_action_distribution.sample(dist_params, key_pi)
+            v = _reduce_q(
+                qr_network.apply(
+                    normalizer_params, q_params, transitions.observation, pi_action
+                ),
+                use_bro,
+            )
+            next_dist_params = policy_network.apply(
+                normalizer_params, policy_params, transitions.next_observation
+            )
+            next_pi_action = parametric_action_distribution.sample(
+                next_dist_params, key_next
+            )
+            next_v = _reduce_q(
+                qr_network.apply(
+                    normalizer_params,
+                    q_params,
+                    transitions.next_observation,
+                    next_pi_action,
+                ),
+                use_bro,
+            )
+            truncation = transitions.extras["state_extras"]["truncation"]
+            bootstrap_discount = transitions.discount * discounting * (1 - truncation)
+            delta = (
+                transitions.reward * reward_scaling + bootstrap_discount * next_v - v
+            ) * (1 - truncation)
+
+            def _gae_step(carry, x):
+                delta_t, discount_t = x
+                adv_t = delta_t + discount_t * rollout_gae_lambda * carry
+                return adv_t, adv_t
+
+            _, advantage_rev = jax.lax.scan(
+                _gae_step,
+                jnp.zeros_like(delta[-1]),
+                (jnp.flip(delta, axis=0), jnp.flip(bootstrap_discount, axis=0)),
+            )
+            advantage = jnp.flip(advantage_rev, axis=0)
+            if normalize_advantage:
+                advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+            unclipped_weights = jnp.exp(advantage / awac_lambda)
+            weights = unclipped_weights
+            if max_weight is not None:
+                weights = jnp.minimum(weights, max_weight)
+            weights = jax.lax.stop_gradient(weights)
+            log_prob = parametric_action_distribution.log_prob(
+                dist_params, atanh_with_slack(transitions.action)
+            )
+            loss = -(log_prob * weights).mean()
+            q = _reduce_q(
+                qr_network.apply(
+                    normalizer_params,
+                    q_params,
+                    transitions.observation,
+                    transitions.action,
+                ),
+                use_bro,
+            )
+            clip_fraction = (
+                jnp.mean((unclipped_weights > max_weight).astype(jnp.float32))
+                if max_weight is not None
+                else jnp.zeros(())
+            )
+            aux = {
+                "advantage_mean": jnp.mean(advantage),
+                "advantage_std": jnp.std(advantage),
+                "advantage_min": jnp.min(advantage),
+                "advantage_max": jnp.max(advantage),
+                "weight_mean": jnp.mean(weights),
+                "weight_std": jnp.std(weights),
+                "weight_min": jnp.min(weights),
+                "weight_max": jnp.max(weights),
+                "weight_clip_fraction": clip_fraction,
+                "max_weight_limit": jnp.asarray(
+                    -1.0 if max_weight is None else max_weight, dtype=jnp.float32
+                ),
+                "log_prob_mean": jnp.mean(log_prob),
+                "log_prob_std": jnp.std(log_prob),
+                "log_prob_min": jnp.min(log_prob),
+                "log_prob_max": jnp.max(log_prob),
+                "v_pi_mean": jnp.mean(v),
+                "q_data_mean": jnp.mean(q),
+                "rollout_gae_lambda": jnp.asarray(
+                    rollout_gae_lambda, dtype=jnp.float32
+                ),
+            }
+            return loss, aux
+
         dist_params = policy_network.apply(
             normalizer_params, policy_params, transitions.observation
         )
@@ -108,6 +204,8 @@ def make_losses(
         )
         q = _reduce_q(q, use_bro)
         advantage = q - v
+        if normalize_advantage:
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         unclipped_weights = jnp.exp(advantage / awac_lambda)
         weights = unclipped_weights
         if max_weight is not None:
