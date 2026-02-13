@@ -125,8 +125,6 @@ def make_losses(
             if max_weight is not None
             else jnp.zeros(())
         )
-        weights_sum = jnp.sum(weights)
-        effective_sample_size = (weights_sum**2) / (jnp.sum(jnp.square(weights)) + 1e-8)
         aux = {
             "advantage_mean": jnp.mean(advantage),
             "advantage_std": jnp.std(advantage),
@@ -137,7 +135,6 @@ def make_losses(
             "weight_min": jnp.min(weights),
             "weight_max": jnp.max(weights),
             "weight_clip_fraction": clip_fraction,
-            "weight_ess": effective_sample_size,
             "max_weight_limit": jnp.asarray(
                 -1.0 if max_weight is None else max_weight, dtype=jnp.float32
             ),
@@ -147,8 +144,6 @@ def make_losses(
             "log_prob_max": jnp.max(log_prob),
             "v_pi_mean": jnp.mean(v),
             "q_data_mean": jnp.mean(q),
-            "policy_action_abs_mean": jnp.mean(jnp.abs(pi_action)),
-            "data_action_abs_mean": jnp.mean(jnp.abs(transitions.action)),
         }
         return loss, aux
 
