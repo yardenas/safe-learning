@@ -17,6 +17,7 @@ deterministic_eval: true
 
 rollout_length: 1
 awac_lambda: 1.0
+rollout_gae_lambda: 0.95
 normalize_advantage: false
 max_weight: 100.0
 actor_update_source: planner_online
