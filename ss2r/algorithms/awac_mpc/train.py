@@ -36,7 +36,6 @@ make_networks = sac_networks.make_sac_networks
 
 
 ActorUpdateSource = Literal["planner_replay", "planner_online", "critic_replay"]
-PlannerSupervisionMode = Literal["all_planner_actions"]
 
 
 @struct.dataclass
@@ -187,7 +186,6 @@ def _planner_supervised_batch(
     controller,
     planner_params_template: TreeMPCParams,
     key: PRNGKey,
-    supervision_mode: PlannerSupervisionMode = "all_planner_actions",
     planner_model_params: TreeMPCModelParams | None = None,
     planner_rollout_steps: int = 1,
 ) -> tuple[Transition, jax.Array]:
@@ -200,10 +198,6 @@ def _planner_supervised_batch(
         raise ValueError("planner_rollout_steps must be >= 1.")
     batch_size = transitions.reward.shape[0]
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
-    if supervision_mode != "all_planner_actions":
-        raise ValueError(
-            "Only planner_supervision_mode='all_planner_actions' is supported."
-        )
 
     def _rollout_step(carry, _):
         current_states, current_params = carry
@@ -322,7 +316,6 @@ def train(
     n_heads: int = 1,
     use_bro: bool = True,
     actor_update_source: ActorUpdateSource = "planner_online",
-    planner_supervision_mode: PlannerSupervisionMode = "all_planner_actions",
     planner_batches_per_step: int = 1,
     planner_rollout_steps: int = 1,
     min_actor_replay_size: int | None = None,
@@ -340,14 +333,9 @@ def train(
     value_obs_key: str = "state",
 ):
     valid_actor_sources = {"planner_replay", "planner_online", "critic_replay"}
-    valid_supervision_modes = {"all_planner_actions"}
     if actor_update_source not in valid_actor_sources:
         raise ValueError(
             f"Unknown actor_update_source: {actor_update_source}, expected one of {valid_actor_sources}."
-        )
-    if planner_supervision_mode not in valid_supervision_modes:
-        raise ValueError(
-            f"Unknown planner_supervision_mode: {planner_supervision_mode}, expected one of {valid_supervision_modes}."
         )
     if min_replay_size >= num_timesteps:
         raise ValueError(
@@ -652,7 +640,6 @@ def train(
             controller,
             planner_params_template,
             planner_key,
-            planner_supervision_mode,
             planner_model_params,
             planner_rollout_steps,
         )
@@ -697,7 +684,6 @@ def train(
                 controller,
                 planner_params_template,
                 key_planner,
-                planner_supervision_mode,
                 _planner_model_params(training_state),
                 planner_rollout_steps,
             )
@@ -1102,7 +1088,6 @@ def train(
                 controller,
                 planner_params_template,
                 plan_key,
-                "all_planner_actions",
                 _planner_model_params(training_state),
                 planner_rollout_steps,
             )
@@ -1159,11 +1144,7 @@ def train(
         )
 
     if actor_update_source == "planner_replay":
-        planner_transitions_per_state = (
-            planner_rollout_steps
-            if planner_mode and planner_supervision_mode == "all_planner_actions"
-            else 1
-        )
+        planner_transitions_per_state = planner_rollout_steps if planner_mode else 1
         actor_transitions_per_planner_batch = batch_size * planner_transitions_per_state
         num_actor_prefill_batches = -(
             -min_actor_replay_size // actor_transitions_per_planner_batch
