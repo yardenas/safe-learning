@@ -284,18 +284,6 @@ def _planner_supervised_batch(
     ), avg_rollout_return
 
 
-def _tree_finite_fraction(tree: Any) -> jax.Array:
-    leaves = jax.tree_util.tree_leaves(tree)
-    finite_fracs = [
-        jnp.mean(jnp.isfinite(leaf).astype(jnp.float32))
-        for leaf in leaves
-        if hasattr(leaf, "dtype")
-    ]
-    if not finite_fracs:
-        return jnp.asarray(1.0, dtype=jnp.float32)
-    return jnp.mean(jnp.stack(finite_fracs))
-
-
 def train(
     environment: envs.Env,
     num_timesteps,
@@ -828,16 +816,6 @@ def train(
             "critic/loss_is_finite": jnp.isfinite(critic_loss).astype(jnp.float32),
             "batch/reward_mean": jnp.mean(critic_transitions.reward),
             "batch/discount_mean": jnp.mean(critic_transitions.discount),
-            "batch/action_abs_mean": jnp.mean(jnp.abs(critic_transitions.action)),
-            "batch/truncation_mean": jnp.mean(
-                critic_transitions.extras["state_extras"]["truncation"]
-            ),
-            "batch/observation_finite_fraction": _tree_finite_fraction(
-                critic_transitions.observation
-            ),
-            "batch/action_finite_fraction": _tree_finite_fraction(
-                critic_transitions.action
-            ),
             **critic_aux,
             **actor_aux,
         }
