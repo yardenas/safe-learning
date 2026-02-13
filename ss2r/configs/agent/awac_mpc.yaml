@@ -23,6 +23,7 @@ max_weight: 100.0
 actor_update_source: planner_online
 planner_rollout_steps: 1
 planner_use_rollout_advantage: false
+actor_updates_per_step: 1
 
 policy_hidden_layer_sizes: [128, 128]
 value_hidden_layer_sizes: [512, 512]
