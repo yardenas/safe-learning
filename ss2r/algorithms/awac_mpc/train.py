@@ -658,16 +658,18 @@ def train(
             actor_transitions = _strip_policy_extras(actor_transitions)
             actor_transitions = float32(actor_transitions)
             if planner_use_rollout_advantage:
-                # Prepend the sampled real transition as t=0 of the rollout.
-                real_first_transition = jax.tree.map(
-                    lambda x: jnp.expand_dims(float32(x), axis=0),
-                    critic_transitions,
-                )
-                actor_transitions = jax.tree.map(
-                    lambda x0, x: jnp.concatenate([x0, x], axis=0),
-                    real_first_transition,
-                    actor_transitions,
-                )
+                # TODO: revisit whether to prepend the sampled real transition as
+                # t=0 of the rollout when using rollout advantages.
+                # real_first_transition = jax.tree.map(
+                #     lambda x: jnp.expand_dims(float32(x), axis=0),
+                #     critic_transitions,
+                # )
+                # actor_transitions = jax.tree.map(
+                #     lambda x0, x: jnp.concatenate([x0, x], axis=0),
+                #     real_first_transition,
+                #     actor_transitions,
+                # )
+                pass
             else:
                 # Include real transitions alongside planner rollouts for actor updates.
                 actor_transitions = _concat_transition_batches(
