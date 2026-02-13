@@ -85,9 +85,6 @@ def make_losses(
             "td_error_mean": jnp.mean(q_error),
             "td_error_abs_mean": jnp.mean(jnp.abs(q_error)),
             "td_error_abs_max": jnp.max(jnp.abs(q_error)),
-            "truncation_mean": jnp.mean(truncation),
-            "reward_mean": jnp.mean(transitions.reward),
-            "discount_mean": jnp.mean(transitions.discount),
         }
         return loss, aux
 
