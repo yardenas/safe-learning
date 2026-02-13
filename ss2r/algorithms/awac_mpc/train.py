@@ -703,6 +703,10 @@ def train(
             )
             actor_transitions = _strip_policy_extras(actor_transitions)
             actor_transitions = float32(actor_transitions)
+            # Include real transitions alongside planner rollouts for actor updates.
+            actor_transitions = _concat_transition_batches(
+                actor_transitions, critic_transitions
+            )
         else:
             actor_transitions = critic_transitions
 
