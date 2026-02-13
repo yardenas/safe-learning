@@ -812,10 +812,6 @@ def train(
             "critic_loss": critic_loss,
             "actor_loss": actor_loss,
             "planner/avg_rollout_return": planner_avg_rollout_return,
-            "actor/loss_is_finite": jnp.isfinite(actor_loss).astype(jnp.float32),
-            "critic/loss_is_finite": jnp.isfinite(critic_loss).astype(jnp.float32),
-            "batch/reward_mean": jnp.mean(critic_transitions.reward),
-            "batch/discount_mean": jnp.mean(critic_transitions.discount),
             **critic_aux,
             **actor_aux,
         }
