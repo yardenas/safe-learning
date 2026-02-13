@@ -314,7 +314,6 @@ def train(
     deterministic_eval: bool = False,
     rollout_length: int = 1,
     awac_lambda: float = 1.0,
-    rollout_gae_lambda: float = 0.95,
     normalize_advantage: bool = False,
     max_weight: float | None = None,
     n_critics: int = 2,
@@ -360,8 +359,6 @@ def train(
         )
     if planner_mode and planner_environment is None:
         raise ValueError("planner_environment is required for planner_online mode.")
-    if not 0.0 <= rollout_gae_lambda <= 1.0:
-        raise ValueError("rollout_gae_lambda must be in [0, 1].")
     if planner_use_rollout_advantage and not planner_mode:
         raise ValueError(
             "planner_use_rollout_advantage requires actor_update_source='planner_online'."
@@ -521,7 +518,6 @@ def train(
         reward_scaling=reward_scaling,
         discounting=discounting,
         awac_lambda=awac_lambda,
-        rollout_gae_lambda=rollout_gae_lambda,
         normalize_advantage=normalize_advantage,
         use_bro=use_bro,
         max_weight=max_weight,
