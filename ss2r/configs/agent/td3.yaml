@@ -24,6 +24,9 @@ noise_clip: 0.5
 n_critics: 2
 n_heads: 1
 use_bro: true
+use_vision: false
+encoder_hidden_dim: 50
+tanh: true
 schedule_lr: false
 init_lr: 0.0
 actor_burnin: 0.0

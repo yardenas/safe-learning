@@ -6,6 +6,7 @@ import flax
 import jax
 import jax.numpy as jnp
 from brax.training import networks, types
+from brax.training.types import PRNGKey
 from flax import linen
 
 from ss2r.algorithms.sac.networks import ActivationFn, make_q_network
@@ -75,7 +76,7 @@ def make_inference_fn(td3_networks: TD3Networks, exploration_noise: float = 0.0)
         policy_network = td3_networks.policy_network
 
         def policy(
-            observations: types.Observation, key_sample: types.PRNGKey
+            observations: types.Observation, key_sample: PRNGKey
         ) -> tuple[types.Action, types.Extra]:
             param_subset = (params[0], params[1])
             actions = policy_network.apply(*param_subset, observations)

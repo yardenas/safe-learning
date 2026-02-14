@@ -3,6 +3,7 @@ import functools
 from brax.training.replay_buffers import UniformSamplingQueue
 
 import ss2r.algorithms.td3.networks as td3_networks
+import ss2r.algorithms.td3.vision_networks as td3_vision_networks
 from ss2r.algorithms.sac.data import get_collection_fn
 from ss2r.algorithms.sac.pytree_uniform_sampling_queue import PytreeUniformSamplingQueue
 from ss2r.algorithms.sac.rae import RAEReplayBuffer
@@ -64,25 +65,47 @@ def get_train_fn(cfg, checkpoint_path, restore_checkpoint_path):
         del agent_cfg["replay_buffer"]
     if "pessimistic_q" in agent_cfg:
         del agent_cfg["pessimistic_q"]
-    if "use_vision" in agent_cfg:
-        if agent_cfg["use_vision"]:
-            raise ValueError("TD3 vision networks are not implemented.")
-        del agent_cfg["use_vision"]
-    if "encoder_hidden_dim" in agent_cfg:
-        del agent_cfg["encoder_hidden_dim"]
-    if "tanh" in agent_cfg:
-        del agent_cfg["tanh"]
-
-    value_obs_key = "privileged_state" if cfg.training.value_privileged else "state"
-    policy_obs_key = "privileged_state" if cfg.training.policy_privileged else "state"
-    network_factory = functools.partial(
-        td3_networks.make_td3_networks,
-        policy_hidden_layer_sizes=policy_hidden_layer_sizes,
-        value_hidden_layer_sizes=value_hidden_layer_sizes,
-        activation=activation,
-        value_obs_key=value_obs_key,
-        policy_obs_key=policy_obs_key,
-    )
+    if "use_vision" in agent_cfg and agent_cfg["use_vision"]:
+        network_factory = functools.partial(
+            td3_vision_networks.make_td3_vision_networks,
+            policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+            value_hidden_layer_sizes=value_hidden_layer_sizes,
+            activation=activation,
+            encoder_hidden_dim=agent_cfg["encoder_hidden_dim"],
+            tanh=agent_cfg["tanh"],
+        )
+        del (
+            agent_cfg["use_vision"],
+            agent_cfg["encoder_hidden_dim"],
+            agent_cfg["tanh"],
+        )
+        if "state_obs_key" in agent_cfg:
+            network_factory = functools.partial(
+                network_factory,
+                state_obs_key=agent_cfg["state_obs_key"],
+            )
+            del agent_cfg["state_obs_key"]
+    else:
+        value_obs_key = "privileged_state" if cfg.training.value_privileged else "state"
+        policy_obs_key = (
+            "privileged_state" if cfg.training.policy_privileged else "state"
+        )
+        network_factory = functools.partial(
+            td3_networks.make_td3_networks,
+            policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+            value_hidden_layer_sizes=value_hidden_layer_sizes,
+            activation=activation,
+            value_obs_key=value_obs_key,
+            policy_obs_key=policy_obs_key,
+        )
+        if "use_vision" in agent_cfg:
+            del agent_cfg["use_vision"]
+        if "encoder_hidden_dim" in agent_cfg:
+            del agent_cfg["encoder_hidden_dim"]
+        if "tanh" in agent_cfg:
+            del agent_cfg["tanh"]
+        if "state_obs_key" in agent_cfg:
+            del agent_cfg["state_obs_key"]
     data_collection = get_collection_fn(cfg)
     replay_buffer_factory = _get_replay_buffer(cfg)
     train_fn = functools.partial(

@@ -357,14 +357,20 @@ def train(
             optimizer_state=training_state.qr_optimizer_state,
             params=training_state.qr_params,
         )
+        if augment_pixels:
+            encoder_params = qr_params["params"]["SharedEncoder"]
+            policy_params = training_state.policy_params.copy()
+            policy_params["params"]["SharedEncoder"] = encoder_params
+        else:
+            policy_params = training_state.policy_params
         actor_loss_value, new_policy_params, new_policy_optimizer_state = actor_update(
-            training_state.policy_params,
+            policy_params,
             training_state.normalizer_params,
             training_state.qr_params,
             transitions,
             key_actor,
             optimizer_state=training_state.policy_optimizer_state,
-            params=training_state.policy_params,
+            params=policy_params,
         )
         should_update_actor = count % policy_delay == 0
         update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
