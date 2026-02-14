@@ -111,6 +111,19 @@ def _concat_transition_batches(a: Transition, b: Transition) -> Transition:
     return jax.tree.map(lambda x, y: jnp.concatenate([x, y], axis=0), a, b)
 
 
+def _flatten_rollout_transition(transitions: Transition) -> Transition:
+    def _flatten_leaf(x):
+        if not hasattr(x, "shape"):
+            return x
+        if x.ndim < 2:
+            raise ValueError(
+                "Expected rollout tensors with shape [T, B, ...] before flattening."
+            )
+        return x.reshape((-1,) + x.shape[2:])
+
+    return jax.tree.map(_flatten_leaf, transitions)
+
+
 def _init_planner_params(
     controller, seed: int, batch_size: int | None
 ) -> TreeMPCParams:
@@ -521,7 +534,6 @@ def train(
         reward_scaling=reward_scaling,
         discounting=discounting,
         awac_lambda=awac_lambda,
-        rollout_gae_lambda=rollout_gae_lambda,
         normalize_advantage=normalize_advantage,
         use_bro=use_bro,
         max_weight=max_weight,
@@ -532,6 +544,85 @@ def train(
     actor_update = gradients.gradient_update_fn(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
     )
+    policy_network = sac_network.policy_network
+    qr_network = sac_network.qr_network
+    parametric_action_distribution = sac_network.parametric_action_distribution
+
+    def _compute_rollout_gae_advantages(
+        normalizer_params: Any,
+        policy_params: Params,
+        q_params: Params,
+        transitions: Transition,
+        key: PRNGKey,
+    ) -> jax.Array:
+        if transitions.reward.ndim != 2:
+            raise ValueError(
+                "Rollout GAE expects transitions with shape [T, B, ...] before flattening."
+            )
+        key_pi, key_next = jax.random.split(key)
+        dist_params = policy_network.apply(
+            normalizer_params, policy_params, transitions.observation
+        )
+        pi_action = parametric_action_distribution.sample(dist_params, key_pi)
+        v = (
+            jnp.mean(
+                qr_network.apply(
+                    normalizer_params, q_params, transitions.observation, pi_action
+                ),
+                axis=-1,
+            )
+            if use_bro
+            else jnp.min(
+                qr_network.apply(
+                    normalizer_params, q_params, transitions.observation, pi_action
+                ),
+                axis=-1,
+            )
+        )
+        next_dist_params = policy_network.apply(
+            normalizer_params, policy_params, transitions.next_observation
+        )
+        next_pi_action = parametric_action_distribution.sample(
+            next_dist_params, key_next
+        )
+        next_v = (
+            jnp.mean(
+                qr_network.apply(
+                    normalizer_params,
+                    q_params,
+                    transitions.next_observation,
+                    next_pi_action,
+                ),
+                axis=-1,
+            )
+            if use_bro
+            else jnp.min(
+                qr_network.apply(
+                    normalizer_params,
+                    q_params,
+                    transitions.next_observation,
+                    next_pi_action,
+                ),
+                axis=-1,
+            )
+        )
+        truncation = transitions.extras["state_extras"]["truncation"]
+        bootstrap_discount = transitions.discount * discounting * (1 - truncation)
+        delta = (
+            transitions.reward * reward_scaling + bootstrap_discount * next_v - v
+        ) * (1 - truncation)
+
+        def _gae_step(carry, x):
+            delta_t, discount_t = x
+            adv_t = delta_t + discount_t * rollout_gae_lambda * carry
+            return adv_t, adv_t
+
+        _, advantage_rev = jax.lax.scan(
+            _gae_step,
+            jnp.zeros_like(delta[-1]),
+            (jnp.flip(delta, axis=0), jnp.flip(bootstrap_discount, axis=0)),
+        )
+        return jnp.flip(advantage_rev, axis=0)
 
     def _collect_experience(
         training_state: TrainingState,
@@ -658,18 +749,23 @@ def train(
             actor_transitions = _strip_policy_extras(actor_transitions)
             actor_transitions = float32(actor_transitions)
             if planner_use_rollout_advantage:
-                # TODO: revisit whether to prepend the sampled real transition as
-                # t=0 of the rollout when using rollout advantages.
-                # real_first_transition = jax.tree.map(
-                #     lambda x: jnp.expand_dims(float32(x), axis=0),
-                #     critic_transitions,
-                # )
-                # actor_transitions = jax.tree.map(
-                #     lambda x0, x: jnp.concatenate([x0, x], axis=0),
-                #     real_first_transition,
-                #     actor_transitions,
-                # )
-                pass
+                key_actor, key_rollout_adv = jax.random.split(key_actor)
+                rollout_advantage = _compute_rollout_gae_advantages(
+                    training_state.normalizer_params,
+                    training_state.policy_params,
+                    qr_params,
+                    actor_transitions,
+                    key_rollout_adv,
+                )
+                actor_transitions = _flatten_rollout_transition(actor_transitions)
+                actor_transitions = actor_transitions._replace(
+                    extras={
+                        "state_extras": actor_transitions.extras["state_extras"],
+                        "policy_extras": {
+                            "advantage": rollout_advantage.reshape((-1,))
+                        },
+                    }
+                )
             else:
                 # Include real transitions alongside planner rollouts for actor updates.
                 actor_transitions = _concat_transition_batches(
@@ -678,10 +774,7 @@ def train(
         else:
             actor_transitions = critic_transitions
 
-        if (
-            actor_update_source == "planner_online"
-            and not planner_use_rollout_advantage
-        ):
+        if actor_update_source == "planner_online":
             total_actor_samples = actor_transitions.reward.shape[0]
             if total_actor_samples % batch_size != 0:
                 raise ValueError(
