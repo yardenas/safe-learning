@@ -323,7 +323,6 @@ def train(
     actor_update_source: ActorUpdateSource = "planner_online",
     planner_rollout_steps: int = 1,
     planner_use_rollout_advantage: bool = False,
-    actor_updates_per_step: int = 1,
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     checkpoint_logdir: Optional[str] = None,
     restore_checkpoint_path: Optional[str] = None,
@@ -355,8 +354,6 @@ def train(
     planner_mode = actor_update_source == "planner_online"
     if planner_rollout_steps < 1:
         raise ValueError("planner_rollout_steps must be >= 1.")
-    if actor_updates_per_step < 1:
-        raise ValueError("actor_updates_per_step must be >= 1.")
     if planner_mode and controller_name != "tree":
         raise ValueError(
             "Planner-supervised modes only support controller_name='tree'."
@@ -744,66 +741,19 @@ def train(
             actor_loss = jnp.mean(actor_losses)
             aux = jax.tree.map(jnp.mean, actor_auxes)
         else:
-            if (
-                actor_update_source == "planner_online"
-                and planner_use_rollout_advantage
-                and actor_updates_per_step > 1
-            ):
-
-                def _actor_step(carry, _):
-                    policy_params, policy_optimizer_state, k = carry
-                    k, step_key = jax.random.split(k)
-                    (
-                        (actor_loss_i, aux_i),
-                        new_policy_params_i,
-                        new_policy_optimizer_state_i,
-                    ) = actor_update(
-                        policy_params,
-                        training_state.normalizer_params,
-                        qr_params,
-                        actor_transitions,
-                        step_key,
-                        optimizer_state=policy_optimizer_state,
-                        params=policy_params,
-                    )
-                    return (
-                        new_policy_params_i,
-                        new_policy_optimizer_state_i,
-                        k,
-                    ), (
-                        actor_loss_i,
-                        aux_i,
-                    )
-
-                (
-                    (new_policy_params, new_policy_optimizer_state, _),
-                    (actor_losses, actor_auxes),
-                ) = jax.lax.scan(
-                    _actor_step,
-                    (
-                        training_state.policy_params,
-                        training_state.policy_optimizer_state,
-                        key_actor,
-                    ),
-                    (),
-                    length=actor_updates_per_step,
-                )
-                actor_loss = jnp.mean(actor_losses)
-                aux = jax.tree.map(jnp.mean, actor_auxes)
-            else:
-                (
-                    (actor_loss, aux),
-                    new_policy_params,
-                    new_policy_optimizer_state,
-                ) = actor_update(
-                    training_state.policy_params,
-                    training_state.normalizer_params,
-                    qr_params,
-                    actor_transitions,
-                    key_actor,
-                    optimizer_state=training_state.policy_optimizer_state,
-                    params=training_state.policy_params,
-                )
+            (
+                (actor_loss, aux),
+                new_policy_params,
+                new_policy_optimizer_state,
+            ) = actor_update(
+                training_state.policy_params,
+                training_state.normalizer_params,
+                qr_params,
+                actor_transitions,
+                key_actor,
+                optimizer_state=training_state.policy_optimizer_state,
+                params=training_state.policy_params,
+            )
 
         should_update_actor = count % num_critic_updates_per_actor_update == 0
         update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
