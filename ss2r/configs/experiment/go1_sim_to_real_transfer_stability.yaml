@@ -24,3 +24,8 @@ training:
 environment:
   task_params:
     ctrl_dt: 0.02
+    action_scale: 0.3
+  train_params:
+    floor_friction: [0.3, 0.3]
+  eval_params:
+    floor_friction: [0.3, 0.3]
