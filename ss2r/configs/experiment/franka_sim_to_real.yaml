@@ -29,7 +29,6 @@ agent:
   encoder_hidden_dim: 128
   policy_hidden_layer_sizes: [128, 128]
   grad_updates_per_step: 64
-  target_entropy: -5
   reward_scaling: 10.
   n_critics: 2
   n_heads: 1
