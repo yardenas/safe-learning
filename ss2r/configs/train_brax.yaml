@@ -6,8 +6,6 @@ defaults:
 hydra:
   run:
     dir: ${log_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}
-  sweep:
-    dir: ${log_dir}/${hydra.job.name}
   job:
     config:
       override_dirname:
