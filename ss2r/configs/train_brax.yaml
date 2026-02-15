@@ -7,8 +7,7 @@ hydra:
   run:
     dir: ${log_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
-    dir: ${log_dir}/${hydra.job.name}
-    subdir: ${hydra.job.num}/s${training.seed}
+    dir: ${log_dir}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
   job:
     config:
       override_dirname:
