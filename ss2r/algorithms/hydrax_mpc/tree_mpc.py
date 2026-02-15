@@ -63,7 +63,7 @@ class TreeMPC:
         use_critic: bool = False,
         n_critics: int = 2,
         n_heads: int = 1,
-        action_repeat: int = 1,
+        zoh_steps: int = 1,
         planner: str = "sir",
         gamma: float = 0.99,
         temperature: float = 1.0,
@@ -79,13 +79,12 @@ class TreeMPC:
             raise ValueError("TreeMPC requires horizon to be set explicitly.")
         self.horizon = int(horizon)
         self.plan_horizon = float(self.horizon) * self.dt
-        self.action_repeat = max(int(action_repeat), 1)
-        if self.horizon % self.action_repeat != 0:
-            raise ValueError(
-                "TreeMPC requires horizon to be divisible by action_repeat."
-            )
-        self.ctrl_steps = self.horizon // self.action_repeat
+        self.zoh_steps = max(int(zoh_steps), 1)
+        if self.horizon % self.zoh_steps != 0:
+            raise ValueError("TreeMPC requires horizon to be divisible by zoh_steps.")
+        self.ctrl_steps = self.horizon // self.zoh_steps
         self.gamma = float(gamma)
+        self.gamma_decision = self.gamma**self.zoh_steps
         self.temperature = float(temperature)
         self.action_noise_std = action_noise_std
         self.planner = planner
@@ -189,7 +188,7 @@ class TreeMPC:
     def _step_env_repeat(
         self, state: mjx_env.State, action: jax.Array
     ) -> tuple[mjx_env.State, jax.Array]:
-        if self.action_repeat == 1:
+        if self.zoh_steps == 1:
             next_state = self.task.env.step(state, action)
             return next_state, next_state.reward
 
@@ -199,7 +198,7 @@ class TreeMPC:
             return s, s.reward
 
         final_state, rewards = jax.lax.scan(
-            _repeat_fn, state, jnp.arange(self.action_repeat)
+            _repeat_fn, state, jnp.arange(self.zoh_steps)
         )
         return final_state, jnp.sum(rewards)
 
@@ -316,8 +315,8 @@ class TreeMPC:
                 value_next = self._critic_value(
                     next_states.obs, value_actions, model_params
                 )
-                delta = rewards + self.gamma * value_next - value_s
-                gae_trace = delta + self.gamma * self.gae_lambda * gae_trace
+                delta = rewards + self.gamma_decision * value_next - value_s
+                gae_trace = delta + self.gamma_decision * self.gae_lambda * gae_trace
                 value_start = jnp.where(t == 0, value_s, value_start)
                 advantage = gae_trace
             else:
@@ -484,14 +483,14 @@ class TreeMPC:
             )
             values_next = flat_values_next.reshape((num_particles, decision_steps))
 
-            # Direct TD(lambda) return recursion:
-            # G_t = r_t + gamma * ((1 - lambda) * V_{t+1} + lambda * G_{t+1})
+            # Direct TD(lambda) recursion at planner decision timescale:
+            # G_t = r_t + gamma_decision * ((1-lambda) * V_{t+1} + lambda * G_{t+1})
             rev_ts = jnp.arange(decision_steps - 1, -1, -1)
 
             def _td_lambda_step(g_next, t):
                 r_t = traj_rewards[:, t]
                 v_tp1 = values_next[:, t]
-                g_t = r_t + self.gamma * (
+                g_t = r_t + self.gamma_decision * (
                     (1.0 - self.gae_lambda) * v_tp1 + self.gae_lambda * g_next
                 )
                 return g_t, g_t

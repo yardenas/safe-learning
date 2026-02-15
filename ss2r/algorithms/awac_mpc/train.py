@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import optax
 from absl import logging
 from brax import envs
+from brax.envs.base import Wrapper
 from brax.training import replay_buffers
 from brax.training.acme import running_statistics, specs
 from brax.training.agents.sac import checkpoint
@@ -194,6 +195,30 @@ def _to_storage_transition(
     )
 
 
+class _PlannerActionRepeatWrapper(Wrapper):
+    """Minimal wrapper that repeats each planner env step."""
+
+    def __init__(self, env: envs.Env, action_repeat: int):
+        super().__init__(env)
+        if action_repeat < 1:
+            raise ValueError("action_repeat must be >= 1.")
+        self.env = env
+        self.action_repeat = int(action_repeat)
+
+    def step(self, state: envs.State, action: jax.Array) -> envs.State:
+        if self.action_repeat == 1:
+            return self.env.step(state, action)
+
+        def _repeat_fn(carry, _):
+            next_state = self.env.step(carry, action)
+            return next_state, next_state.reward
+
+        next_state, rewards = jax.lax.scan(
+            _repeat_fn, state, (), length=self.action_repeat
+        )
+        return next_state.replace(reward=jnp.sum(rewards, axis=0))
+
+
 def _planner_supervised_batch(
     transitions: Transition,
     controller,
@@ -201,7 +226,6 @@ def _planner_supervised_batch(
     key: PRNGKey,
     planner_model_params: TreeMPCModelParams | None = None,
     planner_rollout_steps: int = 1,
-    real_action_repeat: int = 1,
     flatten_rollouts: bool = True,
 ) -> tuple[Transition, jax.Array]:
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
@@ -211,8 +235,9 @@ def _planner_supervised_batch(
         )
     if planner_rollout_steps < 1:
         raise ValueError("planner_rollout_steps must be >= 1.")
-    if real_action_repeat < 1:
-        raise ValueError("real_action_repeat must be >= 1.")
+    zoh_steps = int(getattr(controller, "zoh_steps", 1))
+    if zoh_steps < 1:
+        raise ValueError("controller.zoh_steps must be >= 1.")
     batch_size = transitions.reward.shape[0]
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
 
@@ -222,18 +247,8 @@ def _planner_supervised_batch(
             lambda s, p: controller.optimize(s, p, planner_model_params)
         )(current_states, current_params)
         action = next_params.actions[:, 0, :]
-
-        def _repeat_fn(states, _):
-            next_states = jax.vmap(controller.task.env.step)(states, action)
-            return next_states, next_states.reward
-
-        next_states, reward_seq = jax.lax.scan(
-            _repeat_fn,
-            current_states,
-            (),
-            length=real_action_repeat,
-        )
-        rewards = jnp.sum(reward_seq, axis=0)
+        next_states = jax.vmap(controller.task.env.step)(current_states, action)
+        rewards = next_states.reward
         discount = 1.0 - next_states.done.astype(jnp.float32)
         if "truncation" in next_states.info:
             truncation = next_states.info["truncation"]
@@ -479,18 +494,9 @@ def train(
     planner_params_template = None
     controller = None
     if planner_mode:
-        planner_env = planner_environment
-        assert planner_env is not None
+        assert planner_environment is not None
+        planner_env = _PlannerActionRepeatWrapper(planner_environment, action_repeat)
         controller_kwargs = dict(controller_kwargs or {})
-        configured_action_repeat = controller_kwargs.get("action_repeat", action_repeat)
-        if configured_action_repeat is not None and int(
-            configured_action_repeat
-        ) != int(action_repeat):
-            logging.warning(
-                "controller action_repeat=%s with training.action_repeat=%s.",
-                configured_action_repeat,
-                action_repeat,
-            )
         controller_kwargs["n_critics"] = int(n_critics)
         controller_kwargs["n_heads"] = int(n_heads)
         controller_kwargs["gamma"] = discounting
@@ -743,7 +749,6 @@ def train(
                 key_planner,
                 _planner_model_params(training_state),
                 planner_rollout_steps,
-                action_repeat,
                 flatten_rollouts=not planner_use_rollout_advantage,
             )
             actor_transitions = _strip_policy_extras(actor_transitions)
@@ -1128,7 +1133,6 @@ def train(
                 plan_key,
                 _planner_model_params(training_state),
                 planner_rollout_steps,
-                action_repeat,
                 flatten_rollouts=True,
             )
             sim_transitions = _strip_policy_extras(sim_transitions)

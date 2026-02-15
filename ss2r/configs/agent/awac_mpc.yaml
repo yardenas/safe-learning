@@ -35,7 +35,7 @@ controller_name: tree
 controller_kwargs:
   num_samples: 256
   horizon: 100
-  action_repeat: 10
+  zoh_steps: 10
   use_policy: true
   use_critic: true
   planner: sir

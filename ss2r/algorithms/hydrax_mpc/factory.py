@@ -103,7 +103,7 @@ def make_controller(
             "use_critic",
             "n_critics",
             "n_heads",
-            "action_repeat",
+            "zoh_steps",
             "planner",
             "gamma",
             "temperature",
