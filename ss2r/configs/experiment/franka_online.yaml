@@ -33,4 +33,3 @@ agent:
   grad_updates_per_step: 1250
   learning_rate: 1e-5
   critic_learning_rate: 3e-4
-  num_critic_updates_per_actor_update: 20
