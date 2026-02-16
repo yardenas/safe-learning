@@ -103,12 +103,11 @@ def make_controller(
             "use_critic",
             "n_critics",
             "n_heads",
+            "use_bro",
             "zoh_steps",
-            "planner",
             "gamma",
             "temperature",
             "action_noise_std",
-            "mode",
             "iterations",
         }
         controller_kwargs = {

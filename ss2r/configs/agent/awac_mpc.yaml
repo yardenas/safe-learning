@@ -17,12 +17,9 @@ deterministic_eval: true
 
 rollout_length: 1
 awac_lambda: 1.0
-rollout_gae_lambda: 0.95
 normalize_advantage: false
 max_weight: 100.0
 actor_update_source: planner_online
-planner_rollout_steps: 1
-planner_use_rollout_advantage: false
 
 policy_hidden_layer_sizes: [128, 128]
 value_hidden_layer_sizes: [512, 512]
@@ -38,9 +35,7 @@ controller_kwargs:
   zoh_steps: 10
   use_policy: true
   use_critic: true
-  planner: sir
   action_noise_std: 0.3
-  mode: resample
   gae_lambda: 0.0
   temperature: 0.5
   iterations: 1
