@@ -9,8 +9,8 @@ reward_scaling: 1.0
 tau: 0.005
 min_replay_size: 8192
 max_replay_size: 1000000
-sim_prefill_steps: 0
-critic_pretrain_ratio: 0.0
+sim_prefill_steps: 8192
+critic_pretrain_ratio: 5
 grad_updates_per_step: 512
 num_critic_updates_per_actor_update: 1
 deterministic_eval: true
@@ -30,12 +30,12 @@ n_heads: 1
 
 controller_name: tree
 controller_kwargs:
-  num_samples: 256
-  horizon: 100
-  zoh_steps: 10
+  num_samples: 1024
+  horizon: 25
+  zoh_steps: 5
   use_policy: true
   use_critic: true
   action_noise_std: 0.3
-  gae_lambda: 0.0
-  temperature: 0.5
+  gae_lambda: 1.0
+  temperature: 0.8
   iterations: 1
