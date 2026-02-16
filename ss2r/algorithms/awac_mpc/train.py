@@ -108,19 +108,6 @@ def _flatten_time_batch_tree(tree: Any, time_len: int, batch_size: int) -> Any:
     return jax.tree.map(_flatten_leaf, tree)
 
 
-def _flatten_rollout_transition(transitions: Transition) -> Transition:
-    def _flatten_leaf(x):
-        if not hasattr(x, "shape"):
-            return x
-        if x.ndim < 2:
-            raise ValueError(
-                "Expected rollout tensors with shape [T, B, ...] before flattening."
-            )
-        return x.reshape((-1,) + x.shape[2:])
-
-    return jax.tree.map(_flatten_leaf, transitions)
-
-
 def _init_planner_params(
     controller, seed: int, batch_size: int | None
 ) -> TreeMPCParams:
@@ -221,80 +208,43 @@ def _planner_supervised_batch(
     planner_params_template: TreeMPCParams,
     key: PRNGKey,
     planner_model_params: TreeMPCModelParams | None = None,
-    planner_rollout_steps: int = 1,
-    flatten_rollouts: bool = True,
 ) -> tuple[Transition, jax.Array]:
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
     if planner_states is None:
         raise ValueError(
             "Planner-supervised mode requires planner_state in replay data."
         )
-    if planner_rollout_steps < 1:
-        raise ValueError("planner_rollout_steps must be >= 1.")
-    if not hasattr(controller, "optimize"):
-        raise ValueError("Planner-supervised mode requires controller.optimize.")
+    if not hasattr(controller, "optimize_with_winner"):
+        raise ValueError(
+            "Planner-supervised mode requires controller.optimize_with_winner."
+        )
     batch_size = transitions.reward.shape[0]
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
+    _, rollouts = jax.vmap(
+        lambda s, p: controller.optimize_with_winner(s, p, planner_model_params)
+    )(planner_states, planner_params)
 
-    def _rollout_step(carry, _):
-        current_states, current_params = carry
-        next_params, _ = jax.vmap(
-            lambda s, p: controller.optimize(s, p, planner_model_params)
-        )(current_states, current_params)
-        action = next_params.actions[:, 0, :]
-        next_states = jax.vmap(controller.task.env.step)(current_states, action)
-        rewards = next_states.reward
-        discount = 1.0 - next_states.done.astype(jnp.float32)
-        if "truncation" in next_states.info:
-            truncation = next_states.info["truncation"]
-        else:
-            truncation = jnp.zeros_like(rewards)
-        step_transition = (
-            current_states.obs,
-            action,
-            rewards,
-            next_states.obs,
-            discount,
-            truncation,
-        )
-        return (next_states, next_params), step_transition
-
-    (
-        (_, _),
-        (
-            obs,
-            actions,
-            rewards,
-            next_obs,
-            discount,
-            truncation,
-        ),
-    ) = jax.lax.scan(
-        _rollout_step,
-        (planner_states, planner_params),
-        (),
-        length=planner_rollout_steps,
+    # [B, T, ...] -> [B*T, ...]
+    total_steps = (
+        rollouts.all_traj_actions.shape[0] * rollouts.all_traj_actions.shape[1]
     )
 
-    avg_rollout_return = jnp.mean(jnp.sum(rewards, axis=0))
+    def _flatten_rollout(x):
+        if not hasattr(x, "shape"):
+            return x
+        if x.ndim < 2:
+            raise ValueError("Expected planner rollout tensors with shape [B, T, ...].")
+        return x.reshape((total_steps,) + x.shape[2:])
 
-    if flatten_rollouts:
+    obs = jax.tree.map(_flatten_rollout, rollouts.all_traj_obs)
+    next_obs = jax.tree.map(_flatten_rollout, rollouts.all_traj_next_obs)
+    actions = _flatten_rollout(rollouts.all_traj_actions)
+    rewards = _flatten_rollout(rollouts.all_traj_rewards)
+    discount = _flatten_rollout(rollouts.all_traj_discount)
+    truncation = _flatten_rollout(rollouts.all_traj_truncation)
+    advantages = _flatten_rollout(rollouts.all_traj_advantages)
 
-        def _flatten_rollout(x):
-            if not hasattr(x, "shape"):
-                return x
-            if x.ndim < 2:
-                raise ValueError(
-                    "Expected rollout tensors with shape [R, B, ...] for planner supervision."
-                )
-            return x.reshape((-1,) + x.shape[2:])
-
-        obs = jax.tree.map(_flatten_rollout, obs)
-        next_obs = jax.tree.map(_flatten_rollout, next_obs)
-        actions = _flatten_rollout(actions)
-        rewards = _flatten_rollout(rewards)
-        discount = _flatten_rollout(discount)
-        truncation = _flatten_rollout(truncation)
+    avg_rollout_return = jnp.mean(rollouts.returns)
 
     return Transition(
         observation=obs,
@@ -304,7 +254,7 @@ def _planner_supervised_batch(
         next_observation=next_obs,
         extras={
             "state_extras": {"truncation": truncation},
-            "policy_extras": {},
+            "policy_extras": {"advantage": advantages},
         },
     ), avg_rollout_return
 
@@ -336,14 +286,12 @@ def train(
     deterministic_eval: bool = False,
     rollout_length: int = 1,
     awac_lambda: float = 1.0,
-    rollout_gae_lambda: float = 0.95,
     normalize_advantage: bool = False,
     max_weight: float | None = None,
     n_critics: int = 2,
     n_heads: int = 1,
     use_bro: bool = True,
     actor_update_source: ActorUpdateSource = "planner_online",
-    planner_rollout_steps: int = 1,
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     checkpoint_logdir: Optional[str] = None,
     restore_checkpoint_path: Optional[str] = None,
@@ -373,16 +321,12 @@ def train(
     if max_replay_size is None:
         max_replay_size = num_timesteps
     planner_mode = actor_update_source == "planner_online"
-    if planner_rollout_steps < 1:
-        raise ValueError("planner_rollout_steps must be >= 1.")
     if planner_mode and controller_name != "tree":
         raise ValueError(
             "Planner-supervised modes only support controller_name='tree'."
         )
     if planner_mode and planner_environment is None:
         raise ValueError("planner_environment is required for planner_online mode.")
-    if not 0.0 <= rollout_gae_lambda <= 1.0:
-        raise ValueError("rollout_gae_lambda must be in [0, 1].")
 
     env = environment
     if wrap_env_fn is not None:
@@ -540,85 +484,6 @@ def train(
     actor_update = gradients.gradient_update_fn(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
     )
-    policy_network = sac_network.policy_network
-    qr_network = sac_network.qr_network
-    parametric_action_distribution = sac_network.parametric_action_distribution
-
-    def _compute_rollout_gae_advantages(
-        normalizer_params: Any,
-        policy_params: Params,
-        q_params: Params,
-        transitions: Transition,
-        key: PRNGKey,
-    ) -> jax.Array:
-        if transitions.reward.ndim != 2:
-            raise ValueError(
-                "Rollout GAE expects transitions with shape [T, B, ...] before flattening."
-            )
-        key_pi, key_next = jax.random.split(key)
-        dist_params = policy_network.apply(
-            normalizer_params, policy_params, transitions.observation
-        )
-        pi_action = parametric_action_distribution.sample(dist_params, key_pi)
-        v = (
-            jnp.mean(
-                qr_network.apply(
-                    normalizer_params, q_params, transitions.observation, pi_action
-                ),
-                axis=-1,
-            )
-            if use_bro
-            else jnp.min(
-                qr_network.apply(
-                    normalizer_params, q_params, transitions.observation, pi_action
-                ),
-                axis=-1,
-            )
-        )
-        next_dist_params = policy_network.apply(
-            normalizer_params, policy_params, transitions.next_observation
-        )
-        next_pi_action = parametric_action_distribution.sample(
-            next_dist_params, key_next
-        )
-        next_v = (
-            jnp.mean(
-                qr_network.apply(
-                    normalizer_params,
-                    q_params,
-                    transitions.next_observation,
-                    next_pi_action,
-                ),
-                axis=-1,
-            )
-            if use_bro
-            else jnp.min(
-                qr_network.apply(
-                    normalizer_params,
-                    q_params,
-                    transitions.next_observation,
-                    next_pi_action,
-                ),
-                axis=-1,
-            )
-        )
-        truncation = transitions.extras["state_extras"]["truncation"]
-        bootstrap_discount = transitions.discount * discounting * (1 - truncation)
-        delta = (
-            transitions.reward * reward_scaling + bootstrap_discount * next_v - v
-        ) * (1 - truncation)
-
-        def _gae_step(carry, x):
-            delta_t, discount_t = x
-            adv_t = delta_t + discount_t * rollout_gae_lambda * carry
-            return adv_t, adv_t
-
-        _, advantage_rev = jax.lax.scan(
-            _gae_step,
-            jnp.zeros_like(delta[-1]),
-            (jnp.flip(delta, axis=0), jnp.flip(bootstrap_discount, axis=0)),
-        )
-        return jnp.flip(advantage_rev, axis=0)
 
     def _collect_experience(
         training_state: TrainingState,
@@ -737,26 +602,8 @@ def train(
                 planner_params_template,
                 key_planner,
                 _planner_model_params(training_state),
-                planner_rollout_steps,
-                flatten_rollouts=False,
             )
-            actor_transitions = _strip_policy_extras(actor_transitions)
             actor_transitions = float32(actor_transitions)
-            key_actor, key_rollout_adv = jax.random.split(key_actor)
-            rollout_advantage = _compute_rollout_gae_advantages(
-                training_state.normalizer_params,
-                training_state.policy_params,
-                qr_params,
-                actor_transitions,
-                key_rollout_adv,
-            )
-            actor_transitions = _flatten_rollout_transition(actor_transitions)
-            actor_transitions = actor_transitions._replace(
-                extras={
-                    "state_extras": actor_transitions.extras["state_extras"],
-                    "policy_extras": {"advantage": rollout_advantage.reshape((-1,))},
-                }
-            )
         else:
             actor_transitions = critic_transitions
 
@@ -900,7 +747,7 @@ def train(
         if controller is None:
             raise ValueError("Planner controller must be initialized for sim prefill.")
         sim_transitions_per_prefill_call = (
-            planner_prefill_batch_size * planner_rollout_steps
+            planner_prefill_batch_size * controller.horizon
         )
         sim_prefill_calls = -(
             -sim_prefill_steps_effective // sim_transitions_per_prefill_call
@@ -1115,8 +962,6 @@ def train(
                 planner_params_template,
                 plan_key,
                 _planner_model_params(training_state),
-                planner_rollout_steps,
-                flatten_rollouts=True,
             )
             sim_transitions = _strip_policy_extras(sim_transitions)
             normalizer_params = running_statistics.update(
@@ -1140,11 +985,6 @@ def train(
             training_state, sim_batch, _ = collect_sim_prefill_batch(
                 training_state, collect_key
             )
-            sim_storage = _to_storage_transition(
-                _strip_policy_extras(sim_batch),
-                planner_states=None,
-            )
-            buffer_state = replay_buffer.insert(buffer_state, sim_storage)
             steps_this_batch = (
                 base_steps + (1 if prefill_idx < extra_steps else 0)
                 if critic_pretrain_steps > 0
