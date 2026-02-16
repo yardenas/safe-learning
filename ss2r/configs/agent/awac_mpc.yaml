@@ -30,7 +30,7 @@ n_heads: 1
 
 controller_name: tree
 controller_kwargs:
-  num_samples: 1024
+  num_samples: 128
   horizon: 25
   zoh_steps: 5
   use_policy: true
