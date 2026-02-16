@@ -292,7 +292,7 @@ class TreeMPC:
             )
 
         (
-            (final_states, post_rollout_key),
+            (final_states, _),
             (
                 decision_actions,
                 decision_rewards,
@@ -402,10 +402,8 @@ class TreeMPC:
             returns = return_to_go[:, 0]
 
         weights = jnn.softmax(returns / self.temperature, axis=0)
-        winner_idx = jax.random.choice(
-            post_rollout_key, num_particles, shape=(), p=weights, replace=True
-        )
-        sampled_actions = decision_actions[winner_idx]
+        mean_actions = jnp.sum(weights[:, None, None] * decision_actions, axis=0)
+        winner_idx = jnp.argmax(returns)
         winner_rollout = _TreeRollout(  # type: ignore
             traj_data=jax.tree.map(lambda x: x[winner_idx], traj_data),
             traj_actions=decision_actions[winner_idx],
@@ -422,7 +420,7 @@ class TreeMPC:
 
         return (
             winner_rollout,
-            sampled_actions,
+            mean_actions,
         )
 
     def _mppi_iterate(
@@ -455,14 +453,14 @@ class TreeMPC:
         def _mppi_iter_step(carry, _):
             params, rng = carry
             rng, mppi_rng = jax.random.split(rng)
-            rollouts, sampled_actions = self._mppi_expand(
+            rollouts, mean_actions = self._mppi_expand(
                 mppi_rng,
                 state,
                 params,
                 model_params,
                 sample_from_policy=False,
             )
-            params = params.replace(actions=sampled_actions, rng=rng)
+            params = params.replace(actions=mean_actions, rng=rng)
             return (params, rng), rollouts
 
         (params, _), rollouts = jax.lax.scan(
