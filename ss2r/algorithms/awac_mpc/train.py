@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import optax
 from absl import logging
 from brax import envs
-from brax.envs.base import Wrapper
 from brax.training import replay_buffers
 from brax.training.acme import running_statistics, specs
 from brax.training.agents.sac import checkpoint
@@ -108,6 +107,10 @@ def _flatten_time_batch_tree(tree: Any, time_len: int, batch_size: int) -> Any:
     return jax.tree.map(_flatten_leaf, tree)
 
 
+def _concat_transition_batches(a: Transition, b: Transition) -> Transition:
+    return jax.tree.map(lambda x, y: jnp.concatenate([x, y], axis=0), a, b)
+
+
 def _flatten_rollout_transition(transitions: Transition) -> Transition:
     def _flatten_leaf(x):
         if not hasattr(x, "shape"):
@@ -191,30 +194,6 @@ def _to_storage_transition(
     )
 
 
-class _PlannerActionRepeatWrapper(Wrapper):
-    """Minimal wrapper that repeats each planner env step."""
-
-    def __init__(self, env: envs.Env, action_repeat: int):
-        super().__init__(env)
-        if action_repeat < 1:
-            raise ValueError("action_repeat must be >= 1.")
-        self.env = env
-        self.action_repeat = int(action_repeat)
-
-    def step(self, state: envs.State, action: jax.Array) -> envs.State:
-        if self.action_repeat == 1:
-            return self.env.step(state, action)
-
-        def _repeat_fn(carry, _):
-            next_state = self.env.step(carry, action)
-            return next_state, next_state.reward
-
-        next_state, rewards = jax.lax.scan(
-            _repeat_fn, state, (), length=self.action_repeat
-        )
-        return next_state.replace(reward=jnp.sum(rewards, axis=0))
-
-
 def _planner_supervised_batch(
     transitions: Transition,
     controller,
@@ -222,6 +201,7 @@ def _planner_supervised_batch(
     key: PRNGKey,
     planner_model_params: TreeMPCModelParams | None = None,
     planner_rollout_steps: int = 1,
+    real_action_repeat: int = 1,
     flatten_rollouts: bool = True,
 ) -> tuple[Transition, jax.Array]:
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
@@ -231,8 +211,8 @@ def _planner_supervised_batch(
         )
     if planner_rollout_steps < 1:
         raise ValueError("planner_rollout_steps must be >= 1.")
-    if not hasattr(controller, "optimize"):
-        raise ValueError("Planner-supervised mode requires controller.optimize.")
+    if real_action_repeat < 1:
+        raise ValueError("real_action_repeat must be >= 1.")
     batch_size = transitions.reward.shape[0]
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
 
@@ -242,8 +222,18 @@ def _planner_supervised_batch(
             lambda s, p: controller.optimize(s, p, planner_model_params)
         )(current_states, current_params)
         action = next_params.actions[:, 0, :]
-        next_states = jax.vmap(controller.task.env.step)(current_states, action)
-        rewards = next_states.reward
+
+        def _repeat_fn(states, _):
+            next_states = jax.vmap(controller.task.env.step)(states, action)
+            return next_states, next_states.reward
+
+        next_states, reward_seq = jax.lax.scan(
+            _repeat_fn,
+            current_states,
+            (),
+            length=real_action_repeat,
+        )
+        rewards = jnp.sum(reward_seq, axis=0)
         discount = 1.0 - next_states.done.astype(jnp.float32)
         if "truncation" in next_states.info:
             truncation = next_states.info["truncation"]
@@ -276,6 +266,7 @@ def _planner_supervised_batch(
         length=planner_rollout_steps,
     )
 
+    # Sum rewards over rollout steps and average over batch.
     avg_rollout_return = jnp.mean(jnp.sum(rewards, axis=0))
 
     if flatten_rollouts:
@@ -344,6 +335,7 @@ def train(
     use_bro: bool = True,
     actor_update_source: ActorUpdateSource = "planner_online",
     planner_rollout_steps: int = 1,
+    planner_use_rollout_advantage: bool = False,
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     checkpoint_logdir: Optional[str] = None,
     restore_checkpoint_path: Optional[str] = None,
@@ -383,6 +375,10 @@ def train(
         raise ValueError("planner_environment is required for planner_online mode.")
     if not 0.0 <= rollout_gae_lambda <= 1.0:
         raise ValueError("rollout_gae_lambda must be in [0, 1].")
+    if planner_use_rollout_advantage and not planner_mode:
+        raise ValueError(
+            "planner_use_rollout_advantage requires actor_update_source='planner_online'."
+        )
 
     env = environment
     if wrap_env_fn is not None:
@@ -483,12 +479,20 @@ def train(
     planner_params_template = None
     controller = None
     if planner_mode:
-        assert planner_environment is not None
-        planner_env = _PlannerActionRepeatWrapper(planner_environment, action_repeat)
+        planner_env = planner_environment
+        assert planner_env is not None
         controller_kwargs = dict(controller_kwargs or {})
+        configured_action_repeat = controller_kwargs.get("action_repeat", action_repeat)
+        if configured_action_repeat is not None and int(
+            configured_action_repeat
+        ) != int(action_repeat):
+            logging.warning(
+                "controller action_repeat=%s with training.action_repeat=%s.",
+                configured_action_repeat,
+                action_repeat,
+            )
         controller_kwargs["n_critics"] = int(n_critics)
         controller_kwargs["n_heads"] = int(n_heads)
-        controller_kwargs["use_bro"] = bool(use_bro)
         controller_kwargs["gamma"] = discounting
         controller_cfg = SimpleNamespace(
             agent={
@@ -696,6 +700,71 @@ def train(
             True,
         )
 
+    def collect_real_experience_with_planner(
+        training_state: TrainingState,
+        env_state: envs.State,
+        buffer_state: ReplayBufferState,
+        key: PRNGKey,
+    ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
+        if not planner_mode or controller is None or planner_params_template is None:
+            raise ValueError(
+                "Planner experience collection requires planner controller and params."
+            )
+
+        key, planner_key = jax.random.split(key)
+        planner_params = _planner_params_for_batch(
+            planner_params_template, planner_key, num_envs
+        )
+        planner_model_params = _planner_model_params(training_state)
+
+        def step_fn(carry, _):
+            state, current_params = carry
+            next_params, _ = jax.vmap(
+                lambda s, p: controller.optimize(s, p, planner_model_params)
+            )(state, current_params)
+            action = next_params.actions[:, 0, :]
+            next_state = env.step(state, action)
+            extras = _build_extras(next_state.info, next_state.done)
+            extras["policy_extras"]["planner_state"] = state
+            transition = Transition(
+                observation=state.obs,
+                action=action,
+                reward=next_state.reward,
+                discount=jnp.asarray(1.0 - next_state.done, dtype=jnp.float32),
+                next_observation=next_state.obs,
+                extras=extras,
+            )
+            return (next_state, next_params), transition
+
+        (env_state, _), transitions = jax.lax.scan(
+            step_fn,
+            (env_state, planner_params),
+            (),
+            length=rollout_length,
+        )
+
+        raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
+        transitions = _strip_policy_extras(transitions)
+        time_len, batch_dim = raw_planner_states.reward.shape[:2]
+        planner_states = _flatten_time_batch_tree(
+            raw_planner_states, time_len, batch_dim
+        )
+
+        transitions = _flatten_transition_batch(transitions)
+        normalizer_params = running_statistics.update(
+            training_state.normalizer_params,
+            remove_pixels(transitions.observation),
+        )
+        transitions = _to_storage_transition(transitions, planner_states)
+
+        buffer_state = replay_buffer.insert(buffer_state, transitions)
+        training_state = training_state.replace(  # type: ignore
+            normalizer_params=normalizer_params,
+            env_steps=training_state.env_steps
+            + rollout_length * action_repeat * num_envs,
+        )
+        return training_state, env_state, buffer_state, key
+
     def sgd_step(
         carry: Tuple[TrainingState, ReplayBufferState, PRNGKey, int],
         unused_t,
@@ -722,6 +791,7 @@ def train(
         )
         new_target_qr_params = polyak(training_state.target_qr_params, qr_params)
         sampled_for_planner = sampled
+        sampled = float32(sampled)
 
         planner_avg_rollout_return = jnp.asarray(0.0, dtype=jnp.float32)
 
@@ -738,25 +808,34 @@ def train(
                 key_planner,
                 _planner_model_params(training_state),
                 planner_rollout_steps,
-                flatten_rollouts=False,
+                action_repeat,
+                flatten_rollouts=not planner_use_rollout_advantage,
             )
             actor_transitions = _strip_policy_extras(actor_transitions)
             actor_transitions = float32(actor_transitions)
-            key_actor, key_rollout_adv = jax.random.split(key_actor)
-            rollout_advantage = _compute_rollout_gae_advantages(
-                training_state.normalizer_params,
-                training_state.policy_params,
-                qr_params,
-                actor_transitions,
-                key_rollout_adv,
-            )
-            actor_transitions = _flatten_rollout_transition(actor_transitions)
-            actor_transitions = actor_transitions._replace(
-                extras={
-                    "state_extras": actor_transitions.extras["state_extras"],
-                    "policy_extras": {"advantage": rollout_advantage.reshape((-1,))},
-                }
-            )
+            if planner_use_rollout_advantage:
+                key_actor, key_rollout_adv = jax.random.split(key_actor)
+                rollout_advantage = _compute_rollout_gae_advantages(
+                    training_state.normalizer_params,
+                    training_state.policy_params,
+                    qr_params,
+                    actor_transitions,
+                    key_rollout_adv,
+                )
+                actor_transitions = _flatten_rollout_transition(actor_transitions)
+                actor_transitions = actor_transitions._replace(
+                    extras={
+                        "state_extras": actor_transitions.extras["state_extras"],
+                        "policy_extras": {
+                            "advantage": rollout_advantage.reshape((-1,))
+                        },
+                    }
+                )
+            else:
+                # Include real transitions alongside planner rollouts for actor updates.
+                actor_transitions = _concat_transition_batches(
+                    actor_transitions, critic_transitions
+                )
         else:
             actor_transitions = critic_transitions
 
@@ -897,8 +976,6 @@ def train(
     sim_prefill_calls = 0
     sim_transitions = 0
     if sim_prefill_steps_effective > 0:
-        if controller is None:
-            raise ValueError("Planner controller must be initialized for sim prefill.")
         sim_transitions_per_prefill_call = (
             planner_prefill_batch_size * planner_rollout_steps
         )
@@ -1057,7 +1134,10 @@ def train(
         def f(carry, _):
             ts, es, bs, k = carry
             k, new_key = jax.random.split(k)
-            ts, es, bs, _ = collect_real_experience(ts, es, bs, k)
+            if planner_mode:
+                ts, es, bs, _ = collect_real_experience_with_planner(ts, es, bs, k)
+            else:
+                ts, es, bs, _ = collect_real_experience(ts, es, bs, k)
             return (ts, es, bs, new_key), ()
 
         return jax.lax.scan(
@@ -1116,6 +1196,7 @@ def train(
                 plan_key,
                 _planner_model_params(training_state),
                 planner_rollout_steps,
+                action_repeat,
                 flatten_rollouts=True,
             )
             sim_transitions = _strip_policy_extras(sim_transitions)
@@ -1140,11 +1221,6 @@ def train(
             training_state, sim_batch, _ = collect_sim_prefill_batch(
                 training_state, collect_key
             )
-            sim_storage = _to_storage_transition(
-                _strip_policy_extras(sim_batch),
-                planner_states=None,
-            )
-            buffer_state = replay_buffer.insert(buffer_state, sim_storage)
             steps_this_batch = (
                 base_steps + (1 if prefill_idx < extra_steps else 0)
                 if critic_pretrain_steps > 0
