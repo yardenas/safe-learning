@@ -335,52 +335,53 @@ class TreeMPC:
         )
 
         if self.use_critic and self._has_critic(model_params):
-            next_actions = jnp.concatenate(
-                [all_traj_actions[:, 1:, :], all_traj_actions[:, -1:, :]],
-                axis=1,
-            )
 
-            flat_obs = jax.tree.map(
-                lambda x: x.reshape((num_particles * horizon_steps,) + x.shape[2:]),
-                all_traj_obs,
-            )
-            flat_actions = all_traj_actions.reshape(
-                (num_particles * horizon_steps, act_dim)
-            )
-            flat_next_obs = jax.tree.map(
-                lambda x: x.reshape((num_particles * horizon_steps,) + x.shape[2:]),
-                all_traj_next_obs,
-            )
-            flat_next_actions = next_actions.reshape(
-                (num_particles * horizon_steps, act_dim)
-            )
+            def _slice_tree(tree: Any, t: jax.Array) -> Any:
+                return jax.tree.map(
+                    lambda x: jax.lax.dynamic_index_in_dim(
+                        x, t, axis=1, keepdims=False
+                    ),
+                    tree,
+                )
 
-            q_values = self._critic_value(flat_obs, flat_actions, model_params).reshape(
-                (num_particles, horizon_steps)
-            )
-            q_values_next = self._critic_value(
-                flat_next_obs,
-                flat_next_actions,
-                model_params,
-            ).reshape((num_particles, horizon_steps))
+            rev_ts = jnp.arange(horizon_steps - 1, -1, -1)
 
-            delta = all_traj_rewards + bootstrap_discount * q_values_next - q_values
+            def _gae_step(carry: jax.Array, t: jax.Array):
+                obs_t = _slice_tree(all_traj_obs, t)
+                next_obs_t = _slice_tree(all_traj_next_obs, t)
+                action_t = jax.lax.dynamic_index_in_dim(
+                    all_traj_actions, t, axis=1, keepdims=False
+                )
+                next_t = jnp.minimum(t + 1, horizon_steps - 1)
+                next_action_t = jax.lax.dynamic_index_in_dim(
+                    all_traj_actions, next_t, axis=1, keepdims=False
+                )
+                reward_t = jax.lax.dynamic_index_in_dim(
+                    all_traj_rewards, t, axis=1, keepdims=False
+                )
+                discount_t = jax.lax.dynamic_index_in_dim(
+                    bootstrap_discount, t, axis=1, keepdims=False
+                )
 
-            def _gae_step(carry, x):
-                delta_t, discount_t = x
+                q_t = self._critic_value(obs_t, action_t, model_params)
+                q_next_t = self._critic_value(next_obs_t, next_action_t, model_params)
+                delta_t = reward_t + discount_t * q_next_t - q_t
                 adv_t = delta_t + discount_t * self.gae_lambda * carry
                 return adv_t, adv_t
 
             _, advantages_rev = jax.lax.scan(
                 _gae_step,
-                jnp.zeros_like(delta[:, -1]),
-                (
-                    jnp.flip(delta, axis=1).T,
-                    jnp.flip(bootstrap_discount, axis=1).T,
-                ),
+                jnp.zeros((num_particles,), dtype=jnp.float32),
+                rev_ts,
             )
-            all_traj_advantages = jnp.flip(advantages_rev.T, axis=1)
-            returns = q_values[:, 0] + all_traj_advantages[:, 0]
+            all_traj_advantages = jnp.flip(advantages_rev, axis=0).T
+
+            obs0 = _slice_tree(all_traj_obs, jnp.asarray(0, dtype=jnp.int32))
+            action0 = jax.lax.dynamic_index_in_dim(
+                all_traj_actions, 0, axis=1, keepdims=False
+            )
+            q0 = self._critic_value(obs0, action0, model_params)
+            returns = q0 + all_traj_advantages[:, 0]
         else:
 
             def _return_step(carry, x):
