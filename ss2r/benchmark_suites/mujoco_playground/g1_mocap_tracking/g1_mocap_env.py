@@ -8,7 +8,6 @@ import numpy as np
 from etils import epath
 from ml_collections import config_dict
 from mujoco import mjx
-from mujoco.mjx._src.math import quat_sub
 from mujoco_playground._src import mjx_env
 
 ROOT_PATH = epath.Path(__file__).parent / "assets"
@@ -60,15 +59,6 @@ def get_assets() -> Dict[str, bytes]:
     mjx_env.update_assets(assets, path, "*.xml")
     mjx_env.update_assets(assets, path / "assets")
     return assets
-
-
-def _sensor_adr(mj_model: mujoco.MjModel, sensor_name: str) -> int:
-    sensor_id = mujoco.mj_name2id(
-        mj_model, mujoco.mjtObj.mjOBJ_SENSOR.value, sensor_name
-    )
-    if sensor_id < 0:
-        raise ValueError(f"Sensor `{sensor_name}` was not found in model.")
-    return int(mj_model.sensor_adr[sensor_id])
 
 
 class G1MocapTracking(mjx_env.MjxEnv):
@@ -127,23 +117,11 @@ class G1MocapTracking(mjx_env.MjxEnv):
         self._init_q = jp.array(self._mj_model.qpos0)
         self._default_pose = jp.array(self._mj_model.qpos0[7 : 7 + self._nu])
 
-        self._torso_imu_site_id = self._mj_model.site("imu_in_torso").id
-        self._pelvis_imu_site_id = self._mj_model.site("imu_in_pelvis").id
-
         self._feet_site_id = np.array(
             [
                 self._mj_model.site("left_foot").id,
                 self._mj_model.site("right_foot").id,
             ]
-        )
-
-        self._torso_linvel_adr = _sensor_adr(self._mj_model, "imu_in_torso_linvel")
-        self._pelvis_gyro_adr = _sensor_adr(
-            self._mj_model, "imu-pelvis-angular-velocity"
-        )
-        self._left_foot_quat_adr = _sensor_adr(self._mj_model, "left_foot_orientation")
-        self._right_foot_quat_adr = _sensor_adr(
-            self._mj_model, "right_foot_orientation"
         )
 
         reference_path = self._resolve_reference_path(str(self._config.reference_path))
@@ -160,14 +138,14 @@ class G1MocapTracking(mjx_env.MjxEnv):
 
         (
             ref_left_pos,
-            ref_left_quat,
+            ref_left_upvector,
             ref_right_pos,
-            ref_right_quat,
+            ref_right_upvector,
         ) = self._precompute_reference_feet(reference)
         self._ref_left_pos = jp.array(ref_left_pos)
-        self._ref_left_quat = jp.array(ref_left_quat)
+        self._ref_left_upvector = jp.array(ref_left_upvector)
         self._ref_right_pos = jp.array(ref_right_pos)
-        self._ref_right_quat = jp.array(ref_right_quat)
+        self._ref_right_upvector = jp.array(ref_right_upvector)
 
         cost_weights = np.ones(self._mj_model.nq, dtype=np.float32)
         cost_weights[:7] = 5.0
@@ -182,37 +160,28 @@ class G1MocapTracking(mjx_env.MjxEnv):
         right_foot_site_id = self._mj_model.site("right_foot").id
 
         ref_left_pos = np.zeros((n_frames, 3), dtype=np.float32)
-        ref_left_quat = np.zeros((n_frames, 4), dtype=np.float32)
+        ref_left_upvector = np.zeros((n_frames, 3), dtype=np.float32)
         ref_right_pos = np.zeros((n_frames, 3), dtype=np.float32)
-        ref_right_quat = np.zeros((n_frames, 4), dtype=np.float32)
+        ref_right_upvector = np.zeros((n_frames, 3), dtype=np.float32)
 
         for i in range(n_frames):
             mj_data.qpos[:] = reference[i]
             mujoco.mj_forward(self._mj_model, mj_data)
             ref_left_pos[i] = mj_data.site_xpos[left_foot_site_id]
             ref_right_pos[i] = mj_data.site_xpos[right_foot_site_id]
-            # MuJoCo Python bindings require float64 buffers for mju_mat2Quat.
-            left_quat64 = np.empty(4, dtype=np.float64)
-            right_quat64 = np.empty(4, dtype=np.float64)
-            mujoco.mju_mat2Quat(
-                left_quat64,
-                np.asarray(
-                    mj_data.site_xmat[left_foot_site_id], dtype=np.float64
-                ).reshape(-1),
-            )
-            mujoco.mju_mat2Quat(
-                right_quat64,
-                np.asarray(
-                    mj_data.site_xmat[right_foot_site_id], dtype=np.float64
-                ).reshape(-1),
-            )
-            ref_left_quat[i] = left_quat64.astype(np.float32)
-            ref_right_quat[i] = right_quat64.astype(np.float32)
+            left_rot = np.asarray(
+                mj_data.site_xmat[left_foot_site_id], dtype=np.float32
+            ).reshape(3, 3)
+            right_rot = np.asarray(
+                mj_data.site_xmat[right_foot_site_id], dtype=np.float32
+            ).reshape(3, 3)
+            ref_left_upvector[i] = left_rot[:, 2]
+            ref_right_upvector[i] = right_rot[:, 2]
 
-        return ref_left_pos, ref_left_quat, ref_right_pos, ref_right_quat
+        return ref_left_pos, ref_left_upvector, ref_right_pos, ref_right_upvector
 
-    def _sensor_vec(self, data: mjx.Data, adr: int, dim: int) -> jax.Array:
-        return data.sensordata[adr : adr + dim]
+    def _get_sensor_data(self, data: mjx.Data, sensor_name: str) -> jax.Array:
+        return mjx_env.get_sensor_data(self.mj_model, data, sensor_name)
 
     def _reference_index(self, t: jax.Array, start_idx: jax.Array) -> jax.Array:
         idx = jp.int32(t * self._reference_fps) + jp.int32(start_idx)
@@ -229,12 +198,14 @@ class G1MocapTracking(mjx_env.MjxEnv):
         )
         return jp.array([theta, theta + jp.pi], dtype=jp.float32)
 
-    def _get_gravity(self, data: mjx.Data) -> jax.Array:
-        return data.site_xmat[self._torso_imu_site_id].T @ jp.array([0.0, 0.0, -1.0])
+    def _get_upvector(self, data: mjx.Data, frame: str) -> jax.Array:
+        return self._get_sensor_data(data, f"upvector_{frame}")
 
-    def _get_local_linvel(self, data: mjx.Data) -> jax.Array:
-        linvel_world = self._sensor_vec(data, self._torso_linvel_adr, 3)
-        return data.site_xmat[self._torso_imu_site_id].T @ linvel_world
+    def _get_projected_gravity(self, data: mjx.Data, frame: str) -> jax.Array:
+        return -self._get_upvector(data, frame)
+
+    def _get_local_linvel(self, data: mjx.Data, frame: str) -> jax.Array:
+        return self._get_sensor_data(data, f"local_linvel_{frame}")
 
     def reset(self, rng: jax.Array) -> mjx_env.State:
         rng, start_rng = jax.random.split(rng)
@@ -328,22 +299,15 @@ class G1MocapTracking(mjx_env.MjxEnv):
         return state.replace(data=data, obs=obs, reward=reward, done=done)
 
     def _get_termination(self, data: mjx.Data) -> jax.Array:
-        gravity = self._get_gravity(data)
-        fall_termination = gravity[-1] < self._config.termination_upvector_z
-        height_termination = data.qpos[2] < self._config.termination_height
-        return (
-            fall_termination
-            | height_termination
-            | jp.isnan(data.qpos).any()
-            | jp.isnan(data.qvel).any()
-        )
+        # Temporarily disable task terminations while tuning/debugging.
+        return jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
 
     def _get_obs(
         self,
         data: mjx.Data,
         info: dict[str, Any],
     ) -> jax.Array:
-        gyro = self._sensor_vec(data, self._pelvis_gyro_adr, 3)
+        gyro = self._get_sensor_data(data, "gyro_pelvis")
         info["rng"], noise_rng = jax.random.split(info["rng"])
         noisy_gyro = (
             gyro
@@ -352,7 +316,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
             * self._config.noise_config.scales.gyro
         )
 
-        gravity = self._get_gravity(data)
+        gravity = self._get_projected_gravity(data, "pelvis")
         info["rng"], noise_rng = jax.random.split(info["rng"])
         noisy_gravity = (
             gravity
@@ -379,7 +343,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
             * self._config.noise_config.scales.joint_vel
         )
 
-        linvel = self._get_local_linvel(data)
+        linvel = self._get_local_linvel(data, "pelvis")
         info["rng"], noise_rng = jax.random.split(info["rng"])
         noisy_linvel = (
             linvel
@@ -424,10 +388,10 @@ class G1MocapTracking(mjx_env.MjxEnv):
             jp.square(right_pos_err)
         )
 
-        left_quat = self._sensor_vec(data, self._left_foot_quat_adr, 4)
-        right_quat = self._sensor_vec(data, self._right_foot_quat_adr, 4)
-        left_ori_err = quat_sub(left_quat, self._ref_left_quat[ref_idx])
-        right_ori_err = quat_sub(right_quat, self._ref_right_quat[ref_idx])
+        left_upvector = self._get_sensor_data(data, "left_foot_upvector")
+        right_upvector = self._get_sensor_data(data, "right_foot_upvector")
+        left_ori_err = left_upvector - self._ref_left_upvector[ref_idx]
+        right_ori_err = right_upvector - self._ref_right_upvector[ref_idx]
         foot_orientation_cost = jp.sum(jp.square(left_ori_err)) + jp.sum(
             jp.square(right_ori_err)
         )

@@ -306,16 +306,27 @@
   </actuator>
 
   <sensor>
-    <gyro site="imu_in_torso" name="imu-torso-angular-velocity" cutoff="34.9" noise="0.0005" />
-    <accelerometer site="imu_in_torso" name="imu-torso-linear-acceleration" cutoff="157" noise="0.01" />
-    <framequat name="imu_in_torso_quat" objtype="site" objname="imu_in_torso" />
-    <framelinvel name="imu_in_torso_linvel" objtype="site" objname="imu_in_torso" />
-    <gyro site="imu_in_pelvis" name="imu-pelvis-angular-velocity" cutoff="34.9" noise="0.0005" />
-    <accelerometer site="imu_in_pelvis" name="imu-pelvis-linear-acceleration" cutoff="157" noise="0.01" />
-
-    <framepos name="left_foot_position" objtype="site" objname="left_foot" />
-    <framequat name="left_foot_orientation" objtype="site" objname="left_foot" />
-    <framepos name="right_foot_position" objtype="site" objname="right_foot" />
-    <framequat name="right_foot_orientation" objtype="site" objname="right_foot" />
+    <framezaxis objtype="site" objname="imu_in_torso" name="upvector_torso" />
+    <velocimeter site="imu_in_torso" name="local_linvel_torso" />
+    <velocimeter site="imu_in_pelvis" name="local_linvel_pelvis" />
+    <accelerometer site="imu_in_torso" name="accelerometer_torso" cutoff="157" noise="0.01" />
+    <accelerometer site="imu_in_pelvis" name="accelerometer_pelvis" cutoff="157" noise="0.01" />
+    <gyro site="imu_in_torso" name="gyro_torso" cutoff="34.9" noise="0.0005" />
+    <gyro site="imu_in_pelvis" name="gyro_pelvis" cutoff="34.9" noise="0.0005" />
+    <framezaxis objtype="site" objname="imu_in_pelvis" name="upvector_pelvis" />
+    <framexaxis objtype="site" objname="imu_in_torso" name="forwardvector_torso" />
+    <framexaxis objtype="site" objname="imu_in_pelvis" name="forwardvector_pelvis" />
+    <framequat objtype="site" objname="imu_in_torso" name="orientation_torso" />
+    <framequat objtype="site" objname="imu_in_pelvis" name="orientation_pelvis" />
+    <framelinvel objtype="site" objname="imu_in_torso" name="global_linvel_torso" />
+    <framelinvel objtype="site" objname="imu_in_pelvis" name="global_linvel_pelvis" />
+    <frameangvel objtype="site" objname="imu_in_torso" name="global_angvel_torso" />
+    <frameangvel objtype="site" objname="imu_in_pelvis" name="global_angvel_pelvis" />
+    <framelinvel objtype="site" objname="left_foot" name="left_foot_global_linvel" />
+    <framelinvel objtype="site" objname="right_foot" name="right_foot_global_linvel" />
+    <framezaxis objtype="site" objname="left_foot" name="left_foot_upvector" />
+    <framezaxis objtype="site" objname="right_foot" name="right_foot_upvector" />
+    <force name="left_foot_force" site="left_foot" />
+    <force name="right_foot_force" site="right_foot" />
   </sensor>
 </mujoco>
