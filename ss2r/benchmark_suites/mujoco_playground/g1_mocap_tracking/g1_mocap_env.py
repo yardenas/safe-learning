@@ -88,7 +88,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
         self._mj_model.opt.timestep = self.sim_dt
         self._mj_model.vis.global_.offwidth = 3840
         self._mj_model.vis.global_.offheight = 2160
-        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+        self._mjx_model = mjx.put_model(self._mj_model)
         self._xml_path = SCENE_XML.as_posix()
         self._post_init()
 
@@ -255,7 +255,6 @@ class G1MocapTracking(mjx_env.MjxEnv):
             qpos=qpos,
             qvel=qvel,
             ctrl=q_ref[7 : 7 + self._nu],
-            impl=self.mjx_model.impl.value,
             nconmax=self._config.nconmax,
             njmax=self._config.njmax,
         )
