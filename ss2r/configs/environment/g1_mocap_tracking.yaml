@@ -32,24 +32,6 @@ task_params:
   termination_height: 0.45
   termination_upvector_z: 0.0
 
-train_params:
-  floor_friction: [0.4, 1.0]
-  scale_friction: [0.9, 1.1]
-  scale_armature: [1.0, 1.05]
-  jitter_mass: [-0.05, 0.05]
-  scale_link_mass: [0.9, 1.1]
-  add_torso_mass: [-1.0, 1.0]
-  jitter_qpos0: [-0.05, 0.05]
-  Kd: [0.0, 0.0]
-  Kp: [0.0, 0.0]
+train_params: {}
 
-eval_params:
-  floor_friction: [0.4, 1.0]
-  scale_friction: [0.9, 1.1]
-  scale_armature: [1.0, 1.05]
-  jitter_mass: [-0.05, 0.05]
-  scale_link_mass: [0.9, 1.1]
-  add_torso_mass: [-1.0, 1.0]
-  jitter_qpos0: [-0.05, 0.05]
-  Kd: [0.0, 0.0]
-  Kp: [0.0, 0.0]
+eval_params: {}
