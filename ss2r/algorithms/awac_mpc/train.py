@@ -937,7 +937,7 @@ def train(
         def collect_sim_prefill_batch(
             training_state: TrainingState,
             key: PRNGKey,
-        ) -> Tuple[TrainingState, Transition, PRNGKey]:
+        ) -> Tuple[TrainingState, Transition, Any, PRNGKey]:
             key, reset_key, plan_key = jax.random.split(key, 3)
             real_keys = jax.random.split(reset_key, num_envs)
             real_state = reset_fn(real_keys)
@@ -976,7 +976,19 @@ def train(
                 remove_pixels(sim_transitions.observation),
             )
             training_state = training_state.replace(normalizer_params=normalizer_params)  # type: ignore
-            return training_state, sim_transitions, key
+            horizon = int(controller.horizon)  # type: ignore
+            raw_planner_states = jax.tree.map(
+                lambda x: jnp.broadcast_to(x, (horizon,) + x.shape)
+                if hasattr(x, "shape")
+                else x,
+                planner_state,
+            )
+            planner_states = _flatten_time_batch_tree(
+                raw_planner_states,
+                time_len=horizon,
+                batch_size=num_envs,
+            )
+            return training_state, sim_transitions, planner_states, key
 
         def sim_prefill_replay_buffer(
             training_state: TrainingState,
@@ -986,10 +998,12 @@ def train(
             def f(carry, _):
                 ts, bs, k = carry
                 k, collect_key = jax.random.split(k)
-                ts, sim_batch, _ = collect_sim_prefill_batch(ts, collect_key)
+                ts, sim_batch, sim_planner_states, _ = collect_sim_prefill_batch(
+                    ts, collect_key
+                )
                 sim_storage = _to_storage_transition(
                     _strip_policy_extras(sim_batch),
-                    planner_states=None,
+                    planner_states=sim_planner_states,
                 )
                 bs = replay_buffer.insert(bs, sim_storage)
                 return (ts, bs, k), ()
