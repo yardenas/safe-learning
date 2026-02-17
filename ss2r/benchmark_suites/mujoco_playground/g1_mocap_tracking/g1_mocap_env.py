@@ -259,15 +259,12 @@ class G1MocapTracking(mjx_env.MjxEnv):
         qpos = qpos.at[7:].set(qpos[7:] + q_noise)
         qvel = qvel + v_noise
 
-        data = mjx_env.make_data(
-            self.mj_model,
+        data = mjx_env.init(
+            self.mjx_model,
             qpos=qpos,
             qvel=qvel,
             ctrl=q_ref[7 : 7 + self._nu],
-            nconmax=self._config.nconmax,
-            njmax=self._config.njmax,
         )
-        data = mjx.forward(self.mjx_model, data)
 
         info = {
             "rng": rng,
