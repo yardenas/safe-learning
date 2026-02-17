@@ -31,9 +31,6 @@ task_params:
   reset_noise_scale: 0.01
   termination_height: 0.45
   termination_upvector_z: 0.0
-  impl: jax
-  nconmax: 65536
-  njmax: 90
 
 train_params:
   floor_friction: [0.4, 1.0]

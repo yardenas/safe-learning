@@ -49,9 +49,6 @@ def default_config() -> config_dict.ConfigDict:
         reset_noise_scale=0.01,
         termination_height=0.45,
         termination_upvector_z=0.0,
-        impl="jax",
-        nconmax=8 * 8192,
-        njmax=29 * 2 + 8 * 4,
     )
 
 
