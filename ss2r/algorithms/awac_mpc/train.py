@@ -985,6 +985,11 @@ def train(
             training_state, sim_batch, _ = collect_sim_prefill_batch(
                 training_state, collect_key
             )
+            sim_storage = _to_storage_transition(
+                _strip_policy_extras(sim_batch),
+                planner_states=None,
+            )
+            buffer_state = replay_buffer.insert(buffer_state, sim_storage)
             steps_this_batch = (
                 base_steps + (1 if prefill_idx < extra_steps else 0)
                 if critic_pretrain_steps > 0
