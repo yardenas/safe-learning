@@ -299,8 +299,15 @@ class G1MocapTracking(mjx_env.MjxEnv):
         return state.replace(data=data, obs=obs, reward=reward, done=done)
 
     def _get_termination(self, data: mjx.Data) -> jax.Array:
-        # Temporarily disable task terminations while tuning/debugging.
-        return jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
+        torso_upvector = self._get_upvector(data, "torso")
+        fall_termination = torso_upvector[-1] < self._config.termination_upvector_z
+        height_termination = data.qpos[2] < self._config.termination_height
+        return (
+            fall_termination
+            | height_termination
+            | jp.isnan(data.qpos).any()
+            | jp.isnan(data.qvel).any()
+        )
 
     def _get_obs(
         self,
