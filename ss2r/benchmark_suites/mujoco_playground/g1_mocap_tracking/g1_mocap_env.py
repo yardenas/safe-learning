@@ -191,14 +191,23 @@ class G1MocapTracking(mjx_env.MjxEnv):
             mujoco.mj_forward(self._mj_model, mj_data)
             ref_left_pos[i] = mj_data.site_xpos[left_foot_site_id]
             ref_right_pos[i] = mj_data.site_xpos[right_foot_site_id]
+            # MuJoCo Python bindings require float64 buffers for mju_mat2Quat.
+            left_quat64 = np.empty(4, dtype=np.float64)
+            right_quat64 = np.empty(4, dtype=np.float64)
             mujoco.mju_mat2Quat(
-                ref_left_quat[i],
-                mj_data.site_xmat[left_foot_site_id].reshape(-1),
+                left_quat64,
+                np.asarray(
+                    mj_data.site_xmat[left_foot_site_id], dtype=np.float64
+                ).reshape(-1),
             )
             mujoco.mju_mat2Quat(
-                ref_right_quat[i],
-                mj_data.site_xmat[right_foot_site_id].reshape(-1),
+                right_quat64,
+                np.asarray(
+                    mj_data.site_xmat[right_foot_site_id], dtype=np.float64
+                ).reshape(-1),
             )
+            ref_left_quat[i] = left_quat64.astype(np.float32)
+            ref_right_quat[i] = right_quat64.astype(np.float32)
 
         return ref_left_pos, ref_left_quat, ref_right_pos, ref_right_quat
 
