@@ -1,0 +1,58 @@
+defaults:
+  - mujoco_playground_base
+
+task_name: G1MocapTracking
+task_params:
+  ctrl_dt: 0.02
+  sim_dt: 0.002
+  episode_length: 1000
+  action_repeat: 1
+  action_scale: 0.5
+  noise_config:
+    level: 1.0
+    scales:
+      joint_pos: 0.03
+      joint_vel: 1.5
+      gravity: 0.05
+      linvel: 0.1
+      gyro: 0.2
+  reward_config:
+    scales:
+      configuration: -1.0
+      foot_position: -5.0
+      foot_orientation: -0.1
+      control: -1.0
+      action_rate: 0.0
+      alive: 0.0
+      termination: -100.0
+  reference_path: ss2r/benchmark_suites/mujoco_playground/g1_mocap_tracking/walk1_subject1.npz
+  random_start: true
+  loop_reference: true
+  reset_noise_scale: 0.01
+  termination_height: 0.45
+  termination_upvector_z: 0.0
+  impl: jax
+  nconmax: 65536
+  njmax: 90
+
+train_params:
+  floor_friction: [0.4, 1.0]
+  scale_friction: [0.9, 1.1]
+  scale_armature: [1.0, 1.05]
+  jitter_mass: [-0.05, 0.05]
+  scale_link_mass: [0.9, 1.1]
+  add_torso_mass: [-1.0, 1.0]
+  jitter_qpos0: [-0.05, 0.05]
+  Kd: [0.0, 0.0]
+  Kp: [0.0, 0.0]
+
+eval_params:
+  floor_friction: [0.4, 1.0]
+  scale_friction: [0.9, 1.1]
+  scale_armature: [1.0, 1.05]
+  jitter_mass: [-0.05, 0.05]
+  scale_link_mass: [0.9, 1.1]
+  add_torso_mass: [-1.0, 1.0]
+  jitter_qpos0: [-0.05, 0.05]
+  Kd: [0.0, 0.0]
+  Kp: [0.0, 0.0]
