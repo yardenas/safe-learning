@@ -18,13 +18,32 @@ task_params:
       gyro: 0.2
   reward_config:
     scales:
-      configuration: -1.0
-      foot_position: -5.0
-      foot_orientation: -0.1
-      control: -1.0
-      action_rate: 0.0
+      root_pos: 0.5
+      root_ori: 0.5
+      pose: 1.0
+      body_ori: 1.0
+      body_lin_vel: 1.0
+      body_ang_vel: 1.0
+      action_rate: -0.1
+      joint_limit: -10.0
+      self_collisions: -10.0
+      left_pos: 0.0
+      right_pos: 0.0
+      left_ori: 0.0
+      right_ori: 0.0
       alive: 0.0
-      termination: -100.0
+      termination: 0.0
+    stds:
+      root_pos: 0.3
+      root_ori: 0.4
+      pose: 0.3
+      body_ori: 0.4
+      body_lin_vel: 1.0
+      body_ang_vel: 3.14
+      left_pos: 0.3
+      right_pos: 0.3
+      left_ori: 0.4
+      right_ori: 0.4
   reference_path: ss2r/benchmark_suites/mujoco_playground/g1_mocap_tracking/walk1_subject1.npz
   random_start: true
   loop_reference: true

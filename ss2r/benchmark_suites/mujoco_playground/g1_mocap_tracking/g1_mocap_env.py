@@ -33,13 +33,36 @@ def default_config() -> config_dict.ConfigDict:
         ),
         reward_config=config_dict.create(
             scales=config_dict.create(
-                configuration=-1.0,
-                foot_position=-5.0,
-                foot_orientation=-0.1,
-                control=-1.0,
-                action_rate=0.0,
+                # Mapped from mjlab/tasks/tracking/tracking_env_cfg.py
+                # to available signals in this environment.
+                root_pos=0.5,
+                root_ori=0.5,
+                pose=1.0,
+                body_ori=1.0,
+                body_lin_vel=1.0,
+                body_ang_vel=1.0,
+                action_rate=-0.1,
+                joint_limit=-10.0,
+                self_collisions=-10.0,
+                # Debug-only terms (not part of total reward by default).
+                left_pos=0.0,
+                right_pos=0.0,
+                left_ori=0.0,
+                right_ori=0.0,
                 alive=0.0,
-                termination=-100.0,
+                termination=0.0,
+            ),
+            stds=config_dict.create(
+                root_pos=0.3,
+                root_ori=0.4,
+                pose=0.3,
+                body_ori=0.4,
+                body_lin_vel=1.0,
+                body_ang_vel=3.14,
+                left_pos=0.3,
+                right_pos=0.3,
+                left_ori=0.4,
+                right_ori=0.4,
             ),
         ),
         reference_path="ss2r/benchmark_suites/mujoco_playground/g1_mocap_tracking/walk1_subject1.npz",
@@ -135,6 +158,11 @@ class G1MocapTracking(mjx_env.MjxEnv):
 
         self._reference = jp.array(reference)
         self._reference_fps = float(np.asarray(npz_file["frequency"]).item())
+        ref_root_linvel, ref_root_angvel = self._precompute_reference_root_velocities(
+            reference
+        )
+        self._ref_root_linvel = jp.array(ref_root_linvel)
+        self._ref_root_angvel = jp.array(ref_root_angvel)
 
         (
             ref_left_pos,
@@ -146,10 +174,35 @@ class G1MocapTracking(mjx_env.MjxEnv):
         self._ref_left_upvector = jp.array(ref_left_upvector)
         self._ref_right_pos = jp.array(ref_right_pos)
         self._ref_right_upvector = jp.array(ref_right_upvector)
+        self._joint_lowers = jp.array(self._mj_model.jnt_range[1:, 0])
+        self._joint_uppers = jp.array(self._mj_model.jnt_range[1:, 1])
 
-        cost_weights = np.ones(self._mj_model.nq, dtype=np.float32)
-        cost_weights[:7] = 5.0
-        self._cost_weights = jp.array(cost_weights)
+    def _precompute_reference_root_velocities(
+        self, reference: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        n_frames = reference.shape[0]  # type: ignore
+        dt = 1.0 / self._reference_fps
+
+        ref_root_linvel = np.zeros((n_frames, 3), dtype=np.float32)
+        ref_root_angvel = np.zeros((n_frames, 3), dtype=np.float32)
+
+        for i in range(n_frames):
+            j = (
+                (i + 1) % n_frames
+                if self._config.loop_reference
+                else min(i + 1, n_frames - 1)
+            )
+            ref_root_linvel[i] = (reference[j, :3] - reference[i, :3]) / dt
+
+            quat_diff = np.zeros(3, dtype=np.float64)
+            mujoco.mju_subQuat(
+                quat_diff,
+                reference[j, 3:7].astype(np.float64),
+                reference[i, 3:7].astype(np.float64),
+            )
+            ref_root_angvel[i] = (quat_diff / dt).astype(np.float32)
+
+        return ref_root_linvel, ref_root_angvel
 
     def _precompute_reference_feet(
         self, reference: np.ndarray
@@ -242,6 +295,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
             "reference_start_idx": reference_start_idx,
             "phase": self._phase_from_index(reference_start_idx),
             "last_act": jp.zeros(self._nu),
+            "last_last_act": jp.zeros(self._nu),
             "motor_targets": jp.zeros(self._nu),
         }
 
@@ -276,6 +330,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
             data,
             action,
             state.info["last_act"],
+            state.info["last_last_act"],
             motor_targets,
             done,
             ref_idx_next,
@@ -287,12 +342,13 @@ class G1MocapTracking(mjx_env.MjxEnv):
         }
         reward = sum(rewards.values()) * self.dt
 
+        state.info["last_last_act"] = state.info["last_act"]
         state.info["last_act"] = action
         state.info["motor_targets"] = motor_targets
         state.info["phase"] = self._phase_from_index(ref_idx_next)
 
         for key, value in rewards.items():
-            state.metrics[f"reward/{key}"] = value
+            state.metrics[f"reward/{key}"] = value * self.dt
 
         obs = self._get_obs(data, state.info)
         done = done.astype(reward.dtype)
@@ -380,38 +436,89 @@ class G1MocapTracking(mjx_env.MjxEnv):
         data: mjx.Data,
         action: jax.Array,
         last_act: jax.Array,
+        last_last_act: jax.Array,
         motor_targets: jax.Array,
         done: jax.Array,
         ref_idx: jax.Array,
         feet_pos: jax.Array,
     ) -> dict[str, jax.Array]:
         q_ref = self._reference[ref_idx]
-        q_err = self._cost_weights * (data.qpos - q_ref)
-        configuration_cost = jp.sum(jp.square(q_err))
+        root_pos_err = jp.sum(jp.square(data.qpos[:3] - q_ref[:3]))
+        root_pos_reward = jp.exp(
+            -root_pos_err / jp.square(self._config.reward_config.stds.root_pos)
+        )
+
+        # Quaternion angular error magnitude^2 approximation.
+        root_dot = jp.abs(jp.sum(data.qpos[3:7] * q_ref[3:7]))
+        root_dot = jp.clip(root_dot, 0.0, 1.0)
+        root_ori_err = jp.square(2.0 * jp.arccos(root_dot))
+        root_ori_reward = jp.exp(
+            -root_ori_err / jp.square(self._config.reward_config.stds.root_ori)
+        )
+
+        pose_err = jp.mean(
+            jp.square(data.qpos[7 : 7 + self._nu] - q_ref[7 : 7 + self._nu])
+        )
+        pose_reward = jp.exp(
+            -pose_err / jp.square(self._config.reward_config.stds.pose)
+        )
 
         left_pos_err = feet_pos[0] - self._ref_left_pos[ref_idx]
         right_pos_err = feet_pos[1] - self._ref_right_pos[ref_idx]
-        foot_position_cost = jp.sum(jp.square(left_pos_err)) + jp.sum(
-            jp.square(right_pos_err)
+        left_pos_sq = jp.sum(jp.square(left_pos_err))
+        right_pos_sq = jp.sum(jp.square(right_pos_err))
+        left_pos_reward = jp.exp(
+            -left_pos_sq / jp.square(self._config.reward_config.stds.left_pos)
+        )
+        right_pos_reward = jp.exp(
+            -right_pos_sq / jp.square(self._config.reward_config.stds.right_pos)
         )
 
         left_upvector = self._get_sensor_data(data, "left_foot_upvector")
         right_upvector = self._get_sensor_data(data, "right_foot_upvector")
         left_ori_err = left_upvector - self._ref_left_upvector[ref_idx]
         right_ori_err = right_upvector - self._ref_right_upvector[ref_idx]
-        foot_orientation_cost = jp.sum(jp.square(left_ori_err)) + jp.sum(
-            jp.square(right_ori_err)
+        left_ori_sq = jp.sum(jp.square(left_ori_err))
+        right_ori_sq = jp.sum(jp.square(right_ori_err))
+        left_ori_reward = jp.exp(
+            -left_ori_sq / jp.square(self._config.reward_config.stds.left_ori)
+        )
+        right_ori_reward = jp.exp(
+            -right_ori_sq / jp.square(self._config.reward_config.stds.right_ori)
+        )
+        body_ori_reward = 0.5 * (left_ori_reward + right_ori_reward)
+
+        lin_vel_err = jp.sum(jp.square(data.qvel[:3] - self._ref_root_linvel[ref_idx]))
+        body_lin_vel_reward = jp.exp(
+            -lin_vel_err / jp.square(self._config.reward_config.stds.body_lin_vel)
+        )
+        ang_vel_err = jp.sum(jp.square(data.qvel[3:6] - self._ref_root_angvel[ref_idx]))
+        body_ang_vel_reward = jp.exp(
+            -ang_vel_err / jp.square(self._config.reward_config.stds.body_ang_vel)
         )
 
-        control_cost = jp.sum(jp.square(motor_targets - q_ref[7 : 7 + self._nu]))
-        action_rate_cost = jp.sum(jp.square(action - last_act))
+        del motor_targets  # Unused in this mapping.
+        action_rate_cost = jp.sum(jp.square(action - 2.0 * last_act + last_last_act))
+        qpos = data.qpos[7 : 7 + self._nu]
+        joint_limit_cost = -jp.clip(qpos - self._joint_lowers, None, 0.0)
+        joint_limit_cost += jp.clip(qpos - self._joint_uppers, 0.0, None)
+        joint_limit_cost = jp.sum(joint_limit_cost)
+        self_collision_cost = jp.array(0.0)
 
         return {
-            "configuration": configuration_cost,
-            "foot_position": foot_position_cost,
-            "foot_orientation": foot_orientation_cost,
-            "control": control_cost,
+            "root_pos": root_pos_reward,
+            "root_ori": root_ori_reward,
+            "pose": pose_reward,
+            "body_ori": body_ori_reward,
+            "body_lin_vel": body_lin_vel_reward,
+            "body_ang_vel": body_ang_vel_reward,
             "action_rate": action_rate_cost,
+            "joint_limit": joint_limit_cost,
+            "self_collisions": self_collision_cost,
+            "left_pos": left_pos_reward,
+            "right_pos": right_pos_reward,
+            "left_ori": left_ori_reward,
+            "right_ori": right_ori_reward,
             "alive": jp.array(1.0),
             "termination": done,
         }
