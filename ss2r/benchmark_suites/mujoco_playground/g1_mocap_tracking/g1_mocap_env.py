@@ -9,7 +9,7 @@ import numpy as np
 from ml_collections import config_dict
 from mujoco import mjx
 from mujoco.mjx._src import math
-from mujoco_playground._src import collision, gait, mjx_env
+from mujoco_playground._src import collision, mjx_env
 from mujoco_playground._src.collision import geoms_colliding
 from mujoco_playground._src.locomotion.g1 import base as g1_base
 from mujoco_playground._src.locomotion.g1 import g1_constants as consts
@@ -55,7 +55,6 @@ def default_config() -> config_dict.ConfigDict:
                 feet_air_time=2.0,
                 feet_slip=-0.25,
                 feet_height=0.0,
-                feet_phase=1.0,
                 # Other rewards.
                 alive=0.0,
                 stand_still=-1.0,
@@ -217,6 +216,7 @@ class G1MocapTracking(g1_base.G1Env):
         with np.load(reference_path, allow_pickle=True) as npz_file:
             reference = np.asarray(npz_file["qpos"], dtype=np.float32)
             reference_qvel = np.asarray(npz_file["qvel"], dtype=np.float32)
+            reference_joint_names = [str(n) for n in npz_file["joint_names"].tolist()]
             if reference.ndim != 2:
                 raise ValueError(
                     f"Expected mocap qpos to be 2D, got shape {reference.shape}."
@@ -232,28 +232,95 @@ class G1MocapTracking(g1_base.G1Env):
             max_steps = 5000
             reference = reference[:max_steps]
             reference_qvel = reference_qvel[:max_steps]
+            reference, reference_qvel = self._retarget_reference_to_model(
+                reference, reference_qvel, reference_joint_names
+            )
             self._reference = jp.array(reference)
             self._reference_fps = float(np.asarray(npz_file["frequency"]).item())
             self._reference_cmd = jp.array(reference_qvel[:, [0, 1, 5]])
+
+    def _retarget_reference_to_model(
+        self,
+        reference_qpos: np.ndarray,
+        reference_qvel: np.ndarray,
+        reference_joint_names: list[str],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if not reference_joint_names or reference_joint_names[0] != "root":
+            raise ValueError(
+                "Expected first mocap joint name to be 'root', got "
+                f"{reference_joint_names[:1]}."
+            )
+        expected_joint_count = len(reference_joint_names) - 1
+        if reference_qpos.shape[1] != 7 + expected_joint_count:
+            raise ValueError(
+                "Reference qpos width does not match joint_names. "
+                f"qpos width={reference_qpos.shape[1]}, "
+                f"expected={7 + expected_joint_count}."
+            )
+        if reference_qvel.shape[1] != 6 + expected_joint_count:
+            raise ValueError(
+                "Reference qvel width does not match joint_names. "
+                f"qvel width={reference_qvel.shape[1]}, "
+                f"expected={6 + expected_joint_count}."
+            )
+
+        num_frames = reference_qpos.shape[0]
+
+        # Start from the model default pose so joints missing in the 23-DOF mocap
+        # (waist_roll/pitch and wrist pitch/yaw) stay at a valid configuration.
+        model_default_qpos = np.asarray(self._init_q, dtype=np.float32)
+        retarget_qpos = np.repeat(model_default_qpos[None, :], num_frames, axis=0)
+        retarget_qvel = np.zeros((num_frames, self.mj_model.nv), dtype=np.float32)
+
+        # Always copy floating base state directly.
+        retarget_qpos[:, :7] = reference_qpos[:, :7]
+        retarget_qvel[:, :6] = reference_qvel[:, :6]
+
+        mapped_joint_names: list[str] = []
+        missing_joint_names: list[str] = []
+        for src_joint_idx, joint_name in enumerate(reference_joint_names[1:]):
+            src_qpos_idx = 7 + src_joint_idx
+            src_qvel_idx = 6 + src_joint_idx
+            try:
+                joint = self._mj_model.joint(joint_name)
+            except KeyError:
+                missing_joint_names.append(joint_name)
+                continue
+            qpos_adr = int(joint.qposadr)
+            dof_adr = int(joint.dofadr)
+            retarget_qpos[:, qpos_adr] = reference_qpos[:, src_qpos_idx]
+            retarget_qvel[:, dof_adr] = reference_qvel[:, src_qvel_idx]
+            mapped_joint_names.append(joint_name)
+
+        if missing_joint_names:
+            raise ValueError(
+                "Mocap joint names missing in active model: " f"{missing_joint_names}."
+            )
+
+        mapped_joint_names = sorted(set(mapped_joint_names))
+        model_joint_names = sorted(
+            str(self._mj_model.joint(i).name)
+            for i in range(self._mj_model.njnt)
+            if str(self._mj_model.joint(i).name) != "world"
+        )
+        extra_model_joints = sorted(set(model_joint_names) - set(mapped_joint_names))
+        print(
+            "[G1MocapTracking] Retarget mapping complete: "
+            f"mapped={len(mapped_joint_names)} reference joints, "
+            f"model_extra={extra_model_joints}"
+        )
+
+        return retarget_qpos, retarget_qvel
 
     def _reference_index(self, t: jax.Array, start_idx: jax.Array) -> jax.Array:
         idx = jp.int32(jp.floor(t * self._reference_fps)) + jp.int32(start_idx)
         return jp.mod(idx, self._reference.shape[0])
 
     def _phase_from_index(self, idx: jax.Array) -> jax.Array:
-        theta = (
-            2.0
-            * jp.pi
-            * jp.asarray(idx, dtype=jp.float32)
-            / jp.asarray(self._reference.shape[0], dtype=jp.float32)
+        progress = jp.asarray(idx, dtype=jp.float32) / jp.asarray(
+            self._reference.shape[0], dtype=jp.float32
         )
-        phase = jp.array([theta, theta + jp.pi], dtype=jp.float32)
-        return jp.concatenate([jp.cos(phase), jp.sin(phase)])
-
-    def _phase_angles_from_trig(self, phase_trig: jax.Array) -> jax.Array:
-        phase_cos = phase_trig[:2]
-        phase_sin = phase_trig[2:]
-        return jp.arctan2(phase_sin, phase_cos)
+        return jp.array([progress], dtype=jp.float32)
 
     def _command_from_reference_index(self, idx: jax.Array) -> jax.Array:
         return self._reference_cmd[idx]
@@ -283,7 +350,7 @@ class G1MocapTracking(g1_base.G1Env):
         qvel = qvel.at[0:6].set(jax.random.uniform(key, (6,), minval=-0.5, maxval=0.5))
 
         data = mjx_env.init(
-            self.mj_model,
+            self.mjx_model,
             qpos=qpos,
             qvel=qvel,
             ctrl=qpos[7:],
@@ -565,12 +632,6 @@ class G1MocapTracking(g1_base.G1Env):
             "feet_air_time": self._reward_feet_air_time(
                 info["feet_air_time"], first_contact, info["command"]
             ),
-            "feet_phase": self._reward_feet_phase(
-                data,
-                self._phase_angles_from_trig(info["phase"]),
-                self._config.reward_config.max_foot_height,
-                info["command"],
-            ),
             # Other rewards.
             "alive": self._reward_alive(),
             "termination": self._cost_termination(done),
@@ -746,29 +807,6 @@ class G1MocapTracking(g1_base.G1Env):
         air_time = (air_time - threshold_min) * first_contact
         air_time = jp.clip(air_time, max=threshold_max - threshold_min)
         reward = jp.sum(air_time)
-        return reward
-
-    def _reward_feet_phase(
-        self,
-        data: mjx.Data,
-        phase: jax.Array,
-        foot_height: jax.Array,
-        command: jax.Array,
-    ) -> jax.Array:
-        # Reward for tracking the desired foot height.
-        foot_pos = data.site_xpos[self._feet_site_id]
-        foot_z = foot_pos[..., -1]
-        rz = gait.get_rz(phase, swing_height=foot_height)
-        error = jp.sum(jp.square(foot_z - rz))
-        reward = jp.exp(-error / 0.01)
-        body_linvel = self.get_global_linvel(data, "pelvis")[:2]
-        body_angvel = self.get_global_angvel(data, "pelvis")[2]
-        linvel_mask = jp.logical_or(
-            jp.linalg.norm(body_linvel) > 0.1,
-            jp.abs(body_angvel) > 0.1,
-        )
-        mask = jp.logical_or(linvel_mask, jp.linalg.norm(command) > 0.01)
-        reward *= mask
         return reward
 
     def sample_command(self, rng: jax.Array) -> jax.Array:
