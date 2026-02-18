@@ -4,7 +4,6 @@ import jax
 import jax.nn as jnn
 import jax.numpy as jnp
 from flax import struct
-from hydrax.alg_base import Trajectory
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
@@ -22,6 +21,15 @@ class TreeMPCModelParams:
     normalizer_params: Any
     policy_params: Any
     qr_params: Any
+
+
+@struct.dataclass
+class Trajectory:
+    """Local rollout container compatible with Hydrax Trajectory usage."""
+
+    controls: jax.Array
+    knots: jax.Array
+    costs: jax.Array
 
 
 def _squash_to_bounds(u: jax.Array, low: jax.Array, high: jax.Array) -> jax.Array:
@@ -238,7 +246,7 @@ class TreeMPC:
         num_particles = self.num_samples
         decision_steps = self.ctrl_steps
         horizon_steps = self.horizon
-        act_dim = self.task.u_min.shape[-1]
+        act_dim = self.task.env.action_size
 
         states0 = _broadcast_tree(state, num_particles)
 
@@ -250,9 +258,7 @@ class TreeMPC:
                 decision_actions = jax.vmap(
                     lambda o, pk: self._sample_policy_actions(o, pk, model_params)
                 )(states.obs, policy_keys)
-                decision_actions = jnp.clip(
-                    decision_actions, self.task.u_min, self.task.u_max
-                )
+                # decision_actions = jnp.clip(decision_actions, -1.0, 1.0)
             else:
                 k, k_noise = jax.random.split(k)
                 mu = jnp.broadcast_to(params.actions[t], (num_particles, act_dim))
@@ -260,9 +266,7 @@ class TreeMPC:
                     jax.random.normal(k_noise, (num_particles, act_dim))
                     * self.action_noise_std
                 )
-                decision_actions = _squash_to_bounds(
-                    mu + noise, self.task.u_min, self.task.u_max
-                )
+                decision_actions = mu + noise
 
             (
                 next_states,
@@ -482,17 +486,10 @@ class TreeMPC:
 
         costs = -rollouts.all_traj_rewards[None, :]
 
-        def _trace_sites_mppi(x):
-            return self.task.get_trace_sites(x)
-
-        trace_sites = jax.vmap(_trace_sites_mppi)(rollouts.traj_data)
-        trace_sites = jax.tree.map(lambda x: x[None, ...], trace_sites)
-
         return params, Trajectory(
             controls=rollouts.all_traj_actions[None, ...],
             knots=rollouts.traj_actions[None, ...],
             costs=costs,
-            trace_sites=trace_sites,
         )
 
     def optimize_with_winner(
@@ -504,9 +501,20 @@ class TreeMPC:
         self._validate_model_params(model_params)
         return self._mppi_iterate(state, params, model_params)
 
-    def init_params(self, seed: int = 0) -> TreeMPCParams:
+    def init_params(
+        self,
+        seed: int = 0,
+        init_actions: jax.Array | None = None,
+    ) -> TreeMPCParams:
         rng = jax.random.key(seed)
-        actions = jnp.zeros(
-            (self.ctrl_steps, self.task.u_min.shape[-1]), dtype=jnp.float32
-        )
+        expected_shape = (self.ctrl_steps, self.task.env.action_size)
+        if init_actions is None:
+            actions = jnp.zeros(expected_shape, dtype=jnp.float32)
+        else:
+            actions = jnp.asarray(init_actions, dtype=jnp.float32)
+            if actions.shape != expected_shape:
+                raise ValueError(
+                    "init_actions shape mismatch for TreeMPC.init_params: "
+                    f"got={actions.shape}, expected={expected_shape}."
+                )
         return TreeMPCParams(actions=actions, rng=rng)  # type: ignore

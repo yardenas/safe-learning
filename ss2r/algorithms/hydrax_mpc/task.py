@@ -1,12 +1,11 @@
 from typing import Any
 
 import jax
-from hydrax.task_base import Task
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
 
-class MujocoPlaygroundTask(Task):
+class MujocoPlaygroundTask:
     def __init__(
         self,
         env: mjx_env.MjxEnv,
@@ -17,7 +16,6 @@ class MujocoPlaygroundTask(Task):
         self.env = env
         self._randomization_cfg = randomization_cfg
         mj_model = env.mj_model
-        super().__init__(mj_model)
         self._mj_model = mj_model
         self.dt = dt
 

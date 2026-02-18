@@ -1,4 +1,7 @@
-from hydrax.algs import MPPI, PredictiveSampling
+try:
+    from hydrax.algs import MPPI, PredictiveSampling
+except ImportError:
+    pass
 from mujoco_playground._src import mjx_env
 
 from ss2r.algorithms.hydrax_mpc.task import MujocoPlaygroundTask
@@ -21,7 +24,7 @@ def make_controller(
     *,
     env: mjx_env.MjxEnv | None = None,
     policy_checkpoint_path: str | None = None,
-) -> MPPI | TreeMPC | PredictiveSampling:
+):
     del env
     controller_kwargs = dict(cfg.agent.get("controller_kwargs", {}))
     controller_name = cfg.agent.get("controller_name", "mppi")

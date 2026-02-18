@@ -6,11 +6,27 @@ import jax.nn as jnn
 import jax.numpy as jnp
 from brax.training.acme import running_statistics, specs
 from brax.training.agents.sac import checkpoint as sac_checkpoint
-from hydrax.alg_base import SamplingBasedController, Trajectory
+
+try:
+    from hydrax.alg_base import SamplingBasedController, Trajectory
+except ImportError:
+    pass
 from mujoco_playground._src import mjx_env
 
 from ss2r.algorithms.sac import networks as sac_networks
 from ss2r.rl.utils import remove_pixels
+
+
+def _build_trajectory(
+    controls: jax.Array,
+    knots: jax.Array,
+    costs: jax.Array,
+):
+    # Keep compatibility with older/newer Trajectory constructors.
+    try:
+        return Trajectory(controls=controls, knots=knots, costs=costs)
+    except TypeError:
+        return Trajectory(controls, knots, costs, None)
 
 
 class PolicyPrior:
@@ -124,24 +140,13 @@ def wrap_controller_for_env_step(
         def _scan_fn(x_state: mjx_env.State, u: jax.Array):
             x_state = env.step(x_state, u)
             cost = -x_state.reward
-            sites = controller.task.get_trace_sites(x_state.data)
-            return x_state, (x_state.data, cost, sites)
+            return x_state, (x_state.data, cost)
 
-        final_state, (states, costs, trace_sites) = jax.lax.scan(
-            _scan_fn, state, controls
-        )
+        final_state, (states, costs) = jax.lax.scan(_scan_fn, state, controls)
         final_cost = controller.task.terminal_cost(final_state.data)
-        final_trace_sites = controller.task.get_trace_sites(final_state.data)
 
         costs = jnp.append(costs, final_cost)
-        trace_sites = jnp.append(trace_sites, final_trace_sites[None], axis=0)
-
-        return states, Trajectory(
-            controls=controls,
-            knots=knots,
-            costs=costs,
-            trace_sites=trace_sites,
-        )
+        return states, _build_trajectory(controls=controls, knots=knots, costs=costs)
 
     def optimize(state_payload: mjx_env.State, params: Any):
         data = state_payload.data

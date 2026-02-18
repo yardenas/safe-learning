@@ -1,7 +1,11 @@
 import jax
 import jax.numpy as jnp
 from brax import envs
-from hydrax.alg_base import SamplingBasedController
+
+try:
+    from hydrax.alg_base import SamplingBasedController
+except ImportError:
+    pass
 from mujoco_playground._src import mjx_env
 from omegaconf import DictConfig
 
