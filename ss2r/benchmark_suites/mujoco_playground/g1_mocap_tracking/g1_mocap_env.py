@@ -33,19 +33,28 @@ def default_config() -> config_dict.ConfigDict:
         ),
         reward_config=config_dict.create(
             scales=config_dict.create(
-                # Quadratic cost-based mocap tracking (reward = -cost).
-                configuration=-1.0,
-                foot_position=-5.0,
-                foot_orientation=-0.1,
-                control=-1.0,
+                # Imitation reward: r^I = w^p r^p + w^v r^v + w^e r^e + w^c r^c.
+                pose=0.65,
+                velocity=0.1,
+                end_effector=0.15,
+                com=0.1,
+                control=0.0,
                 # Debug-only terms (not part of total reward by default).
                 left_pos=0.0,
                 right_pos=0.0,
                 left_ori=0.0,
                 right_ori=0.0,
                 alive=0.0,
-                termination=-100.0,
+                termination=-10.0,
             ),
+            # Exponential shaping coefficients used in exp(-coef * ||error||^2).
+            pose_exp_coeff=2.0,
+            velocity_exp_coeff=0.1,
+            end_effector_exp_coeff=40.0,
+            com_exp_coeff=10.0,
+            control_exp_coeff=0.01,
+            foot_position_exp_coeff=10.0,
+            foot_orientation_exp_coeff=2.0,
         ),
         reference_path="ss2r/benchmark_suites/mujoco_playground/g1_mocap_tracking/walk1_subject1.npz",
         random_start=True,
@@ -129,6 +138,8 @@ class G1MocapTracking(mjx_env.MjxEnv):
             )
         self._init_q = jp.array(key_q)
         self._default_pose = jp.array(key_q[7 : 7 + self._nu])
+        self._left_hand_body_id = int(self._mj_model.body("left_wrist_yaw_link").id)
+        self._right_hand_body_id = int(self._mj_model.body("right_wrist_yaw_link").id)
 
         self._feet_site_id = np.array(
             [
@@ -136,6 +147,18 @@ class G1MocapTracking(mjx_env.MjxEnv):
                 self._mj_model.site("right_foot").id,
             ]
         )
+        actuator_joint_ids = np.asarray(
+            self._mj_model.actuator_trnid[:, 0], dtype=np.int32
+        )
+        pose_body_ids: list[int] = []
+        for joint_id in actuator_joint_ids.tolist():
+            body_id = int(self._mj_model.jnt_bodyid[joint_id])
+            if body_id not in pose_body_ids:
+                pose_body_ids.append(body_id)
+        self._pose_body_ids = jp.array(pose_body_ids, dtype=jp.int32)
+        body_mass = np.asarray(self._mj_model.body_mass, dtype=np.float32)
+        self._body_mass = jp.array(body_mass)
+        self._body_mass_total = jp.asarray(max(float(np.sum(body_mass)), 1e-8))
 
         reference_path = self._resolve_reference_path(str(self._config.reference_path))
         npz_file = np.load(reference_path, allow_pickle=False)
@@ -154,33 +177,62 @@ class G1MocapTracking(mjx_env.MjxEnv):
             ref_left_upvector,
             ref_right_pos,
             ref_right_upvector,
-        ) = self._precompute_reference_feet(reference)
+            ref_ee_pos,
+            ref_joint_vel,
+            ref_com,
+            ref_pose_body_quat,
+        ) = self._precompute_reference_terms(reference)
         self._ref_left_pos = jp.array(ref_left_pos)
         self._ref_left_upvector = jp.array(ref_left_upvector)
         self._ref_right_pos = jp.array(ref_right_pos)
         self._ref_right_upvector = jp.array(ref_right_upvector)
-        cost_weights = np.ones(self._mj_model.nq, dtype=np.float32)
-        cost_weights[:7] = 5.0
-        self._cost_weights = jp.array(cost_weights)
+        self._ref_ee_pos = jp.array(ref_ee_pos)
+        self._ref_joint_vel = jp.array(ref_joint_vel)
+        self._ref_com = jp.array(ref_com)
+        self._ref_pose_body_quat = jp.array(ref_pose_body_quat)
 
-    def _precompute_reference_feet(
+    def _precompute_reference_terms(
         self, reference: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ]:
         mj_data = mujoco.MjData(self._mj_model)
         n_frames = reference.shape[0]  # type: ignore
         left_foot_site_id = self._mj_model.site("left_foot").id
         right_foot_site_id = self._mj_model.site("right_foot").id
+        body_mass = np.asarray(self._mj_model.body_mass, dtype=np.float32)
+        body_mass_total = max(float(np.sum(body_mass)), 1e-8)
+        pose_body_ids = np.asarray(self._pose_body_ids, dtype=np.int32)
 
         ref_left_pos = np.zeros((n_frames, 3), dtype=np.float32)
         ref_left_upvector = np.zeros((n_frames, 3), dtype=np.float32)
         ref_right_pos = np.zeros((n_frames, 3), dtype=np.float32)
         ref_right_upvector = np.zeros((n_frames, 3), dtype=np.float32)
+        ref_left_hand_pos = np.zeros((n_frames, 3), dtype=np.float32)
+        ref_right_hand_pos = np.zeros((n_frames, 3), dtype=np.float32)
+        ref_com = np.zeros((n_frames, 3), dtype=np.float32)
+        ref_pose_body_quat = np.zeros(
+            (n_frames, pose_body_ids.shape[0], 4), dtype=np.float32
+        )
 
         for i in range(n_frames):
             mj_data.qpos[:] = reference[i]
             mujoco.mj_forward(self._mj_model, mj_data)
             ref_left_pos[i] = mj_data.site_xpos[left_foot_site_id]
             ref_right_pos[i] = mj_data.site_xpos[right_foot_site_id]
+            ref_left_hand_pos[i] = mj_data.xpos[self._left_hand_body_id]
+            ref_right_hand_pos[i] = mj_data.xpos[self._right_hand_body_id]
+            ref_com[i] = (
+                np.sum(mj_data.xipos * body_mass[:, None], axis=0) / body_mass_total
+            )
+            ref_pose_body_quat[i] = mj_data.xquat[pose_body_ids]
             left_rot = np.asarray(
                 mj_data.site_xmat[left_foot_site_id], dtype=np.float32
             ).reshape(3, 3)
@@ -190,7 +242,31 @@ class G1MocapTracking(mjx_env.MjxEnv):
             ref_left_upvector[i] = left_rot[:, 2]
             ref_right_upvector[i] = right_rot[:, 2]
 
-        return ref_left_pos, ref_left_upvector, ref_right_pos, ref_right_upvector
+        ref_ee_pos = np.stack(
+            [ref_left_pos, ref_right_pos, ref_left_hand_pos, ref_right_hand_pos], axis=1
+        )
+        idx_next = np.arange(n_frames) + 1
+        if self._config.loop_reference:
+            idx_next = idx_next % n_frames
+        else:
+            idx_next = np.clip(idx_next, 0, n_frames - 1)
+        joint_curr = reference[:, 7 : 7 + self._nu]
+        joint_next = reference[idx_next, 7 : 7 + self._nu]
+        joint_delta = np.arctan2(
+            np.sin(joint_next - joint_curr), np.cos(joint_next - joint_curr)
+        )
+        ref_joint_vel = joint_delta * self._reference_fps
+
+        return (
+            ref_left_pos,
+            ref_left_upvector,
+            ref_right_pos,
+            ref_right_upvector,
+            ref_ee_pos.astype(np.float32),
+            ref_joint_vel.astype(np.float32),
+            ref_com.astype(np.float32),
+            ref_pose_body_quat.astype(np.float32),
+        )
 
     def _get_sensor_data(self, data: mjx.Data, sensor_name: str) -> jax.Array:
         return mjx_env.get_sensor_data(self.mj_model, data, sensor_name)
@@ -219,11 +295,18 @@ class G1MocapTracking(mjx_env.MjxEnv):
     def _get_local_linvel(self, data: mjx.Data, frame: str) -> jax.Array:
         return self._get_sensor_data(data, f"local_linvel_{frame}")
 
+    def _get_center_of_mass(self, body_com_pos: jax.Array) -> jax.Array:
+        return (
+            jp.sum(body_com_pos * self._body_mass[:, None], axis=0)
+            / self._body_mass_total
+        )
+
     def reset(self, rng: jax.Array) -> mjx_env.State:
         rng, start_rng = jax.random.split(rng)
+        max_start_frames = min(self._reference.shape[0], 5000)
         reference_start_idx = jax.lax.cond(
             self._config.random_start,
-            lambda _: jax.random.randint(start_rng, (), 0, self._reference.shape[0]),
+            lambda _: jax.random.randint(start_rng, (), 0, max_start_frames),
             lambda _: jp.zeros((), dtype=jp.int32),
             operand=None,
         )
@@ -297,7 +380,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
             key: value * self._config.reward_config.scales[key]
             for key, value in rewards.items()
         }
-        reward = sum(rewards.values()) * self.dt
+        reward = sum(rewards.values())
 
         state.info["last_last_act"] = state.info["last_act"]
         state.info["last_act"] = action
@@ -305,7 +388,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
         state.info["phase"] = self._phase_from_index(ref_idx_target)
 
         for key, value in rewards.items():
-            state.metrics[f"reward/{key}"] = value * self.dt
+            state.metrics[f"reward/{key}"] = value
 
         obs = self._get_obs(data, state.info)
         done = done.astype(reward.dtype)
@@ -313,7 +396,6 @@ class G1MocapTracking(mjx_env.MjxEnv):
 
     def _get_termination(self, data: mjx.Data) -> jax.Array:
         del data
-        # Debug mode: disable all early terminations.
         return jp.array(False)
 
     def _get_obs(
@@ -391,14 +473,29 @@ class G1MocapTracking(mjx_env.MjxEnv):
         feet_pos: jax.Array,
     ) -> dict[str, jax.Array]:
         q_ref = self._reference[ref_idx]
-        q_err = self._cost_weights * (data.qpos - q_ref)
-        configuration_cost = jp.sum(jp.square(q_err))
+        pose_quat = data.xquat[self._pose_body_ids]
+        pose_quat_ref = self._ref_pose_body_quat[ref_idx]
+        pose_angle_err = self._quat_angle_error(pose_quat_ref, pose_quat)
+        pose_err_sq = jp.sum(jp.square(pose_angle_err))
+
+        joint_vel = data.qvel[6 : 6 + self._nu]
+        joint_vel_ref = self._ref_joint_vel[ref_idx]
+        vel_err_sq = jp.sum(jp.square(joint_vel_ref - joint_vel))
 
         left_pos_err = feet_pos[0] - self._ref_left_pos[ref_idx]
         right_pos_err = feet_pos[1] - self._ref_right_pos[ref_idx]
         left_pos_sq = jp.sum(jp.square(left_pos_err))
         right_pos_sq = jp.sum(jp.square(right_pos_err))
-        foot_position_cost = left_pos_sq + right_pos_sq
+        ee_pos = jp.stack(
+            [
+                feet_pos[0],
+                feet_pos[1],
+                data.xpos[self._left_hand_body_id],
+                data.xpos[self._right_hand_body_id],
+            ],
+            axis=0,
+        )
+        ee_err_sq = jp.sum(jp.square(ee_pos - self._ref_ee_pos[ref_idx]))
 
         left_upvector = self._get_sensor_data(data, "left_foot_upvector")
         right_upvector = self._get_sensor_data(data, "right_foot_upvector")
@@ -406,23 +503,52 @@ class G1MocapTracking(mjx_env.MjxEnv):
         right_ori_err = right_upvector - self._ref_right_upvector[ref_idx]
         left_ori_sq = jp.sum(jp.square(left_ori_err))
         right_ori_sq = jp.sum(jp.square(right_ori_err))
-        foot_orientation_cost = left_ori_sq + right_ori_sq
+        com = self._get_center_of_mass(data.xipos)
+        com_err_sq = jp.sum(jp.square(com - self._ref_com[ref_idx]))
 
         u_ref = q_ref[7 : 7 + self._nu]
-        control_cost = jp.sum(jp.square(motor_targets - u_ref))
+        control_err_sq = jp.sum(jp.square(motor_targets - u_ref))
 
         return {
-            "configuration": configuration_cost,
-            "foot_position": foot_position_cost,
-            "foot_orientation": foot_orientation_cost,
-            "control": control_cost,
-            "left_pos": left_pos_sq,
-            "right_pos": right_pos_sq,
-            "left_ori": left_ori_sq,
-            "right_ori": right_ori_sq,
+            "pose": self._exp_reward(
+                pose_err_sq, self._config.reward_config.pose_exp_coeff
+            ),
+            "velocity": self._exp_reward(
+                vel_err_sq, self._config.reward_config.velocity_exp_coeff
+            ),
+            "end_effector": self._exp_reward(
+                ee_err_sq, self._config.reward_config.end_effector_exp_coeff
+            ),
+            "com": self._exp_reward(
+                com_err_sq, self._config.reward_config.com_exp_coeff
+            ),
+            "control": self._exp_reward(
+                control_err_sq, self._config.reward_config.control_exp_coeff
+            ),
+            "left_pos": self._exp_reward(
+                left_pos_sq, self._config.reward_config.foot_position_exp_coeff
+            ),
+            "right_pos": self._exp_reward(
+                right_pos_sq, self._config.reward_config.foot_position_exp_coeff
+            ),
+            "left_ori": self._exp_reward(
+                left_ori_sq, self._config.reward_config.foot_orientation_exp_coeff
+            ),
+            "right_ori": self._exp_reward(
+                right_ori_sq, self._config.reward_config.foot_orientation_exp_coeff
+            ),
             "alive": jp.array(1.0),
             "termination": done,
         }
+
+    def _exp_reward(self, err_sq: jax.Array, coeff: float) -> jax.Array:
+        coeff_val = jp.maximum(jp.asarray(coeff, dtype=err_sq.dtype), 1e-8)
+        return jp.exp(-coeff_val * err_sq)
+
+    def _quat_angle_error(self, quat_a: jax.Array, quat_b: jax.Array) -> jax.Array:
+        dot = jp.sum(quat_a * quat_b, axis=-1)
+        dot = jp.clip(jp.abs(dot), 0.0, 1.0)
+        return 2.0 * jp.arccos(dot)
 
     @property
     def xml_path(self) -> str:

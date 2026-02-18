@@ -18,16 +18,24 @@ task_params:
       gyro: 0.2
   reward_config:
     scales:
-      configuration: -1.0
-      foot_position: -5.0
-      foot_orientation: -0.1
-      control: -1.0
+      pose: 0.65
+      velocity: 0.1
+      end_effector: 0.15
+      com: 0.1
+      control: 0.0
       left_pos: 0.0
       right_pos: 0.0
       left_ori: 0.0
       right_ori: 0.0
       alive: 0.0
-      termination: -100.0
+      termination: -10.0
+    pose_exp_coeff: 2.0
+    velocity_exp_coeff: 0.1
+    end_effector_exp_coeff: 40.0
+    com_exp_coeff: 10.0
+    control_exp_coeff: 0.01
+    foot_position_exp_coeff: 10.0
+    foot_orientation_exp_coeff: 2.0
   reference_path: ss2r/benchmark_suites/mujoco_playground/g1_mocap_tracking/walk1_subject1.npz
   random_start: true
   loop_reference: true

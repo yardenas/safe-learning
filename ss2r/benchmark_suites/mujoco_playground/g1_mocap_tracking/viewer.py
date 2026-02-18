@@ -110,14 +110,14 @@ def _reference_replay_step(env: G1MocapTracking, state: Any) -> Any:
         key: value * env._config.reward_config.scales[key]
         for key, value in rewards.items()
     }
-    reward = sum(rewards.values()) * env.dt
+    reward = sum(rewards.values())
 
     state.info["last_last_act"] = state.info["last_act"]
     state.info["last_act"] = jp.zeros((env.action_size,))
     state.info["motor_targets"] = u_ref
     state.info["phase"] = env._phase_from_index(ref_idx_target)
     for key, value in rewards.items():
-        state.metrics[f"reward/{key}"] = value * env.dt
+        state.metrics[f"reward/{key}"] = value
 
     obs = env._get_obs(data, state.info)
     done = done.astype(reward.dtype)
