@@ -111,8 +111,6 @@ def _reference_replay_step(env: G1MocapTracking, state: Any) -> Any:
     p_fz = p_f[..., -1]
     state.info["swing_peak"] = jp.maximum(state.info["swing_peak"], p_fz)
 
-    state.info["last_last_act"] = state.info["last_act"]
-    state.info["last_act"] = jp.zeros((env.action_size,))
     state.info["motor_targets"] = u_ref
     state.info["phase"] = env._phase_from_time(data.time)
     state.info["command"] = env._command_from_reference_index(ref_idx_target)

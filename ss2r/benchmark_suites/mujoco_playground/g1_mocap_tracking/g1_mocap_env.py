@@ -384,8 +384,6 @@ class G1MocapTracking(g1_base.G1Env):
             "rng": rng,
             "step": 0,
             "command": cmd,
-            "last_act": jp.zeros(self.mjx_model.nu),
-            "last_last_act": jp.zeros(self.mjx_model.nu),
             "motor_targets": jp.zeros(self.mjx_model.nu),
             "feet_air_time": jp.zeros(2),
             "last_contact": jp.zeros(2, dtype=bool),
@@ -466,8 +464,6 @@ class G1MocapTracking(g1_base.G1Env):
         state.info["push"] = push
         state.info["step"] += 1
         state.info["push_step"] += 1
-        state.info["last_last_act"] = state.info["last_act"]
-        state.info["last_act"] = action
         state.info["step"] = jp.where(
             done | (state.info["step"] > 500),
             0,
@@ -557,6 +553,10 @@ class G1MocapTracking(g1_base.G1Env):
             * self._config.noise_config.level
             * self._config.noise_config.scales.linvel
         )
+        next_ref_idx = self._reference_index(
+            data.time + self.dt, info["reference_start_idx"]
+        )
+        next_ref_joint_target = self._reference[next_ref_idx, 7 : 7 + self.action_size]
 
         state = jp.hstack(
             [
@@ -566,7 +566,7 @@ class G1MocapTracking(g1_base.G1Env):
                 info["command"],  # 3
                 noisy_joint_angles - self._default_pose,  # 29
                 noisy_joint_vel,  # 29
-                info["last_act"],  # 29
+                next_ref_joint_target - self._default_pose,  # 29
                 phase,
             ]
         )
@@ -610,6 +610,7 @@ class G1MocapTracking(g1_base.G1Env):
         contact: jax.Array,
     ) -> dict[str, jax.Array]:
         del metrics  # Unused.
+        del action  # Unused.
         ref_idx = self._reference_index(data.time, info["reference_start_idx"])
         qpos_ref = self._reference[ref_idx, 7:]
         return {
@@ -630,9 +631,6 @@ class G1MocapTracking(g1_base.G1Env):
             "base_height": self._cost_base_height(data.qpos[2]),
             # Energy related rewards.
             "torques": self._cost_torques(data.actuator_force),
-            "action_rate": self._cost_action_rate(
-                action, info["last_act"], info["last_last_act"]
-            ),
             "energy": self._cost_energy(data.qvel[6:], data.actuator_force),
             "dof_acc": self._cost_dof_acc(data.qacc[6:]),
             # Feet related rewards.
@@ -753,12 +751,6 @@ class G1MocapTracking(g1_base.G1Env):
 
     def _cost_energy(self, qvel: jax.Array, qfrc_actuator: jax.Array) -> jax.Array:
         return jp.sum(jp.abs(qvel) * jp.abs(qfrc_actuator))
-
-    def _cost_action_rate(
-        self, act: jax.Array, last_act: jax.Array, last_last_act: jax.Array
-    ) -> jax.Array:
-        del last_last_act  # Unused.
-        return jp.sum(jp.square(act - last_act))
 
     def _cost_dof_acc(self, qacc: jax.Array) -> jax.Array:
         return jp.sum(jp.square(qacc))
