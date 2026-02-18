@@ -395,8 +395,12 @@ class G1MocapTracking(mjx_env.MjxEnv):
         return state.replace(data=data, obs=obs, reward=reward, done=done)
 
     def _get_termination(self, data: mjx.Data) -> jax.Array:
-        del data
-        return jp.array(False)
+        root_height = data.qpos[2]
+        torso_up_z = self._get_sensor_data(data, "upvector_torso")[-1]
+        fall_by_height = root_height < self._config.termination_height
+        fall_by_orientation = torso_up_z < self._config.termination_upvector_z
+        invalid_state = jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
+        return fall_by_height | fall_by_orientation | invalid_state
 
     def _get_obs(
         self,
