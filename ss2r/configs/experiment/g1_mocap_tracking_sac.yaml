@@ -6,6 +6,6 @@ defaults:
   - _self_
 
 training:
-  train_domain_randomization: true
-  eval_domain_randomization: true
+  train_domain_randomization: false
+  eval_domain_randomization: false
   safe: false
