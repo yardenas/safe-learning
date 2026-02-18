@@ -18,12 +18,16 @@ task_params:
       gyro: 0.2
   reward_config:
     scales:
+      tracking_lin_vel: 1.0
+      tracking_ang_vel: 0.75
       pose: 0.65
       velocity: 0.1
       end_effector: 0.15
       com: 0.1
       com_orientation: 0.1
       control: 0.0
+      action_rate: 0.0
+      torques: 0.0
       left_pos: 0.0
       right_pos: 0.0
       left_ori: 0.0
