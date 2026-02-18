@@ -38,6 +38,7 @@ def default_config() -> config_dict.ConfigDict:
                 velocity=0.1,
                 end_effector=0.15,
                 com=0.1,
+                com_orientation=0.1,
                 control=0.0,
                 # Debug-only terms (not part of total reward by default).
                 left_pos=0.0,
@@ -48,10 +49,11 @@ def default_config() -> config_dict.ConfigDict:
                 termination=-10.0,
             ),
             # Exponential shaping coefficients used in exp(-coef * ||error||^2).
-            pose_exp_coeff=2.0,
+            pose_exp_coeff=0.5,
             velocity_exp_coeff=0.1,
             end_effector_exp_coeff=40.0,
             com_exp_coeff=10.0,
+            com_orientation_exp_coeff=2.0,
             control_exp_coeff=0.01,
             foot_position_exp_coeff=10.0,
             foot_orientation_exp_coeff=2.0,
@@ -147,15 +149,6 @@ class G1MocapTracking(mjx_env.MjxEnv):
                 self._mj_model.site("right_foot").id,
             ]
         )
-        actuator_joint_ids = np.asarray(
-            self._mj_model.actuator_trnid[:, 0], dtype=np.int32
-        )
-        pose_body_ids: list[int] = []
-        for joint_id in actuator_joint_ids.tolist():
-            body_id = int(self._mj_model.jnt_bodyid[joint_id])
-            if body_id not in pose_body_ids:
-                pose_body_ids.append(body_id)
-        self._pose_body_ids = jp.array(pose_body_ids, dtype=jp.int32)
         body_mass = np.asarray(self._mj_model.body_mass, dtype=np.float32)
         self._body_mass = jp.array(body_mass)
         self._body_mass_total = jp.asarray(max(float(np.sum(body_mass)), 1e-8))
@@ -180,7 +173,6 @@ class G1MocapTracking(mjx_env.MjxEnv):
             ref_ee_pos,
             ref_joint_vel,
             ref_com,
-            ref_pose_body_quat,
         ) = self._precompute_reference_terms(reference)
         self._ref_left_pos = jp.array(ref_left_pos)
         self._ref_left_upvector = jp.array(ref_left_upvector)
@@ -189,12 +181,10 @@ class G1MocapTracking(mjx_env.MjxEnv):
         self._ref_ee_pos = jp.array(ref_ee_pos)
         self._ref_joint_vel = jp.array(ref_joint_vel)
         self._ref_com = jp.array(ref_com)
-        self._ref_pose_body_quat = jp.array(ref_pose_body_quat)
 
     def _precompute_reference_terms(
         self, reference: np.ndarray
     ) -> tuple[
-        np.ndarray,
         np.ndarray,
         np.ndarray,
         np.ndarray,
@@ -209,7 +199,6 @@ class G1MocapTracking(mjx_env.MjxEnv):
         right_foot_site_id = self._mj_model.site("right_foot").id
         body_mass = np.asarray(self._mj_model.body_mass, dtype=np.float32)
         body_mass_total = max(float(np.sum(body_mass)), 1e-8)
-        pose_body_ids = np.asarray(self._pose_body_ids, dtype=np.int32)
 
         ref_left_pos = np.zeros((n_frames, 3), dtype=np.float32)
         ref_left_upvector = np.zeros((n_frames, 3), dtype=np.float32)
@@ -218,9 +207,6 @@ class G1MocapTracking(mjx_env.MjxEnv):
         ref_left_hand_pos = np.zeros((n_frames, 3), dtype=np.float32)
         ref_right_hand_pos = np.zeros((n_frames, 3), dtype=np.float32)
         ref_com = np.zeros((n_frames, 3), dtype=np.float32)
-        ref_pose_body_quat = np.zeros(
-            (n_frames, pose_body_ids.shape[0], 4), dtype=np.float32
-        )
 
         for i in range(n_frames):
             mj_data.qpos[:] = reference[i]
@@ -232,7 +218,6 @@ class G1MocapTracking(mjx_env.MjxEnv):
             ref_com[i] = (
                 np.sum(mj_data.xipos * body_mass[:, None], axis=0) / body_mass_total
             )
-            ref_pose_body_quat[i] = mj_data.xquat[pose_body_ids]
             left_rot = np.asarray(
                 mj_data.site_xmat[left_foot_site_id], dtype=np.float32
             ).reshape(3, 3)
@@ -265,7 +250,6 @@ class G1MocapTracking(mjx_env.MjxEnv):
             ref_ee_pos.astype(np.float32),
             ref_joint_vel.astype(np.float32),
             ref_com.astype(np.float32),
-            ref_pose_body_quat.astype(np.float32),
         )
 
     def _get_sensor_data(self, data: mjx.Data, sensor_name: str) -> jax.Array:
@@ -351,13 +335,12 @@ class G1MocapTracking(mjx_env.MjxEnv):
 
     def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
         action = jp.asarray(action)
-        # Joint position control around mocap reference: u = u_ref + action_scale * a.
+        # Joint position control around default pose: u = q0 + action_scale * a.
         ref_idx_target = self._reference_index(
             state.data.time + self.dt,
             state.info["reference_start_idx"],
         )
-        u_ref = self._reference[ref_idx_target][7 : 7 + self._nu]
-        motor_targets = u_ref + self._config.action_scale * action
+        motor_targets = self._default_pose + self._config.action_scale * action
 
         data = mjx_env.step(
             self.mjx_model,
@@ -477,10 +460,10 @@ class G1MocapTracking(mjx_env.MjxEnv):
         feet_pos: jax.Array,
     ) -> dict[str, jax.Array]:
         q_ref = self._reference[ref_idx]
-        pose_quat = data.xquat[self._pose_body_ids]
-        pose_quat_ref = self._ref_pose_body_quat[ref_idx]
-        pose_angle_err = self._quat_angle_error(pose_quat_ref, pose_quat)
-        pose_err_sq = jp.sum(jp.square(pose_angle_err))
+        joint_pos = data.qpos[7 : 7 + self._nu]
+        joint_ref = q_ref[7 : 7 + self._nu]
+        joint_diff = self._angle_diff(joint_pos, joint_ref)
+        pose_err_sq = jp.sum(jp.square(joint_diff))
 
         joint_vel = data.qvel[6 : 6 + self._nu]
         joint_vel_ref = self._ref_joint_vel[ref_idx]
@@ -509,6 +492,10 @@ class G1MocapTracking(mjx_env.MjxEnv):
         right_ori_sq = jp.sum(jp.square(right_ori_err))
         com = self._get_center_of_mass(data.xipos)
         com_err_sq = jp.sum(jp.square(com - self._ref_com[ref_idx]))
+        root_quat = data.qpos[3:7]
+        root_quat_ref = q_ref[3:7]
+        com_orientation_err = self._quat_angle_error(root_quat_ref, root_quat)
+        com_orientation_err_sq = jp.square(com_orientation_err)
 
         u_ref = q_ref[7 : 7 + self._nu]
         control_err_sq = jp.sum(jp.square(motor_targets - u_ref))
@@ -525,6 +512,10 @@ class G1MocapTracking(mjx_env.MjxEnv):
             ),
             "com": self._exp_reward(
                 com_err_sq, self._config.reward_config.com_exp_coeff
+            ),
+            "com_orientation": self._exp_reward(
+                com_orientation_err_sq,
+                self._config.reward_config.com_orientation_exp_coeff,
             ),
             "control": self._exp_reward(
                 control_err_sq, self._config.reward_config.control_exp_coeff
@@ -549,9 +540,13 @@ class G1MocapTracking(mjx_env.MjxEnv):
         coeff_val = jp.maximum(jp.asarray(coeff, dtype=err_sq.dtype), 1e-8)
         return jp.exp(-coeff_val * err_sq)
 
+    def _angle_diff(self, a: jax.Array, b: jax.Array) -> jax.Array:
+        return jp.arctan2(jp.sin(a - b), jp.cos(a - b))
+
     def _quat_angle_error(self, quat_a: jax.Array, quat_b: jax.Array) -> jax.Array:
-        dot = jp.sum(quat_a * quat_b, axis=-1)
-        dot = jp.clip(jp.abs(dot), 0.0, 1.0)
+        quat_a = quat_a / jp.maximum(jp.linalg.norm(quat_a), 1e-8)
+        quat_b = quat_b / jp.maximum(jp.linalg.norm(quat_b), 1e-8)
+        dot = jp.clip(jp.abs(jp.sum(quat_a * quat_b)), 0.0, 1.0)
         return 2.0 * jp.arccos(dot)
 
     @property

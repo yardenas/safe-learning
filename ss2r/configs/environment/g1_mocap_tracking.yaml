@@ -22,6 +22,7 @@ task_params:
       velocity: 0.1
       end_effector: 0.15
       com: 0.1
+      com_orientation: 0.1
       control: 0.0
       left_pos: 0.0
       right_pos: 0.0
@@ -29,10 +30,11 @@ task_params:
       right_ori: 0.0
       alive: 0.0
       termination: -10.0
-    pose_exp_coeff: 2.0
+    pose_exp_coeff: 0.5
     velocity_exp_coeff: 0.1
     end_effector_exp_coeff: 40.0
     com_exp_coeff: 10.0
+    com_orientation_exp_coeff: 2.0
     control_exp_coeff: 0.01
     foot_position_exp_coeff: 10.0
     foot_orientation_exp_coeff: 2.0
