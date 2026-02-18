@@ -16,7 +16,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 from mujoco import MjData, mjx
-from mujoco_playground._src import collision, mjx_env
+from mujoco_playground._src import collision
 
 from ss2r.algorithms.hydrax_mpc.factory import make_task
 from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPC, TreeMPCParams
@@ -104,39 +104,31 @@ def _reference_replay_step(env: G1MocapTracking, state: Any) -> Any:
             for geom_id in env._feet_geom_id
         ]
     )
-    contact_filt = contact | state.info["last_contact"]
-    first_contact = (state.info["feet_air_time"] > 0.0) * contact_filt
-    state.info["feet_air_time"] += env.dt
-    p_f = data.site_xpos[env._feet_site_id]
-    p_fz = p_f[..., -1]
-    state.info["swing_peak"] = jp.maximum(state.info["swing_peak"], p_fz)
-
+    zero_action = jp.zeros((env.action_size,))
+    next_step = state.info["step"] + jp.int32(1)
     state.info["motor_targets"] = u_ref
+    state.info["step"] = next_step
+    state.info["last_action"] = zero_action
     state.info["phase"] = env._phase_from_time(data.time)
     state.info["command"] = env._command_from_reference_index(ref_idx_target)
 
-    done = env._get_termination(data)
+    done_phys = env._get_termination(data)
+    done_traj = next_step >= jp.int32(env._reference_horizon_steps)
+    done = jp.logical_or(done_phys, done_traj)
     rewards = env._get_reward(
         data=data,
-        action=jp.zeros((env.action_size,)),
+        action=zero_action,
         info=state.info,
         metrics=state.metrics,
         done=done,
-        first_contact=first_contact,
+        first_contact=jp.zeros((2,)),
         contact=contact,
     )
-    rewards = {
-        key: value * env._config.reward_config.scales[key]
-        for key, value in rewards.items()
-    }
-    reward = sum(rewards.values()) * env.dt
+    reward = rewards["mimic_total"] * env.dt
 
-    state.info["feet_air_time"] *= ~contact
-    state.info["last_contact"] = contact
-    state.info["swing_peak"] *= ~contact
+    state.info["last_qvel"] = data.qvel
     for key, value in rewards.items():
         state.metrics[f"reward/{key}"] = value
-    state.metrics["swing_peak"] = jp.mean(state.info["swing_peak"])
 
     obs = env._get_obs(data, state.info, contact)
     done = done.astype(reward.dtype)
@@ -144,7 +136,15 @@ def _reference_replay_step(env: G1MocapTracking, state: Any) -> Any:
 
 
 def _active_reward_terms(env: G1MocapTracking) -> list[str]:
-    preferred = ["tracking_lin_vel", "tracking_ang_vel"]
+    preferred = [
+        "mimic_total",
+        "qpos_reward",
+        "qvel_reward",
+        "rpos_reward",
+        "rquat_reward",
+        "rvel_reward",
+        "total_penalties",
+    ]
     terms: list[str] = []
     for key in preferred:
         if (
@@ -196,12 +196,12 @@ def _print_status(
     parts: list[str] = []
     qpos_joint = np.asarray(state.data.qpos[7 : 7 + env.action_size])
     qpos_ref = np.asarray(env._reference[curr_idx, 7 : 7 + env.action_size])
-    pose_cost = float(np.sum(np.square(qpos_joint - qpos_ref)))
+    qpos_track_mse = float(np.mean(np.square(qpos_joint - qpos_ref)))
     for term in reward_terms:
         metric_key = f"reward/{term}"
         value = float(np.asarray(state.metrics.get(metric_key, 0.0)).item())
         parts.append(f"{term}={value:+.4f}")
-    parts.append(f"pose_cost={pose_cost:.5f}")
+    parts.append(f"qpos_track_mse={qpos_track_mse:.5f}")
     if parts:
         print("  rewards:", " | ".join(parts))
 
@@ -262,27 +262,13 @@ def _hud_lines(
             ),
         ]
     )
-    phase = float(np.asarray(state.info.get("phase", jp.array([0.0]))[0]).item())
-    cmd = np.asarray(state.info.get("command", jp.zeros((3,))))
-    lines.append(
-        f"phase={phase:.3f} cmd_ref=[{cmd[0]:+.3f}, {cmd[1]:+.3f}, {cmd[2]:+.3f}]"
-    )
 
     qpos_joint = np.asarray(state.data.qpos[7 : 7 + env.action_size])
     qpos_ref = np.asarray(env._reference[curr_idx, 7 : 7 + env.action_size])
+    qpos_track_mse = float(np.mean(np.square(qpos_joint - qpos_ref)))
+    lines.append(f"qpos_track_mse={qpos_track_mse:.5f}")
 
-    pose_cost = float(np.sum(np.square(qpos_joint - qpos_ref)))
-
-    torso_up_z = float(
-        np.asarray(
-            mjx_env.get_sensor_data(env.mj_model, state.data, "upvector_torso")[-1]
-        )
-    )
-    base_h = float(np.asarray(state.data.qpos[2]))
-    lines.append(f"torso_up_z={torso_up_z:+.3f} h={base_h:.3f}")
-    lines.append(f"pose_cost={pose_cost:.5f}")
-
-    # Show top reward terms in-text (already dt-scaled in metrics).
+    # Show selected DeepMimic reward components.
     term_values: list[tuple[str, float]] = []
     for term in reward_terms:
         metric_key = f"reward/{term}"
