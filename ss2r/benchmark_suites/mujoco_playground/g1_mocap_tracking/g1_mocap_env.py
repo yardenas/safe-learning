@@ -600,6 +600,8 @@ class G1MocapTracking(g1_base.G1Env):
         contact: jax.Array,
     ) -> dict[str, jax.Array]:
         del metrics  # Unused.
+        ref_idx = self._reference_index(data.time, info["reference_start_idx"])
+        qpos_ref = self._reference[ref_idx, 7:]
         return {
             # Tracking rewards.
             "tracking_lin_vel": self._reward_tracking_lin_vel(
@@ -644,7 +646,7 @@ class G1MocapTracking(g1_base.G1Env):
             ),
             "joint_deviation_knee": self._cost_joint_deviation_knee(data.qpos[7:]),
             "dof_pos_limits": self._cost_joint_pos_limits(data.qpos[7:]),
-            "pose": self._cost_pose(data.qpos[7:]),
+            "pose": self._cost_pose(data.qpos[7:], qpos_ref),
         }
 
     def _cost_contact_force(self, data: mjx.Data) -> jax.Array:
@@ -690,8 +692,8 @@ class G1MocapTracking(g1_base.G1Env):
         error = qpos[self._knee_indices] - self._default_pose[self._knee_indices]
         return jp.sum(jp.abs(error))
 
-    def _cost_pose(self, qpos: jax.Array) -> jax.Array:
-        return jp.sum(jp.square(qpos - self._default_pose))
+    def _cost_pose(self, qpos: jax.Array, qpos_ref: jax.Array) -> jax.Array:
+        return jp.sum(jp.square(qpos - qpos_ref))
 
     def _cost_joint_pos_limits(self, qpos: jax.Array) -> jax.Array:
         out_of_limits = -jp.clip(qpos - self._soft_lowers, None, 0.0)
