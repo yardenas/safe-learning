@@ -145,25 +145,6 @@ def _mocap_progress(env: G1MocapTracking, state: Any) -> tuple[int, int, int, fl
     return curr_idx, rel_idx, n_frames, frac
 
 
-def _counter_reference_index(
-    env: G1MocapTracking,
-    state: Any,
-    episode_step: int,
-) -> int:
-    n_frames = int(env._reference.shape[0])
-    start_idx = int(np.asarray(state.info["reference_start_idx"]).item())
-    idx = start_idx + int(np.floor(float(episode_step) * env.dt * env._reference_fps))
-    if bool(env._config.loop_reference):
-        return idx % n_frames
-    return int(np.clip(idx, 0, n_frames - 1))
-
-
-def _wrap_diff(curr: int, ref: int, n: int) -> int:
-    if n <= 0:
-        return curr - ref
-    return (curr - ref + n // 2) % n - n // 2
-
-
 def _progress_bar(frac: float, width: int = 24) -> str:
     frac = max(0.0, min(1.0, frac))
     filled = int(round(frac * width))
@@ -242,14 +223,9 @@ def _hud_lines(
             f"ep={episode_idx} step={episode_step} g={step_count} "
             f"r={reward:+.4f} R={episode_return:+.2f} done={int(done)}"
         ),
-        f"viewer: {'PAUSED' if paused else 'RUNNING'} (space to toggle)",
         f"time={sim_time:.4f}s",
     ]
     curr_idx, rel_idx, n_frames, frac = _mocap_progress(env, state)
-    counter_idx = _counter_reference_index(env, state, episode_step)
-    idx_drift = _wrap_diff(curr_idx, counter_idx, n_frames)
-    expected_time = float(episode_step) * env.dt
-    time_drift_ms = 1e3 * (sim_time - expected_time)
     bar = _progress_bar(frac, width=16)
     lines.extend(
         [
@@ -257,25 +233,14 @@ def _hud_lines(
                 f"mocap {curr_idx}/{n_frames-1} rel={rel_idx} "
                 f"{frac*100:4.1f}% [{bar}]"
             ),
-            (
-                f"time={sim_time:.4f}s expected={expected_time:.4f}s "
-                f"drift={time_drift_ms:+.2f}ms"
-            ),
-            (f"idx(time)={curr_idx} idx(step)={counter_idx} " f"drift={idx_drift:+d}"),
         ]
     )
 
-    last_act = np.asarray(state.info.get("last_act", np.zeros((env.action_size,))))
     motor_targets = np.asarray(
         state.info.get("motor_targets", np.zeros((env.action_size,)))
     )
-    ctrl = np.asarray(state.data.ctrl)
     qpos_joint = np.asarray(state.data.qpos[7 : 7 + env.action_size])
 
-    act_norm = float(np.linalg.norm(last_act))
-    target_norm = float(np.linalg.norm(motor_targets))
-    ctrl_norm = float(np.linalg.norm(ctrl))
-    ctrl_target_err = float(np.linalg.norm(ctrl - motor_targets))
     track_err = float(np.linalg.norm(qpos_joint - motor_targets))
 
     torso_up_z = float(
@@ -284,12 +249,6 @@ def _hud_lines(
         )
     )
     base_h = float(np.asarray(state.data.qpos[2]))
-    lines.append(
-        (
-            f"|a|={act_norm:.3f} |u_tgt|={target_norm:.3f} |ctrl|={ctrl_norm:.3f} "
-            f"|ctrl-u|={ctrl_target_err:.3e}"
-        )
-    )
     lines.append(
         f"joint_track_err={track_err:.3f} torso_up_z={torso_up_z:+.3f} h={base_h:.3f}"
     )
