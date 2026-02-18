@@ -87,11 +87,12 @@ def _reference_replay_step(env: G1MocapTracking, state: Any) -> Any:
         state.data.time + env.dt, state.info["reference_start_idx"]
     )
     q_ref = env._reference[ref_idx_target]
+    qvel_ref = env._reference_qvel[ref_idx_target]
     u_ref = q_ref[7 : 7 + env.action_size]
 
     data = state.data.replace(
         qpos=q_ref,
-        qvel=jp.zeros_like(state.data.qvel),
+        qvel=qvel_ref,
         ctrl=u_ref,
         time=state.data.time + env.dt,
     )
@@ -375,6 +376,7 @@ def run_viewer(
     mjx.get_data_into(mj_data, mj_model, state.data)
 
     action_size = env.action_size
+    episode_length_steps = int(env._config.episode_length)
     zero_action = jp.zeros((action_size,))
     step_count = 0
     episode_idx = 0
@@ -509,7 +511,9 @@ def run_viewer(
                     reward_terms=reward_terms,
                 )
 
-            if reset_on_done and bool(np.asarray(state.done).item()):
+            done_flag = bool(np.asarray(state.done).item())
+            reached_horizon = episode_step >= episode_length_steps
+            if reached_horizon or (reset_on_done and done_flag):
                 _print_status(
                     env=env,
                     state=state,
