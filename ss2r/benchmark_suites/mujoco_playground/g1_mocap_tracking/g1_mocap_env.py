@@ -59,12 +59,12 @@ def default_config() -> config_dict.ConfigDict:
                 alive=0.0,
                 stand_still=-1.0,
                 termination=-100.0,
-                collision=-0.1,
+                collision=0.0,
                 contact_force=-0.01,
                 # Pose related rewards.
-                joint_deviation_knee=-0.1,
-                joint_deviation_hip=-0.25,
-                dof_pos_limits=-1.0,
+                joint_deviation_knee=0.0,
+                joint_deviation_hip=0.0,
+                dof_pos_limits=0.0,
                 pose=-0.1,
             ),
             tracking_sigma=0.25,
@@ -76,12 +76,6 @@ def default_config() -> config_dict.ConfigDict:
             enable=True,
             interval_range=[5.0, 10.0],
             magnitude_range=[0.1, 2.0],
-        ),
-        command_config=config_dict.create(
-            # Uniform distribution for command amplitude.
-            a=[1.0, 0.8, 1.0],
-            # Probability of not zeroing out new command.
-            b=[0.9, 0.25, 0.5],
         ),
         lin_vel_x=[-1.0, 1.0],
         lin_vel_y=[-0.5, 0.5],
@@ -199,9 +193,6 @@ class G1MocapTracking(g1_base.G1Env):
             )
         self._foot_linvel_sensor_adr = jp.array(foot_linvel_sensor_adr)
 
-        self._cmd_a = jp.array(self._config.command_config.a)
-        self._cmd_b = jp.array(self._config.command_config.b)
-
         self._left_hand_geom_id = self._mj_model.geom("left_hand_collision").id
         self._right_hand_geom_id = self._mj_model.geom("right_hand_collision").id
         self._left_foot_geom_id = self._mj_model.geom("left_foot").id
@@ -294,7 +285,7 @@ class G1MocapTracking(g1_base.G1Env):
 
         if missing_joint_names:
             raise ValueError(
-                "Mocap joint names missing in active model: " f"{missing_joint_names}."
+                f"Mocap joint names missing in active model: {missing_joint_names}."
             )
 
         mapped_joint_names = sorted(set(mapped_joint_names))
