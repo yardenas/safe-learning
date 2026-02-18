@@ -16,7 +16,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 from mujoco import MjData, mjx
-from mujoco_playground._src import mjx_env
+from mujoco_playground._src import collision, mjx_env
 
 from ss2r.algorithms.hydrax_mpc.factory import make_task
 from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPC, TreeMPCParams
@@ -97,38 +97,62 @@ def _reference_replay_step(env: G1MocapTracking, state: Any) -> Any:
     )
     data = mjx.forward(env.mjx_model, data)
 
-    feet_pos = data.site_xpos[env._feet_site_id]
+    contact = jp.array(
+        [
+            collision.geoms_colliding(data, geom_id, env._floor_geom_id)
+            for geom_id in env._feet_geom_id
+        ]
+    )
+    contact_filt = contact | state.info["last_contact"]
+    first_contact = (state.info["feet_air_time"] > 0.0) * contact_filt
+    state.info["feet_air_time"] += env.dt
+    p_f = data.site_xpos[env._feet_site_id]
+    p_fz = p_f[..., -1]
+    state.info["swing_peak"] = jp.maximum(state.info["swing_peak"], p_fz)
+
+    state.info["last_last_act"] = state.info["last_act"]
+    state.info["last_act"] = jp.zeros((env.action_size,))
+    state.info["motor_targets"] = u_ref
+    state.info["phase"] = env._phase_from_time(data.time)
+    state.info["command"] = env._command_from_reference_index(ref_idx_target)
+
     done = env._get_termination(data)
     rewards = env._get_reward(
         data=data,
-        motor_targets=u_ref,
+        action=jp.zeros((env.action_size,)),
+        info=state.info,
+        metrics=state.metrics,
         done=done,
-        ref_idx=ref_idx_target,
-        feet_pos=feet_pos,
+        first_contact=first_contact,
+        contact=contact,
     )
     rewards = {
         key: value * env._config.reward_config.scales[key]
         for key, value in rewards.items()
     }
-    reward = sum(rewards.values())
+    reward = sum(rewards.values()) * env.dt
 
-    state.info["last_last_act"] = state.info["last_act"]
-    state.info["last_act"] = jp.zeros((env.action_size,))
-    state.info["motor_targets"] = u_ref
-    state.info["phase"] = env._phase_from_index(ref_idx_target)
+    state.info["feet_air_time"] *= ~contact
+    state.info["last_contact"] = contact
+    state.info["swing_peak"] *= ~contact
     for key, value in rewards.items():
         state.metrics[f"reward/{key}"] = value
+    state.metrics["swing_peak"] = jp.mean(state.info["swing_peak"])
 
-    obs = env._get_obs(data, state.info)
+    obs = env._get_obs(data, state.info, contact)
     done = done.astype(reward.dtype)
     return state.replace(data=data, obs=obs, reward=reward, done=done)
 
 
 def _active_reward_terms(env: G1MocapTracking) -> list[str]:
+    preferred = ["tracking_lin_vel", "tracking_ang_vel"]
     terms: list[str] = []
-    for key, value in env._config.reward_config.scales.items():
-        if abs(float(value)) > 0.0:
-            terms.append(str(key))
+    for key in preferred:
+        if (
+            key in env._config.reward_config.scales
+            and abs(float(env._config.reward_config.scales[key])) > 0.0
+        ):
+            terms.append(key)
     return terms
 
 
@@ -171,10 +195,14 @@ def _print_status(
     )
 
     parts: list[str] = []
+    qpos_joint = np.asarray(state.data.qpos[7 : 7 + env.action_size])
+    qpos_ref = np.asarray(env._reference[curr_idx, 7 : 7 + env.action_size])
+    pose_cost = float(np.sum(np.square(qpos_joint - qpos_ref)))
     for term in reward_terms:
         metric_key = f"reward/{term}"
         value = float(np.asarray(state.metrics.get(metric_key, 0.0)).item())
         parts.append(f"{term}={value:+.4f}")
+    parts.append(f"pose_cost={pose_cost:.5f}")
     if parts:
         print("  rewards:", " | ".join(parts))
 
@@ -235,13 +263,16 @@ def _hud_lines(
             ),
         ]
     )
-
-    motor_targets = np.asarray(
-        state.info.get("motor_targets", np.zeros((env.action_size,)))
+    phase = float(np.asarray(state.info.get("phase", jp.array([0.0]))[0]).item())
+    cmd = np.asarray(state.info.get("command", jp.zeros((3,))))
+    lines.append(
+        f"phase={phase:.3f} cmd_ref=[{cmd[0]:+.3f}, {cmd[1]:+.3f}, {cmd[2]:+.3f}]"
     )
-    qpos_joint = np.asarray(state.data.qpos[7 : 7 + env.action_size])
 
-    track_err = float(np.linalg.norm(qpos_joint - motor_targets))
+    qpos_joint = np.asarray(state.data.qpos[7 : 7 + env.action_size])
+    qpos_ref = np.asarray(env._reference[curr_idx, 7 : 7 + env.action_size])
+
+    pose_cost = float(np.sum(np.square(qpos_joint - qpos_ref)))
 
     torso_up_z = float(
         np.asarray(
@@ -249,9 +280,8 @@ def _hud_lines(
         )
     )
     base_h = float(np.asarray(state.data.qpos[2]))
-    lines.append(
-        f"joint_track_err={track_err:.3f} torso_up_z={torso_up_z:+.3f} h={base_h:.3f}"
-    )
+    lines.append(f"torso_up_z={torso_up_z:+.3f} h={base_h:.3f}")
+    lines.append(f"pose_cost={pose_cost:.5f}")
 
     # Show top reward terms in-text (already dt-scaled in metrics).
     term_values: list[tuple[str, float]] = []
@@ -259,8 +289,7 @@ def _hud_lines(
         metric_key = f"reward/{term}"
         val = float(np.asarray(state.metrics.get(metric_key, 0.0)).item())
         term_values.append((term, val))
-    term_values.sort(key=lambda kv: abs(kv[1]), reverse=True)
-    for term, value in term_values[:6]:
+    for term, value in term_values:
         lines.append(f"{term}={value:+.4f}")
     return lines
 
@@ -331,10 +360,6 @@ def run_viewer(
             f"Unsupported action_mode={action_mode}. "
             "Expected one of {'reference', 'replay', 'zero', 'random', 'tree_mpc'}."
         )
-
-    if action_mode in {"reference", "replay", "tree_mpc"} and config_overrides is None:
-        # Deterministic reset helps isolate whether reference tracking itself is stable.
-        config_overrides = {"random_start": False, "reset_noise_scale": 0.0}
 
     env = G1MocapTracking(config_overrides=config_overrides)
     rng = jax.random.PRNGKey(seed)

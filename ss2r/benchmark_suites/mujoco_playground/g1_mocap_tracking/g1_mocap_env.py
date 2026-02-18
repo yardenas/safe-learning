@@ -229,7 +229,7 @@ class G1MocapTracking(g1_base.G1Env):
                     "Expected mocap qvel to align with qpos frames, got "
                     f"shape {reference_qvel.shape} for qpos shape {reference.shape}."
                 )
-            max_steps = 5000
+            max_steps = 2000
             reference = reference[:max_steps]
             reference_qvel = reference_qvel[:max_steps]
             reference, reference_qvel = self._retarget_reference_to_model(
@@ -317,9 +317,19 @@ class G1MocapTracking(g1_base.G1Env):
         return jp.mod(idx, self._reference.shape[0])
 
     def _phase_from_index(self, idx: jax.Array) -> jax.Array:
-        progress = jp.asarray(idx, dtype=jp.float32) / jp.asarray(
-            self._reference.shape[0], dtype=jp.float32
+        # Backward-compatible helper: convert reference index to time first.
+        t = jp.asarray(idx, dtype=jp.float32) / jp.asarray(
+            self._reference_fps, dtype=jp.float32
         )
+        return self._phase_from_time(t)
+
+    def _phase_from_time(self, t: jax.Array) -> jax.Array:
+        episode_duration = jp.asarray(
+            self._config.episode_length * self.dt, dtype=jp.float32
+        )
+        progress = jp.mod(
+            jp.asarray(t, dtype=jp.float32), episode_duration
+        ) / jp.maximum(episode_duration, 1e-6)
         return jp.array([progress], dtype=jp.float32)
 
     def _command_from_reference_index(self, idx: jax.Array) -> jax.Array:
@@ -358,7 +368,7 @@ class G1MocapTracking(g1_base.G1Env):
 
         reference_start_idx = jp.int32(0)
         ref_idx = self._reference_index(data.time, reference_start_idx)
-        phase = self._phase_from_index(ref_idx)
+        phase = self._phase_from_time(data.time)
         cmd = self._command_from_reference_index(ref_idx)
 
         # Sample push interval.
@@ -439,7 +449,7 @@ class G1MocapTracking(g1_base.G1Env):
         p_fz = p_f[..., -1]
         state.info["swing_peak"] = jp.maximum(state.info["swing_peak"], p_fz)
         ref_idx = self._reference_index(data.time, state.info["reference_start_idx"])
-        state.info["phase"] = self._phase_from_index(ref_idx)
+        state.info["phase"] = self._phase_from_time(data.time)
         state.info["command"] = self._command_from_reference_index(ref_idx)
 
         obs = self._get_obs(data, state.info, contact)
