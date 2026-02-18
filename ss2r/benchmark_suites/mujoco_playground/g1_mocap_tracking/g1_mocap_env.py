@@ -204,11 +204,11 @@ def default_config() -> config_dict.ConfigDict:
             action_residual_scale=0.35,
             mimic_site_regex=r".*_mimic$",
             reward_sums=config_dict.create(
-                qpos=0.0,
-                qvel=0.0,
+                qpos=0.4,
+                qvel=0.2,
                 rpos=0.5,
                 rquat=0.3,
-                rvel=0.0,
+                rvel=0.1,
             ),
             reward_exponents=config_dict.create(
                 qpos=10.0,
