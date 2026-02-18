@@ -603,7 +603,7 @@ render_fns = {
     "G1JoystickFlatTerrain": functools.partial(
         mujoco_playground.render, camera="track"
     ),
-    "G1MocapTracking": functools.partial(mujoco_playground.render, camera="track"),
+    "G1MocapTracking": functools.partial(mujoco_playground.render),
     "Go1JoystickFlatTerrain": functools.partial(
         mujoco_playground.render, camera="track"
     ),
