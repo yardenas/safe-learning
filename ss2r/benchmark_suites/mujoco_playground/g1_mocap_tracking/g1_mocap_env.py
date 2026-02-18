@@ -264,7 +264,12 @@ class G1MocapTracking(g1_base.G1Env):
             / jp.asarray(self._reference.shape[0], dtype=jp.float32)
         )
         phase = jp.array([theta, theta + jp.pi], dtype=jp.float32)
-        return jp.fmod(phase + jp.pi, 2 * jp.pi) - jp.pi
+        return jp.concatenate([jp.cos(phase), jp.sin(phase)])
+
+    def _phase_angles_from_trig(self, phase_trig: jax.Array) -> jax.Array:
+        phase_cos = phase_trig[:2]
+        phase_sin = phase_trig[2:]
+        return jp.arctan2(phase_sin, phase_cos)
 
     def _command_from_reference_index(self, idx: jax.Array) -> jax.Array:
         return self._reference_cmd[idx]
@@ -485,9 +490,7 @@ class G1MocapTracking(g1_base.G1Env):
             * self._config.noise_config.scales.joint_vel
         )
 
-        cos = jp.cos(info["phase"])
-        sin = jp.sin(info["phase"])
-        phase = jp.concatenate([cos, sin])
+        phase = info["phase"]
 
         linvel = self.get_local_linvel(data, "pelvis")
         info["rng"], noise_rng = jax.random.split(info["rng"])
@@ -584,7 +587,7 @@ class G1MocapTracking(g1_base.G1Env):
             ),
             "feet_phase": self._reward_feet_phase(
                 data,
-                info["phase"],
+                self._phase_angles_from_trig(info["phase"]),
                 self._config.reward_config.max_foot_height,
                 info["command"],
             ),
