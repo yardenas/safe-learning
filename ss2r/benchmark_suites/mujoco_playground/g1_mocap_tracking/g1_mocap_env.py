@@ -1,14 +1,15 @@
 """Mocap task for Unitree G1."""
 
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import jax
 import jax.numpy as jp
+import mujoco
 import numpy as np
 from ml_collections import config_dict
 from mujoco import mjx
-from mujoco.mjx._src import math
 from mujoco_playground._src import collision, mjx_env
 from mujoco_playground._src.collision import geoms_colliding
 from mujoco_playground._src.locomotion.g1 import base as g1_base
@@ -73,7 +74,7 @@ def default_config() -> config_dict.ConfigDict:
             max_contact_force=500.0,
         ),
         push_config=config_dict.create(
-            enable=True,
+            enable=False,
             interval_range=[5.0, 10.0],
             magnitude_range=[0.1, 2.0],
         ),
@@ -100,6 +101,8 @@ class G1MocapTracking(g1_base.G1Env):
     def _post_init(self) -> None:
         self._init_q = jp.array(self._mj_model.keyframe("knees_bent").qpos)
         self._default_pose = jp.array(self._mj_model.keyframe("knees_bent").qpos[7:])
+        self._apply_mocap_actuator_params()
+        self._mjx_model = mjx.put_model(self._mj_model)
         self._load_mocap_reference()
 
         # Note: First joint is freejoint.
@@ -201,6 +204,137 @@ class G1MocapTracking(g1_base.G1Env):
         self._right_shin_geom_id = self._mj_model.geom("right_shin").id
         self._left_thigh_geom_id = self._mj_model.geom("left_thigh").id
         self._right_thigh_geom_id = self._mj_model.geom("right_thigh").id
+        self._init_grounded_reset_from_reference()
+
+    def _apply_mocap_actuator_params(self) -> None:
+        """Applies mocap tracking actuator/joint dynamics parameters."""
+        group_specs = [
+            (
+                [r".*_hip_roll_joint", r".*_knee_joint"],
+                99.0984,
+                6.3088,
+                139.0,
+                0.025101925,
+            ),
+            (
+                [r".*_hip_pitch_joint", r".*_hip_yaw_joint", r"waist_yaw_joint"],
+                40.1792,
+                2.5579,
+                88.0,
+                0.010177520,
+            ),
+            (
+                [r"waist_pitch_joint", r"waist_roll_joint"],
+                28.5012,
+                1.8144,
+                50.0,
+                0.007219450,
+            ),
+            (
+                [r".*_ankle_pitch_joint", r".*_ankle_roll_joint"],
+                28.5012,
+                1.8144,
+                50.0,
+                0.007219450,
+            ),
+            (
+                [
+                    r".*_elbow_joint",
+                    r".*_shoulder_pitch_joint",
+                    r".*_shoulder_roll_joint",
+                    r".*_shoulder_yaw_joint",
+                    r".*_wrist_roll_joint",
+                ],
+                14.2506,
+                0.9072,
+                25.0,
+                0.003609725,
+            ),
+            (
+                [r".*_wrist_pitch_joint", r".*_wrist_yaw_joint"],
+                16.7783,
+                1.0681,
+                5.0,
+                0.00425,
+            ),
+        ]
+
+        compiled_specs = [
+            ((tuple(re.compile(pattern) for pattern in patterns)), kp, kd, effort, arm)
+            for patterns, kp, kd, effort, arm in group_specs
+        ]
+
+        unmatched_actuators: list[str] = []
+        matched_count = 0
+        for actuator_id in range(self._mj_model.nu):
+            actuator_name = str(self._mj_model.actuator(actuator_id).name)
+            params = None
+            for regexes, kp, kd, effort_limit, armature in compiled_specs:
+                if any(regex.fullmatch(actuator_name) for regex in regexes):
+                    params = (kp, kd, effort_limit, armature)
+                    break
+
+            if params is None:
+                unmatched_actuators.append(actuator_name)
+                continue
+
+            kp, kd, effort_limit, armature = params
+            self._mj_model.actuator_gainprm[actuator_id, 0] = kp
+            self._mj_model.actuator_biasprm[actuator_id, 1] = -kp
+            self._mj_model.actuator_biasprm[actuator_id, 2] = -kd
+            self._mj_model.actuator_forcerange[actuator_id, 0] = -effort_limit
+            self._mj_model.actuator_forcerange[actuator_id, 1] = effort_limit
+
+            joint_id = int(self._mj_model.actuator_trnid[actuator_id, 0])
+            dof_adr = int(self._mj_model.jnt_dofadr[joint_id])
+            self._mj_model.dof_armature[dof_adr] = armature
+            matched_count += 1
+
+        if unmatched_actuators:
+            raise ValueError(
+                f"Missing mocap actuator params for actuators: {unmatched_actuators}."
+            )
+        print(
+            "[G1MocapTracking] Applied mocap actuator params to "
+            f"{matched_count} actuators."
+        )
+
+    def _foot_geom_lowest_z(self, mj_data: mujoco.MjData, geom_id: int) -> float:
+        """Returns the lowest world z point of a foot collision geom."""
+        geom_type = int(self._mj_model.geom_type[geom_id])
+        geom_xpos = mj_data.geom_xpos[geom_id]
+        geom_size = self._mj_model.geom_size[geom_id]
+        if geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+            rot = mj_data.geom_xmat[geom_id].reshape(3, 3)
+            z_extent = (
+                abs(rot[2, 0]) * geom_size[0]
+                + abs(rot[2, 1]) * geom_size[1]
+                + abs(rot[2, 2]) * geom_size[2]
+            )
+            return float(geom_xpos[2] - z_extent)
+        if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
+            return float(geom_xpos[2] - geom_size[0])
+        # Fallback for unexpected geom types.
+        return float(geom_xpos[2] - self._mj_model.geom_rbound[geom_id])
+
+    def _init_grounded_reset_from_reference(self) -> None:
+        """Precomputes a reset state that starts with feet on ground."""
+        qpos0 = np.asarray(self._reference[0], dtype=np.float64).copy()
+        qvel0 = np.asarray(self._reference_qvel[0], dtype=np.float64).copy()
+
+        mj_data = mujoco.MjData(self._mj_model)
+        mj_data.qpos[:] = qpos0
+        mj_data.qvel[:] = qvel0
+        mujoco.mj_forward(self._mj_model, mj_data)
+
+        min_foot_z = min(
+            self._foot_geom_lowest_z(mj_data, int(geom_id))
+            for geom_id in self._feet_geom_id
+        )
+        qpos0[2] -= min_foot_z
+
+        self._reset_qpos = jp.array(qpos0, dtype=jp.float32)
+        self._reset_qvel = jp.array(qvel0, dtype=jp.float32)
 
     def _load_mocap_reference(self) -> None:
         reference_path = Path(__file__).with_name("walk1_subject1.npz")
@@ -227,6 +361,7 @@ class G1MocapTracking(g1_base.G1Env):
                 reference, reference_qvel, reference_joint_names
             )
             self._reference = jp.array(reference)
+            self._reference_qvel = jp.array(reference_qvel)
             self._reference_fps = float(np.asarray(npz_file["frequency"]).item())
             self._reference_cmd = jp.array(reference_qvel[:, [0, 1, 5]])
 
@@ -327,28 +462,9 @@ class G1MocapTracking(g1_base.G1Env):
         return self._reference_cmd[idx]
 
     def reset(self, rng: jax.Array) -> mjx_env.State:
-        qpos = self._init_q
-        qvel = jp.zeros(self.mjx_model.nv)
-
-        # x=+U(-0.5, 0.5), y=+U(-0.5, 0.5), yaw=U(-3.14, 3.14).
-        rng, key = jax.random.split(rng)
-        dxy = jax.random.uniform(key, (2,), minval=-0.5, maxval=0.5)
-        qpos = qpos.at[0:2].set(qpos[0:2] + dxy)
-        rng, key = jax.random.split(rng)
-        yaw = jax.random.uniform(key, (1,), minval=-3.14, maxval=3.14)
-        quat = math.axis_angle_to_quat(jp.array([0, 0, 1]), yaw)
-        new_quat = math.quat_mul(qpos[3:7], quat)
-        qpos = qpos.at[3:7].set(new_quat)
-
-        # qpos[7:]=*U(0.5, 1.5)
-        rng, key = jax.random.split(rng)
-        qpos = qpos.at[7:].set(
-            qpos[7:] * jax.random.uniform(key, (29,), minval=0.5, maxval=1.5)
-        )
-
-        # d(xyzrpy)=U(-0.5, 0.5)
-        rng, key = jax.random.split(rng)
-        qvel = qvel.at[0:6].set(jax.random.uniform(key, (6,), minval=-0.5, maxval=0.5))
+        reference_start_idx = jp.int32(0)
+        qpos = self._reset_qpos
+        qvel = self._reset_qvel
 
         data = mjx_env.init(
             self.mjx_model,
@@ -357,7 +473,6 @@ class G1MocapTracking(g1_base.G1Env):
             ctrl=qpos[7:],
         )
 
-        reference_start_idx = jp.int32(0)
         ref_idx = self._reference_index(data.time, reference_start_idx)
         phase = self._phase_from_time(data.time)
         cmd = self._command_from_reference_index(ref_idx)
@@ -421,7 +536,11 @@ class G1MocapTracking(g1_base.G1Env):
         data = state.data.replace(qvel=qvel)
         state = state.replace(data=data)
 
-        motor_targets = self._default_pose + action * self._config.action_scale
+        ref_idx_target = self._reference_index(
+            state.data.time + self.dt, state.info["reference_start_idx"]
+        )
+        ref_joint_targets = self._reference[ref_idx_target, 7 : 7 + self.action_size]
+        motor_targets = ref_joint_targets + action * self._config.action_scale
         data = mjx_env.step(self.mjx_model, state.data, motor_targets, self.n_substeps)
         state.info["motor_targets"] = motor_targets
 

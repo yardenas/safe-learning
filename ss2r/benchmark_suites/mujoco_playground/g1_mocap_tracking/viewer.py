@@ -388,17 +388,16 @@ def run_viewer(
     planner_env = None
 
     if action_mode == "tree_mpc":
-        planner_overrides = dict(config_overrides or {})
-        planner_overrides["sim_dt"] = 0.01
-        planner_overrides["ctrl_dt"] = 0.02
-        planner_env = G1MocapTracking(config_overrides=planner_overrides)
-        planner_env.mj_model.opt.timestep = 0.005
+        # planner_overrides = dict(config_overrides or {})
+        # planner_overrides["ctrl_dt"] = 0.02
+        # planner_overrides["sim_dt"] = 0.002
+        planner_env = G1MocapTracking()
         # planner_env.mj_model.opt.iterations = 10
         # planner_env.mj_model.opt.ls_iterations = 50
-        planner_env.mj_model.opt.o_solimp[:] = np.array(
-            [0.9, 0.95, 0.001, 0.5, 2.0], dtype=np.float64
-        )
-        planner_env._mjx_model = mjx.put_model(planner_env.mj_model)
+        # planner_env.mj_model.opt.o_solimp[:] = np.array(
+        #     [0.9, 0.95, 0.001, 0.5, 2.0], dtype=np.float64
+        # )
+        # planner_env._mjx_model = mjx.put_model(planner_env.mj_model)
         print(
             "[planner_env] "
             f"n_substeps={planner_env.n_substeps} "
