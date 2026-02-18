@@ -801,10 +801,6 @@ class G1MocapTracking(g1_base.G1Env):
                 source_fps,
             )
 
-            max_steps = int(self._config.deepmimic.reference_max_steps)
-            reference = reference[:max_steps]
-            reference_qvel = reference_qvel[:max_steps]
-
             self._reference = jp.array(reference)
             self._reference_qvel = jp.array(reference_qvel)
             self._reference_fps = float(target_fps)
@@ -927,7 +923,6 @@ class G1MocapTracking(g1_base.G1Env):
         ref_idx = self._reference_index(data.time, reference_start_idx)
         info = {
             "rng": rng,
-            "step": jp.int32(0),
             "reference_start_idx": reference_start_idx,
             "phase": self._phase_from_time(data.time),
             "command": self._command_from_reference_index(ref_idx),
@@ -975,17 +970,12 @@ class G1MocapTracking(g1_base.G1Env):
         )
 
         ref_idx = self._reference_index(data.time, state.info["reference_start_idx"])
-        next_step = state.info["step"] + jp.int32(1)
-
-        state.info["step"] = next_step
         state.info["phase"] = self._phase_from_time(data.time)
         state.info["command"] = self._command_from_reference_index(ref_idx)
         state.info["motor_targets"] = motor_targets
         state.info["last_action"] = action
 
-        done_phys = self._get_termination(data)
-        done_traj = next_step >= jp.int32(self._reference_horizon_steps)
-        done = jp.logical_or(done_phys, done_traj)
+        done = self._get_termination(data)
 
         rewards = self._get_reward(
             data,
