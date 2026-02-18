@@ -9,7 +9,8 @@ import numpy as np
 from ml_collections import config_dict
 from mujoco import mjx
 from mujoco.mjx._src import math
-from mujoco_playground._src import gait, mjx_env
+from mujoco_playground._src import collision, gait, mjx_env
+from mujoco_playground._src.collision import geoms_colliding
 from mujoco_playground._src.locomotion.g1 import base as g1_base
 from mujoco_playground._src.locomotion.g1 import g1_constants as consts
 
@@ -211,26 +212,6 @@ class G1MocapTracking(g1_base.G1Env):
         self._left_thigh_geom_id = self._mj_model.geom("left_thigh").id
         self._right_thigh_geom_id = self._mj_model.geom("right_thigh").id
 
-        self._feet_floor_found_sensor = [
-            self._mj_model.sensor(foot_geom + "_floor_found").id
-            for foot_geom in ["left_foot", "right_foot"]
-        ]
-        self._right_foot_left_foot_found_sensor = self._mj_model.sensor(
-            "right_foot_left_foot_found"
-        ).id
-        self._left_foot_right_shin_found_sensor = self._mj_model.sensor(
-            "left_foot_right_shin_found"
-        ).id
-        self._right_foot_left_shin_found_sensor = self._mj_model.sensor(
-            "right_foot_left_shin_found"
-        ).id
-        self._left_hand_left_thigh_found_sensor = self._mj_model.sensor(
-            "left_hand_left_thigh_found"
-        ).id
-        self._right_hand_right_thigh_found_sensor = self._mj_model.sensor(
-            "right_hand_right_thigh_found"
-        ).id
-
     def _load_mocap_reference(self) -> None:
         reference_path = Path(__file__).with_name("walk1_subject1.npz")
         with np.load(reference_path, allow_pickle=True) as npz_file:
@@ -248,6 +229,9 @@ class G1MocapTracking(g1_base.G1Env):
                     "Expected mocap qvel to align with qpos frames, got "
                     f"shape {reference_qvel.shape} for qpos shape {reference.shape}."
                 )
+            max_steps = 5000
+            reference = reference[:max_steps]
+            reference_qvel = reference_qvel[:max_steps]
             self._reference = jp.array(reference)
             self._reference_fps = float(np.asarray(npz_file["frequency"]).item())
             self._reference_cmd = jp.array(reference_qvel[:, [0, 1, 5]])
@@ -298,13 +282,12 @@ class G1MocapTracking(g1_base.G1Env):
         rng, key = jax.random.split(rng)
         qvel = qvel.at[0:6].set(jax.random.uniform(key, (6,), minval=-0.5, maxval=0.5))
 
-        data = mjx_env.make_data(
+        data = mjx_env.init(
             self.mj_model,
             qpos=qpos,
             qvel=qvel,
             ctrl=qpos[7:],
         )
-        data = mjx.forward(self.mjx_model, data)
 
         reference_start_idx = jp.int32(0)
         ref_idx = self._reference_index(data.time, reference_start_idx)
@@ -346,8 +329,8 @@ class G1MocapTracking(g1_base.G1Env):
 
         contact = jp.array(
             [
-                data.sensordata[self._mj_model.sensor_adr[sensorid]] > 0
-                for sensorid in self._feet_floor_found_sensor
+                geoms_colliding(data, geom_id, self._floor_geom_id)
+                for geom_id in self._feet_geom_id
             ]
         )
         obs = self._get_obs(data, info, contact)
@@ -378,8 +361,8 @@ class G1MocapTracking(g1_base.G1Env):
 
         contact = jp.array(
             [
-                data.sensordata[self._mj_model.sensor_adr[sensorid]] > 0
-                for sensorid in self._feet_floor_found_sensor
+                geoms_colliding(data, geom_id, self._floor_geom_id)
+                for geom_id in self._feet_geom_id
             ]
         )
         contact_filt = contact | state.info["last_contact"]
@@ -426,23 +409,20 @@ class G1MocapTracking(g1_base.G1Env):
 
     def _get_termination(self, data: mjx.Data) -> jax.Array:
         fall_termination = self.get_gravity(data, "torso")[-1] < 0.0
-        contact_termination = (
-            data.sensordata[
-                self._mj_model.sensor_adr[self._right_foot_left_foot_found_sensor]
-            ]
-            > 0
+        contact_termination = collision.geoms_colliding(
+            data,
+            self._right_foot_geom_id,
+            self._left_foot_geom_id,
         )
-        contact_termination |= (
-            data.sensordata[
-                self._mj_model.sensor_adr[self._left_foot_right_shin_found_sensor]
-            ]
-            > 0
+        contact_termination |= collision.geoms_colliding(
+            data,
+            self._left_foot_geom_id,
+            self._right_shin_geom_id,
         )
-        contact_termination |= (
-            data.sensordata[
-                self._mj_model.sensor_adr[self._right_foot_left_shin_found_sensor]
-            ]
-            > 0
+        contact_termination |= collision.geoms_colliding(
+            data,
+            self._right_foot_geom_id,
+            self._left_shin_geom_id,
         )
         return (
             fall_termination
@@ -624,17 +604,11 @@ class G1MocapTracking(g1_base.G1Env):
         return cost
 
     def _cost_collision(self, data: mjx.Data) -> jax.Array:
-        c = (
-            data.sensordata[
-                self._mj_model.sensor_adr[self._left_hand_left_thigh_found_sensor]
-            ]
-            > 0
+        c = collision.geoms_colliding(
+            data, self._left_hand_geom_id, self._left_thigh_geom_id
         )
-        c |= (
-            data.sensordata[
-                self._mj_model.sensor_adr[self._right_hand_right_thigh_found_sensor]
-            ]
-            > 0
+        c |= collision.geoms_colliding(
+            data, self._right_hand_geom_id, self._right_thigh_geom_id
         )
         return jp.any(c)
 
