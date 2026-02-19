@@ -1,0 +1,29 @@
+# @package _global_
+defaults:
+  - override /environment: g1_joystick
+  - override /agent: awac_mpc
+  - _self_
+
+training:
+  num_timesteps: 200000000
+  num_envs: 8192
+  train_domain_randomization: true
+  eval_domain_randomization: true
+  safe: false
+
+agent:
+  # Disable online planner-supervised actor updates; train actor from replay critic.
+  actor_update_source: critic_replay
+
+  batch_size: 512
+  policy_hidden_layer_sizes: [256, 256, 256]
+  value_hidden_layer_sizes: [512, 512]  # two block of BroNet
+  grad_updates_per_step: 64
+  learning_rate: 3e-4
+  critic_learning_rate: 3e-4
+  max_replay_size: 1048576
+  min_replay_size: 8192
+  discounting: 0.95
+  reward_scaling: 125
+  n_critics: 2
+  n_heads: 1
