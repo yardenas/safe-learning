@@ -1,4 +1,4 @@
-from loco_mujoco.environments.base import LocoEnv
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.environments.base import LocoEnv
 
 from .base import TaskFactory
 

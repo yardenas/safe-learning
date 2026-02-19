@@ -9,9 +9,9 @@ import mujoco
 import numpy as np
 import scipy as np_scipy
 from flax import struct
-from loco_mujoco.core.terrain import DynamicTerrain
-from loco_mujoco.core.utils import mj_jntname2qposid
-from loco_mujoco.core.utils.backend import assert_backend_is_supported
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.terrain import DynamicTerrain
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import mj_jntname2qposid
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.backend import assert_backend_is_supported
 from mujoco import MjData, MjModel, MjSpec
 from mujoco.mjx import Data, Model
 

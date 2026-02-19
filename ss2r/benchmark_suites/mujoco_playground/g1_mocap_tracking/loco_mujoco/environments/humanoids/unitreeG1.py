@@ -1,11 +1,11 @@
 from typing import List, Tuple, Union
 
-import loco_mujoco
+import ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco as loco_mujoco
 import mujoco
 import numpy as np
-from loco_mujoco.core import Observation, ObservationType
-from loco_mujoco.core.utils import info_property
-from loco_mujoco.environments.humanoids.base_robot_humanoid import BaseRobotHumanoid
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core import Observation, ObservationType
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import info_property
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.environments.humanoids.base_robot_humanoid import BaseRobotHumanoid
 from mujoco import MjSpec
 
 

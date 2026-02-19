@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import mujoco
 import numpy as np
 from jax.scipy.spatial.transform import Rotation as jnp_R
-from loco_mujoco.core.utils.math import quat_scalarfirst2scalarlast
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.math import quat_scalarfirst2scalarlast
 from mujoco import MjData, MjModel
 from mujoco.mjx import Data, Model
 from scipy.spatial.transform import Rotation as np_R

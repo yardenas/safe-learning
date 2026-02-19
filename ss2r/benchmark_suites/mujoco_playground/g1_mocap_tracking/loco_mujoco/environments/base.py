@@ -9,13 +9,13 @@ import jax.random
 import mujoco
 import numpy as np
 from flax import struct
-from loco_mujoco.core.mujoco_mjx import Mjx, MjxAdditionalCarry, MjxState
-from loco_mujoco.core.observations import Observation
-from loco_mujoco.core.stateful_object import EmptyState
-from loco_mujoco.core.utils import info_property
-from loco_mujoco.core.utils.mujoco import mj_jntname2qposid
-from loco_mujoco.core.visuals import VideoRecorder
-from loco_mujoco.trajectory import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.mujoco_mjx import Mjx, MjxAdditionalCarry, MjxState
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.observations import Observation
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.stateful_object import EmptyState
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import info_property
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import mj_jntname2qposid
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.visuals import VideoRecorder
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory import (
     Trajectory,
     TrajectoryHandler,
     TrajectoryTransitions,
@@ -896,7 +896,7 @@ class LocoEnv(Mjx):
         )
 
         # import here to avoid circular dependency
-        from loco_mujoco.task_factories import (
+        from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.task_factories import (
             DefaultDatasetConf,
             ImitationFactory,
             RLFactory,

@@ -6,15 +6,15 @@ import mujoco
 import numpy as np
 from flax import struct
 from jax._src.scipy.spatial.transform import Rotation as jnp_R
-from loco_mujoco.core.reward.base import Reward
-from loco_mujoco.core.reward.utils import out_of_bounds_action_cost
-from loco_mujoco.core.utils import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.reward.base import Reward
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.reward.utils import out_of_bounds_action_cost
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import (
     mj_jntid2qposid,
     mj_jntid2qvelid,
     mj_jntname2qposid,
     mj_jntname2qvelid,
 )
-from loco_mujoco.core.utils.math import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.math import (
     calculate_relative_site_quatities,
     quat_scalarfirst2scalarlast,
     quaternion_angular_distance,

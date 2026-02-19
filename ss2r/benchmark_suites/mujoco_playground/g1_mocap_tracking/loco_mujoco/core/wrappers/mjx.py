@@ -6,8 +6,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import struct
-from loco_mujoco.core import Mjx, MjxState
-from loco_mujoco.core.utils.env import Box
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core import Mjx, MjxState
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.env import Box
 
 
 class LocoMjxWrapper:

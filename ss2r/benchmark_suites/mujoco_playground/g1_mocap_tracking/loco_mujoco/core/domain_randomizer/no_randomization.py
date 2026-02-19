@@ -3,8 +3,8 @@ from typing import Any, Tuple, Union
 
 import jax.numpy as jnp
 import numpy as np
-from loco_mujoco.core.domain_randomizer import DomainRandomizer
-from loco_mujoco.core.utils.backend import assert_backend_is_supported
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.domain_randomizer import DomainRandomizer
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.backend import assert_backend_is_supported
 from mujoco import MjData, MjModel
 from mujoco.mjx import Data, Model
 

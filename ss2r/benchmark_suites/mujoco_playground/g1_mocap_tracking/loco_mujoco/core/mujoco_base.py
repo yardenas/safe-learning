@@ -10,21 +10,21 @@ import mujoco
 import numpy as np
 import requests
 from flax import struct
-from loco_mujoco.core.control_functions import ControlFunction
-from loco_mujoco.core.domain_randomizer import DomainRandomizer
-from loco_mujoco.core.initial_state_handler import InitialStateHandler
-from loco_mujoco.core.observations import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.control_functions import ControlFunction
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.domain_randomizer import DomainRandomizer
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.initial_state_handler import InitialStateHandler
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.observations import (
     Goal,
     Observation,
     ObservationContainer,
     ObservationIndexContainer,
     ObservationType,
 )
-from loco_mujoco.core.reward.base import Reward
-from loco_mujoco.core.terminal_state_handler.base import TerminalStateHandler
-from loco_mujoco.core.terrain import Terrain
-from loco_mujoco.core.utils import Box, MDPInfo, info_property
-from loco_mujoco.core.utils.mujoco import mj_jntid2qposid, mj_jntid2qvelid
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.reward.base import Reward
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.terminal_state_handler.base import TerminalStateHandler
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.terrain import Terrain
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import Box, MDPInfo, info_property
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import mj_jntid2qposid, mj_jntid2qvelid
 from mujoco import MjData, MjModel, MjSpec
 
 

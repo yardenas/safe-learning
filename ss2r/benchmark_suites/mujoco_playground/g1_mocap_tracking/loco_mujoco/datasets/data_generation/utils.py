@@ -7,14 +7,14 @@ import jax.numpy as jnp
 import mujoco
 import numpy as np
 import yaml
-from loco_mujoco.core.utils.math import quat_scalarfirst2scalarlast
-from loco_mujoco.core.utils.mujoco import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.math import quat_scalarfirst2scalarlast
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import (
     mj_jntid2qposid,
     mj_jntid2qvelid,
     mj_jntname2qposid,
     mj_jntname2qvelid,
 )
-from loco_mujoco.trajectory import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory import (
     Trajectory,
     TrajectoryData,
     TrajectoryInfo,
@@ -376,7 +376,7 @@ def optimize_for_collisions(
         max_steps (int): The maximum number of steps to optimize the trajectory for collisions.
 
     """
-    from loco_mujoco import LocoEnv
+    from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco import LocoEnv
 
     # add mocap bodies for all 'site_for_mimic' instances of an environment
     env_cls = LocoEnv.registered_envs[env_name]

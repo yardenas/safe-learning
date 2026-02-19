@@ -5,8 +5,8 @@ import jax
 import jax.numpy as jnp
 import mujoco
 from flax import struct
-from loco_mujoco.core.mujoco_base import AdditionalCarry, Mujoco
-from loco_mujoco.trajectory import TrajectoryData
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.mujoco_base import AdditionalCarry, Mujoco
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory import TrajectoryData
 from mujoco import mjx
 from mujoco.mjx import Data, Model
 

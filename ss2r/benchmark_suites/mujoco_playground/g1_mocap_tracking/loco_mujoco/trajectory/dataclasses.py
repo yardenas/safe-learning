@@ -13,7 +13,7 @@ import mujoco
 import numpy as np
 from flax import struct
 from jax import lax
-from loco_mujoco.core.observations.base import ObservationContainer
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.observations.base import ObservationContainer
 from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation, Slerp
 

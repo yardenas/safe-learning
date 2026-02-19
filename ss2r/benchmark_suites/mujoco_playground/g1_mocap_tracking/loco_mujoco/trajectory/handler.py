@@ -5,8 +5,8 @@ import jax.numpy as jnp
 import mujoco
 import numpy as np
 from flax import struct
-from loco_mujoco.core.stateful_object import StatefulObject
-from loco_mujoco.trajectory.dataclasses import Trajectory, interpolate_trajectories
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.stateful_object import StatefulObject
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory.dataclasses import Trajectory, interpolate_trajectories
 
 
 @struct.dataclass

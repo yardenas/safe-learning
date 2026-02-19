@@ -1,23 +1,23 @@
 import os
 from typing import Dict, Union
 
-import loco_mujoco
+import ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco as loco_mujoco
 import yaml
 from huggingface_hub import hf_hub_download
-from loco_mujoco.datasets.humanoids.LAFAN1 import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.datasets.humanoids.LAFAN1 import (
     LAFAN1_ALL_DATASETS,
     LAFAN1_DANCE_DATASETS,
     LAFAN1_LOCOMOTION_DATASETS,
     load_lafan1_trajectory,
 )
-from loco_mujoco.environments.base import LocoEnv
-from loco_mujoco.smpl.const import AMASS_LOCOMOTION_DATASETS
-from loco_mujoco.smpl.retargeting import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.environments.base import LocoEnv
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.smpl.const import AMASS_LOCOMOTION_DATASETS
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.smpl.retargeting import (
     extend_motion,
     load_retargeted_amass_trajectory,
     load_robot_conf_file,
 )
-from loco_mujoco.trajectory import Trajectory, TrajectoryHandler
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory import Trajectory, TrajectoryHandler
 from omegaconf import DictConfig, ListConfig
 
 from .base import TaskFactory

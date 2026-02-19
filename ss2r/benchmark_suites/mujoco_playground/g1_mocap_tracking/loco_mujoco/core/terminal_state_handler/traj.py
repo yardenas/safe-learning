@@ -3,10 +3,10 @@ from typing import Any, Dict, Tuple, Union
 
 import jax.numpy as jnp
 import numpy as np
-from loco_mujoco.core.terminal_state_handler.base import TerminalStateHandler
-from loco_mujoco.core.utils.backend import assert_backend_is_supported
-from loco_mujoco.core.utils.math import quat_scalarfirst2scalarlast
-from loco_mujoco.trajectory import TrajectoryHandler
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.terminal_state_handler.base import TerminalStateHandler
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.backend import assert_backend_is_supported
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.math import quat_scalarfirst2scalarlast
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory import TrajectoryHandler
 from mujoco import MjData, MjModel
 from mujoco.mjx import Data, Model
 from scipy.spatial.transform import Rotation as np_R

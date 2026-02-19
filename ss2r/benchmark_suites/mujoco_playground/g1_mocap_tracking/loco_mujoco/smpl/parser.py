@@ -2,7 +2,7 @@
 # Adhere to their licence to use this script
 
 import numpy as np
-from loco_mujoco.smpl import SMPL_BONE_ORDER_NAMES, SMPLH_BONE_ORDER_NAMES
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.smpl import SMPL_BONE_ORDER_NAMES, SMPLH_BONE_ORDER_NAMES
 
 try:
     import torch

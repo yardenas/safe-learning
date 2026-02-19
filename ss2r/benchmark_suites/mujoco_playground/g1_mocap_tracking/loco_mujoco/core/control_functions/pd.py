@@ -5,9 +5,9 @@ import jax
 import mujoco
 import numpy as np
 from flax import struct
-from loco_mujoco.core.control_functions import ControlFunction
-from loco_mujoco.core.utils import mj_jntname2qposid, mj_jntname2qvelid
-from loco_mujoco.core.utils.backend import assert_backend_is_supported
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.control_functions import ControlFunction
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import mj_jntname2qposid, mj_jntname2qvelid
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.backend import assert_backend_is_supported
 from mujoco import MjData, MjModel
 from mujoco.mjx import Data, Model
 

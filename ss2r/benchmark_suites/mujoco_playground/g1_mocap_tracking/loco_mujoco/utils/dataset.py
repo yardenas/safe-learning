@@ -1,7 +1,7 @@
 import argparse
 import os
 
-import loco_mujoco
+import ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco as loco_mujoco
 import yaml
 
 

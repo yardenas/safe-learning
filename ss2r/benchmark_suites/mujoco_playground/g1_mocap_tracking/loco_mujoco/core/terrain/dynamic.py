@@ -1,4 +1,4 @@
-from loco_mujoco.core.terrain import Terrain
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.terrain import Terrain
 
 
 class DynamicTerrain(Terrain):

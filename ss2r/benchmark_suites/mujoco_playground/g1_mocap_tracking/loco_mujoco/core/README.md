@@ -9,8 +9,8 @@ Here is a simple example to run a Mujoco-CPU environment:
 ```python
 import jax
 import numpy as np
-from loco_mujoco.core import Mujoco, ObservationType
-from loco_mujoco import PATH_TO_MODELS
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core import Mujoco, ObservationType
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco import PATH_TO_MODELS
 
 # specify what observation you would like to retrieve from the xml
 # --> checkout ObservationType to see what observations are supported by default
@@ -53,8 +53,8 @@ import time
 import jax
 import mujoco
 from mujoco import MjSpec
-from loco_mujoco.core import Mjx, ObservationType
-from loco_mujoco import PATH_TO_MODELS
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core import Mjx, ObservationType
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco import PATH_TO_MODELS
 
 
 def _modify_spec_for_mjx(spec: MjSpec):

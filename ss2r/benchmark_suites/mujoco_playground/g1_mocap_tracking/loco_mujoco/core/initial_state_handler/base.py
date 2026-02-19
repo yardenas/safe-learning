@@ -1,8 +1,8 @@
 from types import ModuleType
 from typing import Any, Dict, List, Tuple, Union
 
-from loco_mujoco.core.stateful_object import StatefulObject
-from loco_mujoco.core.utils import assert_backend_is_supported
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.stateful_object import StatefulObject
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import assert_backend_is_supported
 from mujoco import MjData, MjModel
 from mujoco.mjx import Data, Model
 

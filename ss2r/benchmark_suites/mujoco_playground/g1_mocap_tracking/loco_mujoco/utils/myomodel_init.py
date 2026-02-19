@@ -2,7 +2,7 @@ import os
 import shutil
 
 import git
-from loco_mujoco import PATH_TO_MODELS
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco import PATH_TO_MODELS
 
 
 def fetch_git(repo_url, commit_hash, clone_directory, clone_path):

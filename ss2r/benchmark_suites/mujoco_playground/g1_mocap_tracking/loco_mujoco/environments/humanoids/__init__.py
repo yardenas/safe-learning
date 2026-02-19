@@ -12,5 +12,5 @@ except Exception:
 if register is not None:
     register(
         "LocoMujoco",
-        entry_point="loco_mujoco.core.wrappers.gymnasium:GymnasiumWrapper",
+        entry_point="ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.wrappers.gymnasium:GymnasiumWrapper",
     )

@@ -10,12 +10,12 @@ import mujoco
 import numpy as np
 from flax import struct
 from jax.scipy.spatial.transform import Rotation as jnp_R
-from loco_mujoco.core.stateful_object import StatefulObject
-from loco_mujoco.core.utils.math import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.stateful_object import StatefulObject
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.math import (
     calculate_relative_site_quatities,
     quat_scalarfirst2scalarlast,
 )
-from loco_mujoco.core.utils.mujoco import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import (
     mj_jnt_name2id,
     mj_jntid2qposid,
     mj_jntid2qvelid,

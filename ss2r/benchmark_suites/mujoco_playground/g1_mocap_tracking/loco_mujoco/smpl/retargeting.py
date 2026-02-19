@@ -16,7 +16,7 @@ from scipy.spatial.transform import Rotation as sRot
 try:
     import joblib
     import torch
-    from loco_mujoco.smpl import SMPLH_Parser
+    from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.smpl import SMPLH_Parser
     from smplx.lbs import transform_mat
     from torch.autograd import Variable
     from tqdm import tqdm
@@ -26,26 +26,26 @@ except ImportError as e:
     _OPTIONAL_IMPORT_INSTALLED = False
     _OPTIONAL_IMPORT_EXCEPTION = e
 
-import loco_mujoco
-from loco_mujoco import PATH_TO_SMPL_ROBOT_CONF
-from loco_mujoco.core.utils.math import (
+import ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco as loco_mujoco
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco import PATH_TO_SMPL_ROBOT_CONF
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.math import (
     quat_scalarfirst2scalarlast,
     quat_scalarlast2scalarfirst,
 )
-from loco_mujoco.core.utils.mujoco import mj_jntname2qposid, mj_jntname2qvelid
-from loco_mujoco.datasets.data_generation import ExtendTrajData, optimize_for_collisions
-from loco_mujoco.datasets.data_generation.utils import add_mocap_bodies
-from loco_mujoco.environments import LocoEnv
-from loco_mujoco.smpl import SMPLH_BONE_ORDER_NAMES
-from loco_mujoco.smpl.utils.smoothing import gaussian_filter_1d_batch
-from loco_mujoco.trajectory import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import mj_jntname2qposid, mj_jntname2qvelid
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.datasets.data_generation import ExtendTrajData, optimize_for_collisions
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.datasets.data_generation.utils import add_mocap_bodies
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.environments import LocoEnv
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.smpl import SMPLH_BONE_ORDER_NAMES
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.smpl.utils.smoothing import gaussian_filter_1d_batch
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory import (
     Trajectory,
     TrajectoryData,
     TrajectoryInfo,
     TrajectoryModel,
     interpolate_trajectories,
 )
-from loco_mujoco.utils import setup_logger
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.utils import setup_logger
 
 OPTIMIZED_SHAPE_FILE_NAME = "shape_optimized.pkl"
 

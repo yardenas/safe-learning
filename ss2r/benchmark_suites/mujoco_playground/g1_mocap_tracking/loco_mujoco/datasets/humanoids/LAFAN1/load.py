@@ -4,27 +4,27 @@ from pathlib import Path
 from typing import List, Union
 
 import jax.numpy as jnp
-import loco_mujoco
+import ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco as loco_mujoco
 import mujoco
 import numpy as np
 import yaml
 from huggingface_hub import hf_hub_download
-from loco_mujoco.core.utils.math import quat_scalarlast2scalarfirst
-from loco_mujoco.datasets.data_generation import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.math import quat_scalarlast2scalarfirst
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.datasets.data_generation import (
     ExtendTrajData,
     calculate_qvel_with_finite_difference,
     optimize_for_collisions,
 )
-from loco_mujoco.environments import LocoEnv
-from loco_mujoco.smpl.retargeting import load_robot_conf_file
-from loco_mujoco.trajectory import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.environments import LocoEnv
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.smpl.retargeting import load_robot_conf_file
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory import (
     Trajectory,
     TrajectoryData,
     TrajectoryInfo,
     TrajectoryModel,
     interpolate_trajectories,
 )
-from loco_mujoco.utils import setup_logger
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.utils import setup_logger
 from omegaconf import DictConfig, OmegaConf
 from scipy.spatial.transform import Rotation as sRot
 
@@ -173,7 +173,7 @@ def load_lafan1_trajectory(
 
 
 if __name__ == "__main__":
-    from loco_mujoco.datasets.humanoids.LAFAN1 import LAFAN1_ALL_DATASETS
+    from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.datasets.humanoids.LAFAN1 import LAFAN1_ALL_DATASETS
 
     traj = load_lafan1_trajectory("UnitreeH1", LAFAN1_ALL_DATASETS)
     print("Done!")

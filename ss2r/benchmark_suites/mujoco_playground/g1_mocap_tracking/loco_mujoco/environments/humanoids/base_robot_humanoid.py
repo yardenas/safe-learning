@@ -1,7 +1,7 @@
 from typing import List, Tuple
 
-from loco_mujoco.core.utils import info_property
-from loco_mujoco.environments import LocoEnv
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import info_property
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.environments import LocoEnv
 
 
 class BaseRobotHumanoid(LocoEnv):

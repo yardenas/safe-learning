@@ -3,7 +3,7 @@ from typing import Any, Dict, Tuple, Union
 
 import jax
 import numpy as np
-from loco_mujoco.core.control_functions import ControlFunction
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.control_functions import ControlFunction
 from mujoco import MjData, MjModel
 from mujoco.mjx import Data, Model
 

@@ -3,18 +3,18 @@ import jax.numpy as jnp
 import mujoco
 from flax import struct
 from jax.scipy.spatial.transform import Rotation as R
-from loco_mujoco.core.utils.math import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.math import (
     calc_site_velocities,
     calculate_relative_site_quatities,
     quat_scalarfirst2scalarlast,
 )
-from loco_mujoco.core.utils.mujoco import (
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import (
     mj_jntid2qposid,
     mj_jntid2qvelid,
     mj_jntname2qposid,
     mj_jntname2qvelid,
 )
-from loco_mujoco.core.wrappers import SummaryMetrics
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.wrappers import SummaryMetrics
 from metrx import DistanceMeasures
 from omegaconf import DictConfig, OmegaConf
 
