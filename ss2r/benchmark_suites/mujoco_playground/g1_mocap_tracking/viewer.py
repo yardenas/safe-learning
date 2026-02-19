@@ -7,7 +7,11 @@ Usage from Python:
 
 import argparse
 import ast
+import json
 import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -15,9 +19,13 @@ import jax.numpy as jp
 import mujoco
 import mujoco.viewer
 import numpy as np
+from brax.training.acme import running_statistics
+from brax.training.agents.sac import checkpoint as sac_checkpoint
 from mujoco import MjData, mjx
 from mujoco_playground._src import collision
+from orbax import checkpoint as ocp
 
+import ss2r.algorithms.sac.networks as sac_networks
 from ss2r.algorithms.hydrax_mpc.factory import make_task
 from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPC, TreeMPCParams
 from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.g1_mocap_env import (
@@ -37,6 +45,247 @@ def _reference_action(env: G1MocapTracking, state: Any) -> jax.Array:
     del state
     # Actions are residuals around the mocap reference target.
     return jp.zeros((env.action_size,))
+
+
+@dataclass(frozen=True)
+class _SacRunConfig:
+    policy_hidden_layer_sizes: tuple[int, ...]
+    value_hidden_layer_sizes: tuple[int, ...]
+    activation: str
+    normalize_observations: bool
+    use_bro: bool
+    n_critics: int
+    n_heads: int
+    policy_obs_key: str
+    value_obs_key: str
+
+
+def _cfg_get(config: Mapping[str, Any], path: str, default: Any) -> Any:
+    if path in config:
+        return config[path]
+    current: Any = config
+    for part in path.split("."):
+        if isinstance(current, Mapping) and part in current:
+            current = current[part]
+        else:
+            return default
+    return current
+
+
+def _as_int_tuple(value: Any, fallback: tuple[int, ...]) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        return fallback
+    try:
+        return tuple(int(v) for v in value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _flatten_nested_dict(
+    source: Mapping[str, Any],
+    prefix: str = "",
+    out: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if out is None:
+        out = {}
+    for key, value in source.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, Mapping):
+            _flatten_nested_dict(value, prefix=path, out=out)
+        else:
+            out[path] = value
+    return out
+
+
+def _extract_sac_run_config(run_config: Mapping[str, Any]) -> _SacRunConfig:
+    policy_privileged = bool(_cfg_get(run_config, "training.policy_privileged", False))
+    value_privileged = bool(_cfg_get(run_config, "training.value_privileged", False))
+    return _SacRunConfig(
+        policy_hidden_layer_sizes=_as_int_tuple(
+            _cfg_get(run_config, "agent.policy_hidden_layer_sizes", [128, 128]),
+            (128, 128),
+        ),
+        value_hidden_layer_sizes=_as_int_tuple(
+            _cfg_get(run_config, "agent.value_hidden_layer_sizes", [512, 512]),
+            (512, 512),
+        ),
+        activation=str(_cfg_get(run_config, "agent.activation", "swish")),
+        normalize_observations=bool(
+            _cfg_get(run_config, "agent.normalize_observations", True)
+        ),
+        use_bro=bool(_cfg_get(run_config, "agent.use_bro", True)),
+        n_critics=int(_cfg_get(run_config, "agent.n_critics", 2)),
+        n_heads=int(_cfg_get(run_config, "agent.n_heads", 1)),
+        policy_obs_key="privileged_state" if policy_privileged else "state",
+        value_obs_key="privileged_state" if value_privileged else "state",
+    )
+
+
+def _extract_env_overrides_from_run_config(
+    run_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    task_params = _cfg_get(run_config, "environment.task_params", {})
+    if not isinstance(task_params, Mapping):
+        return {}
+    return _flatten_nested_dict(task_params)
+
+
+def _download_wandb_checkpoint_and_config(
+    run_id: str,
+    *,
+    entity: str | None,
+    project: str,
+) -> tuple[str, dict[str, Any]]:
+    try:
+        import wandb
+    except ImportError as exc:  # pragma: no cover - optional runtime dependency.
+        raise ImportError("wandb is required for action_mode='policy'.") from exc
+
+    api = wandb.Api(overrides={"entity": entity}) if entity else wandb.Api()
+    run_path = f"{entity}/{project}/{run_id}" if entity else f"{project}/{run_id}"
+    run = api.run(run_path)
+    run_config = dict(run.config)
+
+    artifact_path = (
+        f"{entity}/{project}/checkpoint:{run_id}"
+        if entity
+        else f"{project}/checkpoint:{run_id}"
+    )
+    artifact = api.artifact(artifact_path)
+    download_dir = Path.cwd() / "ckpt" / f"{run_id}_step_latest"
+    checkpoint_path = artifact.download(str(download_dir))
+    return checkpoint_path, run_config
+
+
+def _build_sac_policy_action_fn(
+    env: G1MocapTracking,
+    checkpoint_path: str,
+    run_config: Mapping[str, Any],
+    *,
+    deterministic: bool,
+) -> Callable[[Any, jax.Array], jax.Array]:
+    sac_cfg = _extract_sac_run_config(run_config)
+    try:
+        activation_fn = getattr(jax.nn, sac_cfg.activation)
+    except AttributeError as exc:
+        raise ValueError(
+            f"Unknown SAC activation '{sac_cfg.activation}' in W&B run config."
+        ) from exc
+
+    normalize_fn = (
+        running_statistics.normalize
+        if sac_cfg.normalize_observations
+        else (lambda obs, _: obs)
+    )
+    sac_network = sac_networks.make_sac_networks(
+        observation_size=env.observation_size,
+        action_size=env.action_size,
+        preprocess_observations_fn=normalize_fn,
+        policy_hidden_layer_sizes=sac_cfg.policy_hidden_layer_sizes,
+        value_hidden_layer_sizes=sac_cfg.value_hidden_layer_sizes,
+        activation=activation_fn,
+        value_obs_key=sac_cfg.value_obs_key,
+        policy_obs_key=sac_cfg.policy_obs_key,
+        use_bro=sac_cfg.use_bro,
+        n_critics=sac_cfg.n_critics,
+        n_heads=sac_cfg.n_heads,
+    )
+    params = _restore_sac_checkpoint(
+        checkpoint_path=checkpoint_path,
+        env=env,
+        sac_network=sac_network,
+        run_config=run_config,
+    )
+    normalizer_params, policy_params = params[0], params[1]
+    inference_fn = sac_networks.make_inference_fn(sac_network)(
+        (normalizer_params, policy_params),
+        deterministic=deterministic,
+    )
+
+    @jax.jit
+    def _policy_action(obs: Any, key: jax.Array) -> jax.Array:
+        batched_obs = jax.tree_map(lambda x: jp.expand_dims(x, axis=0), obs)
+        action, _ = inference_fn(batched_obs, key)
+        return action[0]
+
+    return _policy_action
+
+
+def _build_restore_item_from_metadata(checkpoint_path: str) -> Any:
+    metadata_path = Path(checkpoint_path) / "_METADATA"
+    metadata = json.loads(metadata_path.read_text())
+    tree_metadata = metadata.get("tree_metadata")
+    if not isinstance(tree_metadata, dict):
+        custom = metadata.get("custom")
+        if isinstance(custom, dict):
+            tree_metadata = custom.get("tree_metadata")
+    if not isinstance(tree_metadata, dict):
+        raise ValueError(
+            f"Could not find tree_metadata in checkpoint metadata: {metadata_path}"
+        )
+
+    root: dict[Any, Any] = {}
+    for entry in tree_metadata.values():
+        key_path: list[Any] = []
+        for key_entry in entry["key_metadata"]:
+            key = key_entry["key"]
+            if key_entry.get("key_type", 2) == 1:
+                key = int(key)
+            key_path.append(key)
+
+        cursor = root
+        for part in key_path[:-1]:
+            cursor = cursor.setdefault(part, {})
+        # Leaf value is only a structure placeholder.
+        cursor[key_path[-1]] = np.array(0.0, dtype=np.float32)
+
+    def _to_container(node: Any) -> Any:
+        if not isinstance(node, dict):
+            return node
+        converted = {k: _to_container(v) for k, v in node.items()}
+        if converted and all(isinstance(k, int) for k in converted):
+            keys = sorted(converted)
+            if keys == list(range(len(keys))):
+                return [converted[i] for i in keys]
+        return converted
+
+    return _to_container(root)
+
+
+def _restore_sac_checkpoint_numpy(checkpoint_path: str) -> Any:
+    restore_item = _build_restore_item_from_metadata(checkpoint_path)
+    restore_args = jax.tree.map(
+        lambda _: ocp.RestoreArgs(restore_type=np.ndarray), restore_item
+    )
+    checkpointer = ocp.PyTreeCheckpointer()
+    restored = checkpointer.restore(
+        str(Path(checkpoint_path).resolve()),
+        args=ocp.args.PyTreeRestore(item=restore_item, restore_args=restore_args),
+    )
+    restored = jax.tree.map(
+        lambda x: jp.array(x) if isinstance(x, np.ndarray) else x, restored
+    )
+    if isinstance(restored, list) and restored and isinstance(restored[0], dict):
+        restored[0] = running_statistics.RunningStatisticsState(**restored[0])
+    return restored
+
+
+def _restore_sac_checkpoint(
+    checkpoint_path: str,
+    env: G1MocapTracking,
+    sac_network: sac_networks.SafeSACNetworks,
+    run_config: Mapping[str, Any],
+) -> Any:
+    del env, sac_network, run_config
+    try:
+        return sac_checkpoint.load(checkpoint_path)
+    except Exception as load_error:
+        print(
+            "[viewer] brax sac checkpoint.load failed; "
+            "falling back to metadata-driven numpy restore. "
+            f"error={load_error}"
+        )
+    return _restore_sac_checkpoint_numpy(checkpoint_path)
 
 
 def _build_tree_mpc(
@@ -315,6 +564,10 @@ def _update_hud_labels(
 def run_viewer(
     seed: int = 0,
     action_mode: str = "reference",
+    wandb_run_id: str | None = None,
+    wandb_entity: str | None = None,
+    wandb_project: str = "ss2r",
+    policy_deterministic: bool = True,
     config_overrides: dict[str, Any] | None = None,
     reset_on_done: bool = True,
     print_every: int = 0,
@@ -331,18 +584,53 @@ def run_viewer(
 
     Args:
         seed: PRNG seed for reset and random actions.
-        action_mode: One of {"reference", "replay", "zero", "random", "tree_mpc"}.
+        action_mode: One of {"reference", "replay", "zero", "random", "tree_mpc", "policy"}.
         config_overrides: Optional env config overrides.
         reset_on_done: Reset automatically when episode terminates.
         print_every: If > 0, print reward/done every N control steps.
     """
-    if action_mode not in {"reference", "replay", "zero", "random", "tree_mpc"}:
+    if action_mode not in {
+        "reference",
+        "replay",
+        "zero",
+        "random",
+        "tree_mpc",
+        "policy",
+    }:
         raise ValueError(
             f"Unsupported action_mode={action_mode}. "
-            "Expected one of {'reference', 'replay', 'zero', 'random', 'tree_mpc'}."
+            "Expected one of {'reference', 'replay', 'zero', 'random', 'tree_mpc', 'policy'}."
         )
 
-    env = G1MocapTracking(config_overrides=config_overrides)
+    run_config: dict[str, Any] | None = None
+    checkpoint_path: str | None = None
+    effective_config_overrides = dict(config_overrides or {})
+    if action_mode == "policy":
+        if not wandb_run_id:
+            raise ValueError(
+                "action_mode='policy' requires --wandb-run-id (or wandb_run_id)."
+            )
+        checkpoint_path, run_config = _download_wandb_checkpoint_and_config(
+            wandb_run_id,
+            entity=wandb_entity,
+            project=wandb_project,
+        )
+        wandb_env_overrides = _extract_env_overrides_from_run_config(run_config)
+        effective_config_overrides = {
+            **wandb_env_overrides,
+            **effective_config_overrides,
+        }
+        print(
+            f"[viewer] loaded wandb run={wandb_run_id} "
+            f"(entity={wandb_entity or '<default>'}, project={wandb_project})"
+        )
+        print(f"[viewer] checkpoint_path={checkpoint_path}")
+
+    env = G1MocapTracking(
+        config_overrides=effective_config_overrides
+        if effective_config_overrides
+        else None
+    )
     rng = jax.random.PRNGKey(seed)
     reset_fn = jax.jit(env.reset)
     step_fn = jax.jit(env.step)
@@ -367,6 +655,17 @@ def run_viewer(
     planner_params = None
     planner_optimize = None
     planner_env = None
+    policy_action_fn = None
+
+    if action_mode == "policy":
+        assert checkpoint_path is not None
+        assert run_config is not None
+        policy_action_fn = _build_sac_policy_action_fn(
+            env=env,
+            checkpoint_path=checkpoint_path,
+            run_config=run_config,
+            deterministic=policy_deterministic,
+        )
 
     if action_mode == "tree_mpc":
         planner_env = G1MocapTracking()
@@ -446,6 +745,10 @@ def run_viewer(
                         action = zero_action
                     elif action_mode == "random":
                         rng, action = _random_action(rng, action_size)
+                    elif action_mode == "policy":
+                        assert policy_action_fn is not None
+                        rng, policy_key = jax.random.split(rng)
+                        action = policy_action_fn(state.obs, policy_key)
                     elif action_mode == "tree_mpc":
                         assert planner is not None
                         assert planner_params is not None
@@ -547,7 +850,30 @@ def main() -> None:
         "--action-mode",
         type=str,
         default="reference",
-        choices=["reference", "replay", "zero", "random", "tree_mpc"],
+        choices=["reference", "replay", "zero", "random", "tree_mpc", "policy"],
+    )
+    parser.add_argument(
+        "--wandb-run-id",
+        type=str,
+        default=None,
+        help="W&B run id used for checkpoint and config lookup (policy mode only).",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=None,
+        help="W&B entity/team. If omitted, uses your default entity.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="ss2r",
+        help="W&B project name.",
+    )
+    parser.add_argument(
+        "--stochastic-policy",
+        action="store_true",
+        help="Sample SAC actions stochastically in policy mode.",
     )
     parser.add_argument("--print-every", type=int, default=0)
     parser.add_argument("--tree-num-samples", type=int, default=128)
@@ -576,6 +902,10 @@ def main() -> None:
     run_viewer(
         seed=args.seed,
         action_mode=args.action_mode,
+        wandb_run_id=args.wandb_run_id,
+        wandb_entity=args.wandb_entity,
+        wandb_project=args.wandb_project,
+        policy_deterministic=not args.stochastic_policy,
         config_overrides=config_overrides if config_overrides else None,
         reset_on_done=not args.no_reset_on_done,
         print_every=args.print_every,
