@@ -10,6 +10,8 @@ training:
   safe: false
   num_eval_episodes: 1
   num_eval_envs: 64
+  train_domain_randomization: false
+  eval_domain_randomization: false
 
 agent:
   actor_update_source: critic_replay
