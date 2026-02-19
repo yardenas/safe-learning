@@ -1115,7 +1115,7 @@ class G1MocapTracking(g1_base.G1Env):
 
     def _get_obs(
         self, data: mjx.Data, info: dict[str, Any], contact: jax.Array
-    ) -> mjx_env.Observation:
+    ) -> jax.Array:
         ref_idx = self._reference_index(data.time, info["reference_start_idx"])
 
         qpos_obs = data.qpos[self._deepmimic_qpos_ind]
@@ -1132,7 +1132,7 @@ class G1MocapTracking(g1_base.G1Env):
             ]
         )
 
-        state = jp.hstack(
+        obs = jp.hstack(
             [
                 qpos_obs,
                 qvel_obs,
@@ -1142,21 +1142,7 @@ class G1MocapTracking(g1_base.G1Env):
                 ref_goal,
             ]
         )
-
-        privileged_state = jp.hstack(
-            [
-                state,
-                data.qacc[6:],
-                data.actuator_force,
-                data.qpos[2:3],
-                contact.astype(state.dtype),
-            ]
-        )
-
-        return {
-            "state": state,
-            "privileged_state": privileged_state,
-        }
+        return obs
 
     def _out_of_bounds_action_cost(self, action: jax.Array) -> jax.Array:
         lower_bound = -jp.ones_like(action)
