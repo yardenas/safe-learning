@@ -255,16 +255,17 @@ class G1MocapTracking(mjx_env.MjxEnv):
             # Preserve wrapper-added carry structure for JAX scans.
             info = dict(previous_state.info)
             metrics = dict(previous_state.metrics)
-            for key in info:
-                if key in loco_state.info:
-                    info[key] = loco_state.info[key]
 
         info["_loco_state"] = loco_state
         if rng is not None and "rng" not in info:
             info["rng"] = rng
 
-        reward = jp.asarray(loco_state.reward)
-        done = jp.asarray(loco_state.done)
+        if previous_state is None:
+            reward = jp.asarray(loco_state.reward)
+            done = jp.asarray(loco_state.done, dtype=jp.float32)
+        else:
+            reward = jp.asarray(loco_state.reward, dtype=previous_state.reward.dtype)
+            done = jp.asarray(loco_state.done, dtype=previous_state.done.dtype)
 
         return mjx_env.State(
             data=loco_state.data,
