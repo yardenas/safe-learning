@@ -1,3 +1,5 @@
+# Keep reward classes re-exported, but import them after core utility symbols so
+# reward modules can safely import `core.utils` during package initialization.
 from ..reward.default import (
     LocomotionReward,
     NoReward,

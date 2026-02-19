@@ -10,9 +10,17 @@ import mujoco
 import numpy as np
 import requests
 from flax import struct
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.control_functions import ControlFunction
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.domain_randomizer import DomainRandomizer
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.initial_state_handler import InitialStateHandler
+from mujoco import MjData, MjModel, MjSpec, MjvScene
+
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.control_functions import (
+    ControlFunction,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.domain_randomizer import (
+    DomainRandomizer,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.initial_state_handler import (
+    InitialStateHandler,
+)
 from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.observations import (
     Goal,
     Observation,
@@ -20,12 +28,24 @@ from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.
     ObservationIndexContainer,
     ObservationType,
 )
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.reward.base import Reward
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.terminal_state_handler.base import TerminalStateHandler
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.terrain import Terrain
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import Box, MDPInfo, info_property
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import mj_jntid2qposid, mj_jntid2qvelid
-from mujoco import MjData, MjModel, MjSpec
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.reward.base import (
+    Reward,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.terminal_state_handler.base import (
+    TerminalStateHandler,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.terrain import (
+    Terrain,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import (
+    Box,
+    MDPInfo,
+    info_property,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import (
+    mj_jntid2qposid,
+    mj_jntid2qvelid,
+)
 
 
 @struct.dataclass
@@ -898,7 +918,7 @@ class Mujoco:
             terminal_state_handler_state=self._terminal_state_handler.init_state(
                 self, _k7, model, data, backend
             ),
-            user_scene=MjvScene.init_for_all_stateful_objects(backend),
+            user_scene=None,
         )
 
         return carry

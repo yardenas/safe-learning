@@ -9,22 +9,34 @@ import jax.random
 import mujoco
 import numpy as np
 from flax import struct
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.mujoco_mjx import Mjx, MjxAdditionalCarry, MjxState
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.observations import Observation
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.stateful_object import EmptyState
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import info_property
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import mj_jntname2qposid
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.visuals import VideoRecorder
+from mujoco import MjData, MjModel, MjSpec
+from mujoco.mjx import Data, Model
+from scipy.spatial.transform import Rotation as np_R
+from tqdm import tqdm
+
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.mujoco_mjx import (
+    Mjx,
+    MjxAdditionalCarry,
+    MjxState,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.observations import (
+    Observation,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.stateful_object import (
+    EmptyState,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils import (
+    info_property,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.core.utils.mujoco import (
+    mj_jntname2qposid,
+)
 from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory import (
     Trajectory,
     TrajectoryHandler,
     TrajectoryTransitions,
     TrajState,
 )
-from mujoco import MjData, MjModel, MjSpec
-from mujoco.mjx import Data, Model
-from scipy.spatial.transform import Rotation as np_R
-from tqdm import tqdm
 
 
 @struct.dataclass
@@ -467,15 +479,6 @@ class LocoEnv(Mjx):
         if key is None:
             key = jax.random.key(0)
 
-        if record:
-            assert render
-            fps = 1 / self.dt
-            recorder = (
-                VideoRecorder(fps=fps, **recorder_params)
-                if recorder_params is not None
-                else VideoRecorder(fps=fps)
-            )
-        else:
             recorder = None
 
         is_free_joint_qpos_quat, is_free_joint_qvel_rotvec = [], []
@@ -499,13 +502,7 @@ class LocoEnv(Mjx):
         subtraj_step_no = 0
         traj_data_sample = self.th.get_current_traj_data(self._additional_carry, np)
 
-        if render:
-            frame = self.render(record)
-        else:
-            frame = None
-
-        if record:
-            recorder(frame)
+        frame = None
 
         highest_int = np.iinfo(np.int32).max
         if n_episodes is None:
@@ -583,20 +580,10 @@ class LocoEnv(Mjx):
                     self._model, self._data, self._additional_carry
                 )
 
-                if render:
-                    frame = self.render(record)
-                else:
-                    frame = None
-
-                if record:
-                    recorder(frame)
+                frame = None
 
             key, subkey = jax.random.split(key)
             self.reset(subkey)
-
-        self.stop()
-        if record:
-            recorder.stop()
 
         if was_jax:
             self.th.to_jax()

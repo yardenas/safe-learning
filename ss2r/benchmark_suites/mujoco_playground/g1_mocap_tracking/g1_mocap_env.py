@@ -11,8 +11,10 @@ from ml_collections import config_dict
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
-import ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco as _vendored_loco_mujoco  # noqa: F401
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.task_factories.imitation_factory import ImitationFactory
+import ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.environments  # noqa: F401
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.task_factories.imitation_factory import (
+    ImitationFactory,
+)
 
 
 def default_config() -> config_dict.ConfigDict:
