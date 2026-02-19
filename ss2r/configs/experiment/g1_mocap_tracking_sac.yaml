@@ -9,3 +9,4 @@ training:
   train_domain_randomization: false
   eval_domain_randomization: false
   safe: false
+  value_privileged: false
