@@ -246,8 +246,19 @@ class G1MocapTracking(mjx_env.MjxEnv):
         loco_state: Any,
         *,
         rng: jax.Array | None = None,
+        previous_state: mjx_env.State | None = None,
     ) -> mjx_env.State:
-        info = dict(loco_state.info)
+        if previous_state is None:
+            info = dict(loco_state.info)
+            metrics = {}
+        else:
+            # Preserve wrapper-added carry structure for JAX scans.
+            info = dict(previous_state.info)
+            metrics = dict(previous_state.metrics)
+            for key in info:
+                if key in loco_state.info:
+                    info[key] = loco_state.info[key]
+
         info["_loco_state"] = loco_state
         if rng is not None and "rng" not in info:
             info["rng"] = rng
@@ -260,7 +271,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
             obs=loco_state.observation,
             reward=reward,
             done=done,
-            metrics={},
+            metrics=metrics,
             info=info,
         )
 
@@ -273,7 +284,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
         if loco_state is None:
             raise ValueError("Missing loco state in state.info['_loco_state']")
         next_loco_state = self._loco_env.mjx_step(loco_state, action)
-        return self._to_playground_state(next_loco_state)
+        return self._to_playground_state(next_loco_state, previous_state=state)
 
     @property
     def xml_path(self) -> str:
