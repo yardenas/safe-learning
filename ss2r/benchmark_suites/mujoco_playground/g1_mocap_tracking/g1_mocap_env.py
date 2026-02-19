@@ -1,5 +1,6 @@
 """G1 mocap tracking adapter backed by vendored loco_mujoco MJX env."""
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -28,18 +29,61 @@ def default_config() -> config_dict.ConfigDict:
             reference_repo_id="robfiras/loco-mujoco-datasets",
             reference_repo_type="dataset",
             reference_dir="Lafan1/mocap/UnitreeG1",
+            control_type="DefaultControl",
+            control_params=config_dict.create(),
+            mimic_reward=config_dict.create(
+                qpos_w_exp=10.0,
+                qvel_w_exp=2.0,
+                rpos_w_exp=100.0,
+                rquat_w_exp=10.0,
+                rvel_w_exp=0.1,
+                qpos_w_sum=0.4,
+                qvel_w_sum=0.2,
+                rpos_w_sum=0.5,
+                rquat_w_sum=0.3,
+                rvel_w_sum=0.1,
+                action_out_of_bounds_coeff=0.01,
+                joint_acc_coeff=0.0,
+                joint_torque_coeff=0.0,
+                action_rate_coeff=0.0,
+            ),
         ),
     )
 
 
 def _lafan1_dataset_name(config: config_dict.ConfigDict) -> str:
-    loco_cfg = getattr(config, "loco", None)
-    if loco_cfg is None:
-        return "dance1_subject3"
+    dataset_candidates = [
+        _cfg_path_get(config, ("loco", "dataset_name"), None),
+        _cfg_path_get(
+            config,
+            ("task_factory", "params", "lafan1_dataset_conf", "dataset_name"),
+            None,
+        ),
+        _cfg_path_get(
+            config,
+            (
+                "experiment",
+                "task_factory",
+                "params",
+                "lafan1_dataset_conf",
+                "dataset_name",
+            ),
+            None,
+        ),
+    ]
 
-    name = str(getattr(loco_cfg, "dataset_name", "dance1_subject3")).strip()
+    raw_name: Any = "dance1_subject3"
+    for candidate in dataset_candidates:
+        if candidate is None:
+            continue
+        raw_name = candidate
+        break
+
+    if isinstance(raw_name, (list, tuple)):
+        raw_name = raw_name[0] if raw_name else "dance1_subject3"
+    name = str(raw_name).strip()
     if not name:
-        return "dance1_subject3"
+        name = "dance1_subject3"
 
     name = Path(name).name
     if name.endswith(".npz"):
@@ -47,6 +91,110 @@ def _lafan1_dataset_name(config: config_dict.ConfigDict) -> str:
     if name.endswith(".csv"):
         name = name[:-4]
     return name or "dance1_subject3"
+
+
+def _cfg_path_get(config: Any, path: tuple[str, ...], default: Any) -> Any:
+    current = config
+    for key in path:
+        if isinstance(current, Mapping):
+            if key not in current:
+                return default
+            current = current[key]
+            continue
+        if hasattr(current, key):
+            current = getattr(current, key)
+            continue
+        return default
+    return current
+
+
+def _episode_length(config: config_dict.ConfigDict) -> int:
+    candidates = [
+        _cfg_path_get(config, ("episode_length",), None),
+        _cfg_path_get(config, ("horizon",), None),
+        _cfg_path_get(config, ("env_params", "horizon"), None),
+        _cfg_path_get(config, ("experiment", "env_params", "horizon"), None),
+    ]
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return 1000
+
+
+def _to_plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _to_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_plain(v) for v in value]
+    return value
+
+
+def _control_spec(config: config_dict.ConfigDict) -> tuple[str, dict[str, Any]]:
+    control_type_candidates = [
+        _cfg_path_get(config, ("loco", "control_type"), None),
+        _cfg_path_get(config, ("control_type",), None),
+        _cfg_path_get(config, ("env_params", "control_type"), None),
+        _cfg_path_get(config, ("experiment", "env_params", "control_type"), None),
+    ]
+    control_type = next((c for c in control_type_candidates if c is not None), None)
+    control_type_str = (
+        str(control_type) if control_type is not None else "DefaultControl"
+    )
+
+    control_params_candidates = [
+        _cfg_path_get(config, ("loco", "control_params"), None),
+        _cfg_path_get(config, ("control_params",), None),
+        _cfg_path_get(config, ("env_params", "control_params"), None),
+        _cfg_path_get(config, ("experiment", "env_params", "control_params"), None),
+    ]
+    control_params_raw = next(
+        (c for c in control_params_candidates if c is not None), {}
+    )
+    control_params = (
+        _to_plain(control_params_raw) if isinstance(control_params_raw, Mapping) else {}
+    )
+    return control_type_str, control_params
+
+
+def _mimic_reward_params(config: config_dict.ConfigDict) -> dict[str, Any]:
+    defaults = {
+        "qpos_w_exp": 10.0,
+        "qvel_w_exp": 2.0,
+        "rpos_w_exp": 100.0,
+        "rquat_w_exp": 10.0,
+        "rvel_w_exp": 0.1,
+        "qpos_w_sum": 0.4,
+        "qvel_w_sum": 0.2,
+        "rpos_w_sum": 0.5,
+        "rquat_w_sum": 0.3,
+        "rvel_w_sum": 0.1,
+        "action_out_of_bounds_coeff": 0.01,
+        "joint_acc_coeff": 0.0,
+        "joint_torque_coeff": 0.0,
+        "action_rate_coeff": 0.0,
+    }
+    candidate_cfgs = [
+        _cfg_path_get(config, ("loco", "mimic_reward"), None),
+        _cfg_path_get(config, ("reward_params",), None),
+        _cfg_path_get(config, ("env_params", "reward_params"), None),
+        _cfg_path_get(config, ("experiment", "env_params", "reward_params"), None),
+    ]
+    reward_cfg = next((c for c in candidate_cfgs if c is not None), None)
+    if reward_cfg is None:
+        return defaults
+
+    out: dict[str, Any] = {}
+    for key, default_value in defaults.items():
+        value = _cfg_path_get(reward_cfg, (key,), default_value)
+        out[key] = float(value)
+    sites_for_mimic = _cfg_path_get(reward_cfg, ("sites_for_mimic",), None)
+    if sites_for_mimic is not None:
+        out["sites_for_mimic"] = list(sites_for_mimic)
+    return out
 
 
 class G1MocapTracking(mjx_env.MjxEnv):
@@ -74,13 +222,19 @@ class G1MocapTracking(mjx_env.MjxEnv):
         )
         dataset_name = _lafan1_dataset_name(self._config)
         self._dataset_name = dataset_name
+        mimic_reward_params = _mimic_reward_params(self._config)
+        control_type, control_params = _control_spec(self._config)
 
         self._loco_env = ImitationFactory.make(
             "MjxUnitreeG1",
             lafan1_dataset_conf={"dataset_name": dataset_name},
+            reward_type="MimicReward",
+            reward_params=mimic_reward_params,
+            control_type=control_type,
+            control_params=control_params,
             timestep=float(self._config.sim_dt),
             n_substeps=n_substeps,
-            horizon=int(self._config.episode_length),
+            horizon=_episode_length(self._config),
         )
 
         self._mj_model = self._loco_env.model

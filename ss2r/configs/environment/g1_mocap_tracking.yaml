@@ -12,3 +12,20 @@ task_params:
     reference_repo_id: robfiras/loco-mujoco-datasets
     reference_repo_type: dataset
     reference_dir: Lafan1/mocap/UnitreeG1
+    control_type: DefaultControl
+    control_params: {}
+    mimic_reward:
+      qpos_w_exp: 10.0
+      qvel_w_exp: 2.0
+      rpos_w_exp: 100.0
+      rquat_w_exp: 10.0
+      rvel_w_exp: 0.1
+      qpos_w_sum: 0.4
+      qvel_w_sum: 0.2
+      rpos_w_sum: 0.5
+      rquat_w_sum: 0.3
+      rvel_w_sum: 0.1
+      action_out_of_bounds_coeff: 0.01
+      joint_acc_coeff: 0.0
+      joint_torque_coeff: 0.0
+      action_rate_coeff: 0.0
