@@ -25,6 +25,10 @@ task_params:
       total_penalties: 1.0
       mimic_total: 1.0
   deepmimic:
+    reference_source: hf
+    reference_filename: Lafan1/mocap/UnitreeG1/dance1_subject3.npz
+    reference_repo_id: robfiras/loco-mujoco-datasets
+    reference_repo_type: dataset
     reference_max_steps: 2000
     action_residual_scale: 0.35
     mimic_site_regex: '.*_mimic$'
