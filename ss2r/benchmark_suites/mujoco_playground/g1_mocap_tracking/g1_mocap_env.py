@@ -1319,8 +1319,7 @@ class G1MocapTracking(g1_base.G1Env):
 
     def _get_obs(
         self, data: mjx.Data, info: dict[str, Any], contact: jax.Array
-    ) -> jax.Array:
-        del contact
+    ) -> mjx_env.Observation:
         ref_idx = self._reference_index(data.time, info["reference_start_idx"])
 
         # Match loco UnitreeG1 default proprioception:
@@ -1332,7 +1331,7 @@ class G1MocapTracking(g1_base.G1Env):
         # [current relative-site features, reference trajectory features].
         rpos_obs, rquat_obs, rvel_obs = self._current_relative_site_features(data)
 
-        traj_goal_obs = jp.hstack(
+        ref_goal = jp.hstack(
             [
                 self._reference_goal_qpos[ref_idx],
                 self._reference_goal_qvel[ref_idx],
@@ -1342,17 +1341,31 @@ class G1MocapTracking(g1_base.G1Env):
             ]
         )
 
-        state_obs = jp.hstack(
+        state = jp.hstack(
             [
                 qpos_obs,
                 qvel_obs,
                 rpos_obs,
                 rquat_obs,
                 rvel_obs,
-                traj_goal_obs,
+                ref_goal,
             ]
         )
-        return state_obs
+
+        privileged_state = jp.hstack(
+            [
+                state,
+                data.qacc[6:],
+                data.actuator_force,
+                data.qpos[2:3],
+                contact.astype(state.dtype),
+            ]
+        )
+
+        return {
+            "state": state,
+            "privileged_state": privileged_state,
+        }
 
     def _out_of_bounds_action_cost(self, action: jax.Array) -> jax.Array:
         lower_bound = -jp.ones_like(action)
