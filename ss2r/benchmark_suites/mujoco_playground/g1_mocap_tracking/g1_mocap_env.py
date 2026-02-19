@@ -1,9 +1,7 @@
 """DeepMimic mocap tracking task for Unitree G1."""
 
 import re
-import tempfile
 import warnings
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -18,41 +16,25 @@ from mujoco_playground._src.collision import geoms_colliding
 from mujoco_playground._src.locomotion.g1 import base as g1_base
 from mujoco_playground._src.locomotion.g1 import g1_constants as consts
 
-_VENDORED_LOCO_G1_MIMIC_SITES: tuple[tuple[str, dict[str, str]], ...] = (
-    ("pelvis", {"name": "pelvis_mimic"}),
-    ("left_hip_pitch_link", {"name": "left_hip_mimic", "pos": "0.0 0.05 0.0"}),
-    ("left_knee_link", {"name": "left_knee_mimic", "pos": "0.0 0.0 0.0"}),
-    (
-        "left_ankle_roll_link",
-        {"name": "left_foot_mimic", "pos": "0.035 0.0 -0.01"},
-    ),
-    ("right_hip_pitch_link", {"name": "right_hip_mimic", "pos": "0.0 -0.05 0.0"}),
-    ("right_knee_link", {"name": "right_knee_mimic", "pos": "0.0 0.0 0.0"}),
-    (
-        "right_ankle_roll_link",
-        {"name": "right_foot_mimic", "pos": "0.035 0.0 -0.01"},
-    ),
-    ("torso_link", {"name": "upper_body_mimic", "pos": "0.01 0.0 0.2"}),
-    ("torso_link", {"name": "head_mimic", "pos": "0.01 0.0 0.4"}),
-    ("left_shoulder_roll_link", {"name": "left_shoulder_mimic"}),
-    ("left_elbow_link", {"name": "left_elbow_mimic"}),
-    (
-        "left_wrist_roll_rubber_hand",
-        {"name": "left_hand_mimic", "pos": "0.2 0.0 0.0"},
-    ),
-    ("right_shoulder_roll_link", {"name": "right_shoulder_mimic"}),
-    ("right_elbow_link", {"name": "right_elbow_mimic"}),
-    (
-        "right_wrist_roll_rubber_hand",
-        {"name": "right_hand_mimic", "pos": "0.2 0.0 0.0"},
-    ),
+_MOCAP_XML_DIR = Path(__file__).resolve().parent / "assets" / "xmls"
+_STATIC_MOCAP_SCENE_XML = _MOCAP_XML_DIR / "scene_mjx_feetonly_flat_terrain.xml"
+_REQUIRED_MIMIC_SITE_NAMES: tuple[str, ...] = (
+    "upper_body_mimic",
+    "left_hand_mimic",
+    "left_foot_mimic",
+    "right_hand_mimic",
+    "right_foot_mimic",
 )
 
-# Loco model and mujoco_playground model differ in wrist body naming.
-_MIMIC_SITE_BODY_REMAP: dict[str, str] = {
-    "left_wrist_roll_rubber_hand": "left_wrist_roll_link",
-    "right_wrist_roll_rubber_hand": "right_wrist_roll_link",
-}
+
+def _get_assets_with_local_overrides() -> dict[str, bytes]:
+    assets = g1_base.get_assets()
+    # Override packaged XMLs by basename so include file resolution prefers local copies.
+    mjx_env.update_assets(assets, _MOCAP_XML_DIR, "*.xml")
+    local_assets_dir = _MOCAP_XML_DIR / "assets"
+    if local_assets_dir.exists():
+        mjx_env.update_assets(assets, local_assets_dir)
+    return assets
 
 
 def _atleast_3d(
@@ -270,136 +252,37 @@ def default_config() -> config_dict.ConfigDict:
 
 
 class G1MocapTracking(g1_base.G1Env):
-    @staticmethod
-    def _is_mimic_site_element(site_elem: ET.Element) -> bool:
-        name = str(site_elem.attrib.get("name", ""))
-        site_class = str(site_elem.attrib.get("class", ""))
-        return name.endswith("_mimic") or site_class == "mimic"
-
-    @classmethod
-    def _vendored_mimic_sites_by_body(cls) -> dict[str, list[dict[str, str]]]:
-        source_sites_by_body: dict[str, list[dict[str, str]]] = {}
-        for body_name, attrs in _VENDORED_LOCO_G1_MIMIC_SITES:
-            mapped_body = _MIMIC_SITE_BODY_REMAP.get(body_name, body_name)
-            attrs_with_size = dict(attrs)
-            if "size" not in attrs_with_size:
-                attrs_with_size["size"] = "0.01"
-            source_sites_by_body.setdefault(mapped_body, []).append(attrs_with_size)
-        return source_sites_by_body
-
-    @staticmethod
-    def _absolutize_xml_paths(root: ET.Element, xml_dir: Path) -> None:
-        for include_elem in root.findall(".//include"):
-            include_path = include_elem.attrib.get("file", "")
-            if include_path and not Path(include_path).is_absolute():
-                include_elem.attrib["file"] = str((xml_dir / include_path).resolve())
-
-        compiler_elem = root.find("compiler")
-        if compiler_elem is None:
-            return
-        for attr in ("meshdir", "texturedir"):
-            rel_path = compiler_elem.attrib.get(attr, "")
-            if rel_path and not Path(rel_path).is_absolute():
-                compiler_elem.attrib[attr] = str((xml_dir / rel_path).resolve())
-
-    @classmethod
-    def _create_augmented_task_xml(
-        cls,
-        task_xml_path: Path,
-        config: config_dict.ConfigDict,
-        config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]],
-    ) -> tuple[Path, list[str]]:
-        del config, config_overrides
-        source_sites_by_body = cls._vendored_mimic_sites_by_body()
-
-        if not source_sites_by_body:
-            raise ValueError(
-                "No vendored mimic proxy sites are available for dynamic injection."
-            )
-
-        target_tree = ET.parse(task_xml_path)
-        target_root = target_tree.getroot()
-
-        # Remove existing mimic proxy sites from target XML.
-        removed_sites = 0
-        for body_elem in target_root.iter("body"):
-            for site_elem in list(body_elem.findall("site")):
-                if cls._is_mimic_site_element(site_elem):
-                    body_elem.remove(site_elem)
-                    removed_sites += 1
-
-        target_body_by_name: dict[str, ET.Element] = {}
-        for body_elem in target_root.iter("body"):
-            body_name = body_elem.attrib.get("name", "")
-            if body_name:
-                target_body_by_name[body_name] = body_elem
-
-        added_site_names: list[str] = []
-        missing_bodies: list[str] = []
-        for body_name, sites in source_sites_by_body.items():
-            target_body = target_body_by_name.get(body_name)
-            if target_body is None:
-                missing_bodies.append(body_name)
-                continue
-            for site_attrs in sites:
-                ET.SubElement(target_body, "site", site_attrs)
-                added_site_names.append(site_attrs["name"])
-
-        cls._absolutize_xml_paths(target_root, task_xml_path.parent)
-
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".xml",
-            prefix="g1_mocap_augmented_",
-            delete=False,
-        ) as tmp_file:
-            target_tree.write(tmp_file.name, encoding="unicode")
-            augmented_path = Path(tmp_file.name)
-
-        print(
-            "[G1MocapTracking] dynamic mimic sites: "
-            f"source=vendored_loco_g1_23dof, removed={removed_sites}, added={len(added_site_names)}"
-        )
-        if missing_bodies:
-            print(
-                "[G1MocapTracking] source bodies missing in target model: "
-                f"{sorted(set(missing_bodies))}"
-            )
-
-        return augmented_path, added_site_names
-
     def __init__(
         self,
         task: str = "flat_terrain",
         config: config_dict.ConfigDict = default_config(),
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
     ):
-        base_xml_path = Path(consts.task_to_xml(task).as_posix())
-        xml_path_to_load = base_xml_path
-        cleanup_xml_path: Path | None = None
-        self._dynamic_mimic_site_names: list[str] = []
-        try:
-            (
-                xml_path_to_load,
-                self._dynamic_mimic_site_names,
-            ) = self._create_augmented_task_xml(base_xml_path, config, config_overrides)
-            cleanup_xml_path = xml_path_to_load
-        except Exception as exc:
-            warnings.warn(
-                "[G1MocapTracking] Failed to augment XML with dynamic mimic sites; "
-                f"falling back to task XML. error={exc}",
-                RuntimeWarning,
+        if task != "flat_terrain":
+            raise ValueError(
+                "[G1MocapTracking] This environment must load from "
+                f"{_STATIC_MOCAP_SCENE_XML}, but got task='{task}'."
             )
-            xml_path_to_load = base_xml_path
-            self._dynamic_mimic_site_names = []
+        if not _STATIC_MOCAP_SCENE_XML.exists():
+            raise FileNotFoundError(
+                f"Missing static mimic-site XML: {_STATIC_MOCAP_SCENE_XML}"
+            )
+        xml_path_to_load = _STATIC_MOCAP_SCENE_XML
 
-        super().__init__(
-            xml_path=str(xml_path_to_load),
-            config=config,
-            config_overrides=config_overrides,
+        # Do not call G1Env.__init__ directly: it loads assets by basename and can
+        # prefer packaged XML includes over local overrides.
+        mjx_env.MjxEnv.__init__(self, config, config_overrides)
+        self._mj_model = mujoco.MjModel.from_xml_string(
+            xml_path_to_load.read_text(),
+            assets=_get_assets_with_local_overrides(),
         )
-        if cleanup_xml_path is not None:
-            cleanup_xml_path.unlink(missing_ok=True)
+        self._mj_model.opt.timestep = self.sim_dt
+        if self._config.restricted_joint_range:
+            self._mj_model.jnt_range[1:] = consts.RESTRICTED_JOINT_RANGE
+            self._mj_model.actuator_ctrlrange[:] = consts.RESTRICTED_JOINT_RANGE
+        self._mjx_model = mjx.put_model(self._mj_model)
+        self._xml_path = str(xml_path_to_load)
+
         self._post_init()
 
     def _post_init(self) -> None:
@@ -696,61 +579,27 @@ class G1MocapTracking(g1_base.G1Env):
         self._default_motor_targets = jp.array(default_motor_targets)
 
     def _setup_mimic_sites(self) -> None:
-        mimic_site_regex = re.compile(str(self._config.deepmimic.mimic_site_regex))
         available_sites = [
             str(self._mj_model.site(i).name) for i in range(self._mj_model.nsite)
         ]
         available_set = set(available_sites)
-        mimic_site_names: list[str] = []
-        site_ids_list: list[int] = []
-        site_source = "dynamic_from_loco_xml"
+        missing_site_names = [
+            site_name
+            for site_name in _REQUIRED_MIMIC_SITE_NAMES
+            if site_name not in available_set
+        ]
+        if missing_site_names:
+            raise ValueError(
+                "Missing required mimic sites in loaded XML: "
+                f"{missing_site_names}. Available sites: {available_sites}"
+            )
 
-        if self._dynamic_mimic_site_names:
-            for site_name in self._dynamic_mimic_site_names:
-                if site_name in available_set:
-                    mimic_site_names.append(site_name)
-            mimic_site_names = list(dict.fromkeys(mimic_site_names))
-            site_ids_list = [self._mj_model.site(name).id for name in mimic_site_names]
-        else:
-            for site_id in range(self._mj_model.nsite):
-                site_name = str(self._mj_model.site(site_id).name)
-                if mimic_site_regex.fullmatch(site_name):
-                    mimic_site_names.append(site_name)
-                    site_ids_list.append(site_id)
-            site_source = f"regex='{mimic_site_regex.pattern}'"
-
-        if len(site_ids_list) < 2:
-            fallback_names = list(available_sites)
-            if len(fallback_names) < 2:
-                raise ValueError(
-                    "DeepMimic requires at least 2 sites for relative features. "
-                    f"Found {len(fallback_names)}. Available sites: {available_sites}"
-                )
-            mimic_site_names = fallback_names
-            site_ids_list = [self._mj_model.site(name).id for name in mimic_site_names]
-            site_source = "all_model_sites"
-
-        site_ids = np.array(site_ids_list, dtype=np.int32)
+        mimic_site_names = list(_REQUIRED_MIMIC_SITE_NAMES)
+        site_ids = np.array(
+            [self._mj_model.site(name).id for name in mimic_site_names], dtype=np.int32
+        )
         site_body_ids = self._mj_model.site_bodyid[site_ids].astype(np.int32)
         body_rootid = np.asarray(self._mj_model.body_rootid, dtype=np.int32)
-        body_parentid = np.asarray(self._mj_model.body_parentid, dtype=np.int32)
-
-        def _body_depth(body_id: int) -> int:
-            depth = 0
-            current = int(body_id)
-            while current > 0:
-                current = int(body_parentid[current])
-                depth += 1
-            return depth
-
-        # Make the first site a root-proximal anchor for relative features.
-        body_depths = np.array([_body_depth(int(b)) for b in site_body_ids])
-        anchor_idx = int(np.argmin(body_depths))
-        sorted_indices = np.argsort(site_ids)
-        order = [anchor_idx] + [int(i) for i in sorted_indices if int(i) != anchor_idx]
-        site_ids = site_ids[np.array(order, dtype=np.int32)]
-        site_body_ids = site_body_ids[np.array(order, dtype=np.int32)]
-        mimic_site_names = [mimic_site_names[i] for i in order]
 
         self._mimic_site_names = mimic_site_names
         self._mimic_site_ids_np = site_ids
@@ -764,7 +613,7 @@ class G1MocapTracking(g1_base.G1Env):
         print(
             "[G1MocapTracking] Discovered mimic sites from model: "
             f"count={len(mimic_site_names)}, anchor={mimic_site_names[0]}, "
-            f"source={site_source}"
+            "source=required_fixed_list"
         )
         print(f"[G1MocapTracking] mimic_site_names={mimic_site_names}")
 
