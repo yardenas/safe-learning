@@ -467,7 +467,14 @@ class G1MocapTracking(g1_base.G1Env):
         sample_info = {"reference_start_idx": jp.int32(0)}
         sample_contact = jp.zeros((self._feet_geom_id.shape[0],), dtype=jp.bool_)
         sample_obs = self._get_obs(sample_data, sample_info, sample_contact)
-        actual_total_dim = int(sample_obs.shape[0])
+        if not isinstance(sample_obs, dict) or "state" not in sample_obs:
+            warnings.warn(
+                "[G1MocapTracking] expected dict observation with 'state' key "
+                f"for shape validation, got type={type(sample_obs)}",
+                RuntimeWarning,
+            )
+            return
+        actual_total_dim = int(sample_obs["state"].shape[0])
 
         print(
             "[G1MocapTracking] obs dims: "
