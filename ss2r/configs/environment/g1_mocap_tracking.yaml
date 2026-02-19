@@ -6,68 +6,9 @@ task_params:
   ctrl_dt: 0.02
   sim_dt: 0.002
   episode_length: 1000
-  action_repeat: 1
-  action_scale: 0.5
-  history_len: 1
-  restricted_joint_range: false
-  soft_joint_pos_limit_factor: 0.95
-  reward_config:
-    scales:
-      qpos_reward: 1.0
-      qvel_reward: 1.0
-      rpos_reward: 1.0
-      rquat_reward: 1.0
-      rvel_reward: 1.0
-      out_of_bounds_reward: 1.0
-      joint_acc_reward: 1.0
-      joint_torque_reward: 1.0
-      action_rate_reward: 1.0
-      total_penalties: 1.0
-      mimic_total: 1.0
-  deepmimic:
+  loco:
+    dataset_name: dance1_subject3
     reference_source: hf
-    reference_filename: Lafan1/mocap/UnitreeG1/dance1_subject3.npz
     reference_repo_id: robfiras/loco-mujoco-datasets
     reference_repo_type: dataset
-    reference_max_steps: 2000
-    action_residual_scale: 0.35
-    mimic_site_regex: '.*_mimic$'
-    reward_sums:
-      qpos: 0.4
-      qvel: 0.2
-      rpos: 0.5
-      rquat: 0.3
-      rvel: 0.1
-    reward_exponents:
-      qpos: 10.0
-      qvel: 2.0
-      rpos: 100.0
-      rquat: 10.0
-      rvel: 0.1
-    penalties:
-      action_out_of_bounds: 0.01
-      joint_acc: 0.0
-      joint_torque: 0.0
-      action_rate: 0.0
-
-train_params:
-  floor_friction: [0.4, 1.0]
-  scale_friction: [0.9, 1.1]
-  scale_armature: [1.0, 1.05]
-  jitter_mass: [-0.05, 0.05]
-  scale_link_mass: [0.9, 1.1]
-  add_torso_mass: [-1.0, 1.0]
-  jitter_qpos0: [-0.05, 0.05]
-  Kd: [0.0, 0.0]
-  Kp: [0.0, 0.0]
-
-eval_params:
-  floor_friction: [0.4, 1.0]
-  scale_friction: [0.9, 1.1]
-  scale_armature: [1.0, 1.05]
-  jitter_mass: [-0.05, 0.05]
-  scale_link_mass: [0.9, 1.1]
-  add_torso_mass: [-1.0, 1.0]
-  jitter_qpos0: [-0.05, 0.05]
-  Kd: [0.0, 0.0]
-  Kp: [0.0, 0.0]
+    reference_dir: Lafan1/mocap/UnitreeG1

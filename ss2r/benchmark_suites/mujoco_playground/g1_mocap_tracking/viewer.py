@@ -22,7 +22,6 @@ import numpy as np
 from brax.training.acme import running_statistics
 from brax.training.agents.sac import checkpoint as sac_checkpoint
 from mujoco import MjData, mjx
-from mujoco_playground._src import collision
 from orbax import checkpoint as ocp
 
 import ss2r.algorithms.sac.networks as sac_networks
@@ -30,6 +29,9 @@ from ss2r.algorithms.hydrax_mpc.factory import make_task
 from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPC, TreeMPCParams
 from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.g1_mocap_env import (
     G1MocapTracking,
+)
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.trajectory import (
+    Trajectory,
 )
 
 
@@ -45,6 +47,142 @@ def _reference_action(env: G1MocapTracking, state: Any) -> jax.Array:
     del state
     # Actions are residuals around the mocap reference target.
     return jp.zeros((env.action_size,))
+
+
+@dataclass(frozen=True)
+class _ReplayReference:
+    name: str
+    source: str
+    qpos: jax.Array
+    qvel: jax.Array
+
+    @property
+    def n_frames(self) -> int:
+        return int(self.qpos.shape[0])
+
+
+def _normalize_reference_name(reference_name: str) -> str:
+    name = reference_name.strip().replace("\\", "/")
+    if not name:
+        raise ValueError("Empty mocap reference name.")
+    if name.endswith(".csv"):
+        name = name[:-4]
+    if not name.endswith(".npz"):
+        name = f"{name}.npz"
+    return name
+
+
+def _repo_filename_from_reference_name(reference_name: str, reference_dir: str) -> str:
+    normalized = _normalize_reference_name(reference_name)
+    if "/" in normalized:
+        return normalized
+    base_dir = reference_dir.strip().strip("/")
+    return f"{base_dir}/{normalized}" if base_dir else normalized
+
+
+def _resolve_local_reference_path(
+    reference_name: str, reference_dir: str
+) -> Path | None:
+    module_dir = Path(__file__).resolve().parent
+    normalized = _normalize_reference_name(reference_name)
+    repo_filename = _repo_filename_from_reference_name(reference_name, reference_dir)
+    candidates = [
+        Path(normalized),
+        Path(repo_filename),
+        module_dir / normalized,
+        module_dir / repo_filename,
+    ]
+    raw_path = Path(reference_name)
+    if raw_path.is_absolute():
+        candidates.insert(0, Path(_normalize_reference_name(str(raw_path))))
+        candidates.insert(0, raw_path)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _download_hf_reference(
+    *,
+    reference_name: str,
+    reference_dir: str,
+    repo_id: str,
+    repo_type: str,
+) -> Path:
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:  # pragma: no cover - optional runtime dependency.
+        raise ImportError(
+            "huggingface_hub is required to fetch replay mocap files from HF."
+        ) from exc
+
+    filename = _repo_filename_from_reference_name(reference_name, reference_dir)
+    file_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type=repo_type,
+    )
+    return Path(file_path).resolve()
+
+
+def _load_replay_reference(env: G1MocapTracking) -> _ReplayReference:
+    loco_cfg = getattr(env._config, "loco", None)
+    if loco_cfg is None:
+        raise ValueError("Missing `loco` config for replay mode.")
+
+    reference_name = str(getattr(loco_cfg, "dataset_name", "dance1_subject3"))
+    source_mode = str(getattr(loco_cfg, "reference_source", "hf")).strip().lower()
+    reference_dir = str(
+        getattr(loco_cfg, "reference_dir", "Lafan1/mocap/UnitreeG1")
+    ).strip()
+    repo_id = str(
+        getattr(loco_cfg, "reference_repo_id", "robfiras/loco-mujoco-datasets")
+    ).strip()
+    repo_type = str(getattr(loco_cfg, "reference_repo_type", "dataset")).strip()
+
+    if source_mode not in {"auto", "local", "hf"}:
+        raise ValueError(
+            f"Unsupported loco.reference_source='{source_mode}'. Use auto/local/hf."
+        )
+
+    file_path: Path | None
+    if source_mode == "local":
+        file_path = _resolve_local_reference_path(reference_name, reference_dir)
+        if file_path is None:
+            raise FileNotFoundError(
+                f"Could not find local mocap reference '{reference_name}'."
+            )
+    elif source_mode == "hf":
+        file_path = _download_hf_reference(
+            reference_name=reference_name,
+            reference_dir=reference_dir,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
+    else:
+        file_path = _resolve_local_reference_path(reference_name, reference_dir)
+        if file_path is None:
+            file_path = _download_hf_reference(
+                reference_name=reference_name,
+                reference_dir=reference_dir,
+                repo_id=repo_id,
+                repo_type=repo_type,
+            )
+
+    traj = Trajectory.load(str(file_path), backend=np)
+    qpos = jp.asarray(np.asarray(traj.data.qpos), dtype=jp.float32)
+    qvel = jp.asarray(np.asarray(traj.data.qvel), dtype=jp.float32)
+    if qpos.ndim != 2 or qvel.ndim != 2:
+        raise ValueError(f"Invalid reference trajectory shape in {file_path}.")
+    if qpos.shape[0] != qvel.shape[0]:
+        raise ValueError(f"Mismatched qpos/qvel length in {file_path}.")
+    if qpos.shape[0] <= 0:
+        raise ValueError(f"Empty reference trajectory in {file_path}.")
+
+    loaded_from = str(file_path)
+    return _ReplayReference(
+        name=reference_name, source=loaded_from, qpos=qpos, qvel=qvel
+    )
 
 
 @dataclass(frozen=True)
@@ -127,7 +265,13 @@ def _extract_env_overrides_from_run_config(
     task_params = _cfg_get(run_config, "environment.task_params", {})
     if not isinstance(task_params, Mapping):
         return {}
-    return _flatten_nested_dict(task_params)
+    flattened = _flatten_nested_dict(task_params)
+    allowed_roots = {"ctrl_dt", "sim_dt", "episode_length"}
+    return {
+        k: v
+        for k, v in flattened.items()
+        if k in allowed_roots or k.startswith("loco.")
+    }
 
 
 def _download_wandb_checkpoint_and_config(
@@ -330,85 +474,50 @@ def _reference_action_sequence(
     return jp.zeros((num_actions, env.action_size))
 
 
-def _reference_replay_step(env: G1MocapTracking, state: Any) -> Any:
-    """Override the simulator state with the mocap reference at the next control tick."""
-    ref_idx_target = env._reference_index(
-        state.data.time + env.dt, state.info["reference_start_idx"]
-    )
-    q_ref = env._reference[ref_idx_target]
-    qvel_ref = env._reference_qvel[ref_idx_target]
-    u_ref = q_ref[7 : 7 + env.action_size]
+def _reference_replay_step(
+    env: G1MocapTracking,
+    state: Any,
+    reference: _ReplayReference,
+    frame_index: int,
+) -> tuple[Any, int]:
+    """Override simulator state from an explicit mocap trajectory frame."""
+    idx = frame_index % reference.n_frames
+    q_ref = reference.qpos[idx]
+    qvel_ref = reference.qvel[idx]
+    ctrl_ref = q_ref[7 : 7 + env.action_size]
 
     data = state.data.replace(
         qpos=q_ref,
         qvel=qvel_ref,
-        ctrl=u_ref,
+        ctrl=ctrl_ref,
         time=state.data.time + env.dt,
     )
     data = mjx.forward(env.mjx_model, data)
 
-    contact = jp.array(
-        [
-            collision.geoms_colliding(data, geom_id, env._floor_geom_id)
-            for geom_id in env._feet_geom_id
-        ]
-    )
-    zero_action = jp.zeros((env.action_size,))
-    state.info["motor_targets"] = u_ref
-    state.info["last_action"] = zero_action
-    state.info["phase"] = env._phase_from_time(data.time)
-    state.info["command"] = env._command_from_reference_index(ref_idx_target)
+    done_bool = (frame_index + 1) >= reference.n_frames
+    next_frame_index = 0 if done_bool else frame_index + 1
 
-    done = env._get_termination(data)
-    rewards = env._get_reward(
+    info = dict(state.info)
+    info["replay_frame"] = jp.asarray(idx, dtype=jp.int32)
+
+    next_state = state.replace(
         data=data,
-        action=zero_action,
-        info=state.info,
-        metrics=state.metrics,
-        done=done,
-        first_contact=jp.zeros((2,)),
-        contact=contact,
+        reward=jp.zeros_like(state.reward),
+        done=jp.asarray(done_bool, dtype=state.done.dtype),
+        info=info,
     )
-    reward = rewards["mimic_total"] * env.dt
-
-    state.info["last_qvel"] = data.qvel
-    for key, value in rewards.items():
-        state.metrics[f"reward/{key}"] = value
-
-    obs = env._get_obs(data, state.info, contact)
-    done = done.astype(reward.dtype)
-    return state.replace(data=data, obs=obs, reward=reward, done=done)
+    return next_state, next_frame_index
 
 
-def _active_reward_terms(env: G1MocapTracking) -> list[str]:
-    preferred = [
-        "mimic_total",
-        "qpos_reward",
-        "qvel_reward",
-        "rpos_reward",
-        "rquat_reward",
-        "rvel_reward",
-        "total_penalties",
-    ]
-    terms: list[str] = []
-    for key in preferred:
-        if (
-            key in env._config.reward_config.scales
-            and abs(float(env._config.reward_config.scales[key])) > 0.0
-        ):
-            terms.append(key)
-    return terms
-
-
-def _mocap_progress(env: G1MocapTracking, state: Any) -> tuple[int, int, int, float]:
-    n_frames = int(env._reference.shape[0])
-    start_idx = int(np.asarray(state.info["reference_start_idx"]).item())
-    curr_idx = int(
-        np.asarray(
-            env._reference_index(state.data.time, state.info["reference_start_idx"])
-        ).item()
-    )
-    rel_idx = (curr_idx - start_idx) % n_frames
+def _mocap_progress(
+    state: Any,
+    reference: _ReplayReference | None,
+) -> tuple[int, int, int, float]:
+    if reference is None:
+        return 0, 0, 1, 0.0
+    curr_idx = int(np.asarray(state.info.get("replay_frame", 0)).item())
+    n_frames = int(reference.n_frames)
+    rel_idx = curr_idx % n_frames
     frac = float(rel_idx) / float(max(n_frames - 1, 1))
     return curr_idx, rel_idx, n_frames, frac
 
@@ -420,35 +529,27 @@ def _progress_bar(frac: float, width: int = 24) -> str:
 
 
 def _print_status(
-    env: G1MocapTracking,
     state: Any,
     step_count: int,
     episode_idx: int,
     episode_step: int,
     episode_return: float,
-    reward_terms: list[str],
+    replay_reference: _ReplayReference | None,
 ) -> None:
     reward = float(np.asarray(state.reward).item())
     done = bool(np.asarray(state.done).item())
-    curr_idx, rel_idx, n_frames, frac = _mocap_progress(env, state)
-    bar = _progress_bar(frac)
-    print(
+    line = (
         f"[ep={episode_idx} step={episode_step} global={step_count}] "
-        f"r={reward:+.5f} R={episode_return:+.3f} done={done} "
-        f"mocap={curr_idx}/{n_frames - 1} rel={rel_idx} {frac * 100:5.1f}% [{bar}]"
+        f"r={reward:+.5f} R={episode_return:+.3f} done={done}"
     )
-
-    parts: list[str] = []
-    qpos_joint = np.asarray(state.data.qpos[7 : 7 + env.action_size])
-    qpos_ref = np.asarray(env._reference[curr_idx, 7 : 7 + env.action_size])
-    qpos_track_mse = float(np.mean(np.square(qpos_joint - qpos_ref)))
-    for term in reward_terms:
-        metric_key = f"reward/{term}"
-        value = float(np.asarray(state.metrics.get(metric_key, 0.0)).item())
-        parts.append(f"{term}={value:+.4f}")
-    parts.append(f"qpos_track_mse={qpos_track_mse:.5f}")
-    if parts:
-        print("  rewards:", " | ".join(parts))
+    if replay_reference is not None:
+        curr_idx, rel_idx, n_frames, frac = _mocap_progress(state, replay_reference)
+        bar = _progress_bar(frac)
+        line += (
+            f" mocap={curr_idx}/{n_frames - 1} rel={rel_idx} "
+            f"{frac * 100:5.1f}% [{bar}]"
+        )
+    print(line)
 
 
 def _add_text(
@@ -478,14 +579,12 @@ def _add_text(
 
 
 def _hud_lines(
-    env: G1MocapTracking,
     state: Any,
     step_count: int,
     episode_idx: int,
     episode_step: int,
     episode_return: float,
-    reward_terms: list[str],
-    paused: bool,
+    replay_reference: _ReplayReference | None,
 ) -> list[str]:
     reward = float(np.asarray(state.reward).item())
     done = bool(np.asarray(state.done).item())
@@ -497,43 +596,23 @@ def _hud_lines(
         ),
         f"time={sim_time:.4f}s",
     ]
-    curr_idx, rel_idx, n_frames, frac = _mocap_progress(env, state)
-    bar = _progress_bar(frac, width=16)
-    lines.extend(
-        [
-            (
-                f"mocap {curr_idx}/{n_frames - 1} rel={rel_idx} "
-                f"{frac * 100:4.1f}% [{bar}]"
-            ),
-        ]
-    )
-
-    qpos_joint = np.asarray(state.data.qpos[7 : 7 + env.action_size])
-    qpos_ref = np.asarray(env._reference[curr_idx, 7 : 7 + env.action_size])
-    qpos_track_mse = float(np.mean(np.square(qpos_joint - qpos_ref)))
-    lines.append(f"qpos_track_mse={qpos_track_mse:.5f}")
-
-    # Show selected DeepMimic reward components.
-    term_values: list[tuple[str, float]] = []
-    for term in reward_terms:
-        metric_key = f"reward/{term}"
-        val = float(np.asarray(state.metrics.get(metric_key, 0.0)).item())
-        term_values.append((term, val))
-    for term, value in term_values:
-        lines.append(f"{term}={value:+.4f}")
+    if replay_reference is not None:
+        curr_idx, rel_idx, n_frames, frac = _mocap_progress(state, replay_reference)
+        bar = _progress_bar(frac, width=16)
+        lines.append(
+            f"mocap {curr_idx}/{n_frames - 1} rel={rel_idx} {frac * 100:4.1f}% [{bar}]"
+        )
     return lines
 
 
 def _update_hud_labels(
-    env: G1MocapTracking,
     viewer: mujoco.viewer.Handle,
     state: Any,
     step_count: int,
     episode_idx: int,
     episode_step: int,
     episode_return: float,
-    reward_terms: list[str],
-    paused: bool,
+    replay_reference: _ReplayReference | None,
 ) -> None:
     if viewer.user_scn is None:
         return
@@ -541,14 +620,12 @@ def _update_hud_labels(
     with viewer.lock():
         viewer.user_scn.ngeom = 0
         lines = _hud_lines(
-            env=env,
             state=state,
             step_count=step_count,
             episode_idx=episode_idx,
             episode_step=episode_step,
             episode_return=episode_return,
-            reward_terms=reward_terms,
-            paused=paused,
+            replay_reference=replay_reference,
         )
         for i, line in enumerate(lines):
             base_z = 0.60
@@ -631,10 +708,15 @@ def run_viewer(
         if effective_config_overrides
         else None
     )
+    replay_reference = _load_replay_reference(env) if action_mode == "replay" else None
+    if replay_reference is not None:
+        print(
+            f"[viewer] replay reference='{replay_reference.name}' "
+            f"frames={replay_reference.n_frames} source={replay_reference.source}"
+        )
     rng = jax.random.PRNGKey(seed)
     reset_fn = jax.jit(env.reset)
     step_fn = jax.jit(env.step)
-    replay_step_fn = jax.jit(lambda s: _reference_replay_step(env, s))
 
     rng, reset_key = jax.random.split(rng)
     state = reset_fn(reset_key)
@@ -649,7 +731,7 @@ def run_viewer(
     episode_idx = 0
     episode_step = 0
     episode_return = 0.0
-    reward_terms = _active_reward_terms(env)
+    replay_frame_index = 0
     ui_state = {"paused": False, "request_reset": False}
     planner = None
     planner_params = None
@@ -723,6 +805,7 @@ def run_viewer(
                 episode_idx += 1
                 episode_step = 0
                 episode_return = 0.0
+                replay_frame_index = 0
                 rng, reset_key = jax.random.split(rng)
                 state = reset_fn(reset_key)
                 if action_mode == "tree_mpc":
@@ -739,7 +822,10 @@ def run_viewer(
 
             if not ui_state["paused"]:
                 if action_mode == "replay":
-                    state = replay_step_fn(state)
+                    assert replay_reference is not None
+                    state, replay_frame_index = _reference_replay_step(
+                        env, state, replay_reference, replay_frame_index
+                    )
                 else:
                     if action_mode == "zero":
                         action = zero_action
@@ -767,29 +853,28 @@ def run_viewer(
 
             if print_every > 0 and step_count % print_every == 0:
                 _print_status(
-                    env=env,
                     state=state,
                     step_count=step_count,
                     episode_idx=episode_idx,
                     episode_step=episode_step,
                     episode_return=episode_return,
-                    reward_terms=reward_terms,
+                    replay_reference=replay_reference,
                 )
 
             done_flag = bool(np.asarray(state.done).item())
             if reset_on_done and done_flag:
                 _print_status(
-                    env=env,
                     state=state,
                     step_count=step_count,
                     episode_idx=episode_idx,
                     episode_step=episode_step,
                     episode_return=episode_return,
-                    reward_terms=reward_terms,
+                    replay_reference=replay_reference,
                 )
                 episode_idx += 1
                 episode_step = 0
                 episode_return = 0.0
+                replay_frame_index = 0
                 rng, reset_key = jax.random.split(rng)
                 state = reset_fn(reset_key)
                 if action_mode == "tree_mpc":
@@ -805,15 +890,13 @@ def run_viewer(
                     planner_params = planner_params.replace(actions=warmstart_actions)
 
             _update_hud_labels(
-                env=env,
                 viewer=viewer,
                 state=state,
                 step_count=step_count,
                 episode_idx=episode_idx,
                 episode_step=episode_step,
                 episode_return=episode_return,
-                reward_terms=reward_terms,
-                paused=ui_state["paused"],
+                replay_reference=replay_reference,
             )
             mjx.get_data_into(mj_data, mj_model, state.data)
             viewer.sync()
@@ -876,13 +959,12 @@ def main() -> None:
         help="Sample SAC actions stochastically in policy mode.",
     )
     parser.add_argument(
-        "--reference-filename",
+        "--reference-name",
         type=str,
         default=None,
         help=(
-            "Mocap reference filename/path. "
-            "Supports local paths or Hugging Face dataset paths like "
-            "'Lafan1/mocap/UnitreeG1/walk1_subject1.npz'."
+            "Mocap reference name/path (e.g. 'dance1_subject3' or "
+            "'Lafan1/mocap/UnitreeG1/dance1_subject3.npz')."
         ),
     )
     parser.add_argument(
@@ -903,6 +985,12 @@ def main() -> None:
         type=str,
         default=None,
         help="Hugging Face repo type (defaults to dataset).",
+    )
+    parser.add_argument(
+        "--reference-dir",
+        type=str,
+        default=None,
+        help="Directory prefix inside the HF dataset repository.",
     )
     parser.add_argument("--print-every", type=int, default=0)
     parser.add_argument("--tree-num-samples", type=int, default=128)
@@ -928,14 +1016,16 @@ def main() -> None:
     args = parser.parse_args()
 
     config_overrides = _parse_config_overrides(args.config_override)
-    if args.reference_filename is not None:
-        config_overrides["deepmimic.reference_filename"] = args.reference_filename
+    if args.reference_name is not None:
+        config_overrides["loco.dataset_name"] = args.reference_name
     if args.reference_source is not None:
-        config_overrides["deepmimic.reference_source"] = args.reference_source
+        config_overrides["loco.reference_source"] = args.reference_source
     if args.reference_repo_id is not None:
-        config_overrides["deepmimic.reference_repo_id"] = args.reference_repo_id
+        config_overrides["loco.reference_repo_id"] = args.reference_repo_id
     if args.reference_repo_type is not None:
-        config_overrides["deepmimic.reference_repo_type"] = args.reference_repo_type
+        config_overrides["loco.reference_repo_type"] = args.reference_repo_type
+    if args.reference_dir is not None:
+        config_overrides["loco.reference_dir"] = args.reference_dir
 
     run_viewer(
         seed=args.seed,

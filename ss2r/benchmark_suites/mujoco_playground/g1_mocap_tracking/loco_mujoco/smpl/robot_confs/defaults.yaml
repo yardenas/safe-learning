@@ -1,0 +1,88 @@
+site_joint_matches:
+  pelvis_mimic:
+    smpl_joint: "Pelvis"
+    equality_constraint_type: mjEQ_WELD   # mJEQ_CONNECT (only translation), mjEQ_WELD (translation and rotation)
+    torque_scale: 1.0                     # only for mjEQ_WELD, defines how much the optimizaiton cares of rotatation vs translation. 0.0 means no rotational importance.
+  left_hip_mimic:
+    smpl_joint: "L_Hip"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  left_knee_mimic:
+    smpl_joint: "L_Knee"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  left_foot_mimic:
+    smpl_joint: "L_Ankle"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  right_hip_mimic:
+    smpl_joint: "R_Hip"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  right_knee_mimic:
+    smpl_joint: "R_Knee"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  right_foot_mimic:
+    smpl_joint: "R_Ankle"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  left_shoulder_mimic:
+    smpl_joint: "L_Shoulder"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  left_elbow_mimic:
+    smpl_joint: "L_Elbow"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  left_hand_mimic:
+    smpl_joint: "L_Wrist"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  right_shoulder_mimic:
+    smpl_joint: "R_Shoulder"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  right_elbow_mimic:
+    smpl_joint: "R_Elbow"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  right_hand_mimic:
+    smpl_joint: "R_Wrist"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  upper_body_mimic:
+    smpl_joint: "Chest"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+  head_mimic:
+    smpl_joint: "Head"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 1.0
+
+
+optimization_params:
+  torch_device: "cpu"
+  shape_iterations: 1000
+  motion_iterations: 25
+  shape_lr: 0.05
+  disable_joint_limits: False
+  disable_collisions: False
+  z_offset_feet: 0.0
+  skip_frames: 4
+  init_motion_iterations: 1000
+  disable_joint_limits_on_initialization: True
+  disable_collisions_on_initialization: True
+  pose_lr: 0.005   # used in robot2robot retargeting
+  pose_iterations: 400  # used in robot2robot retargeting
+  smoothing_kernel_size: 3  # used in robot2robot retargeting
+  smoothing_sigma: 0.5  # used in robot2robot retargeting
+  pos_loss_weight: 1.0  # used in robot2robot retargeting
+  rot_loss_weight: 0.1  # used in robot2robot retargeting
+
+
+
+robot_pose_modifier: []
+
+env_params:
+  n_substeps: 25
