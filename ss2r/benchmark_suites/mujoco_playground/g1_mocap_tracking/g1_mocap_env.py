@@ -200,6 +200,10 @@ def default_config() -> config_dict.ConfigDict:
             ),
         ),
         deepmimic=config_dict.create(
+            reference_source="hf",
+            reference_filename="Lafan1/mocap/UnitreeG1/dance1_subject3.npz",
+            reference_repo_id="robfiras/loco-mujoco-datasets",
+            reference_repo_type="dataset",
             reference_max_steps=2000,
             action_residual_scale=0.35,
             mimic_site_regex=r".*_mimic$",
@@ -771,8 +775,84 @@ class G1MocapTracking(g1_base.G1Env):
 
         return qpos_out, qvel_out, target_fps
 
+    def _resolve_reference_path(self) -> Path:
+        deepmimic_cfg = self._config.deepmimic
+        source = str(getattr(deepmimic_cfg, "reference_source", "auto")).lower()
+        filename = str(
+            getattr(deepmimic_cfg, "reference_filename", "walk1_subject1.npz")
+        )
+        repo_id = str(
+            getattr(deepmimic_cfg, "reference_repo_id", "robfiras/loco-mujoco-datasets")
+        )
+        repo_type = str(getattr(deepmimic_cfg, "reference_repo_type", "dataset"))
+
+        raw_path = Path(filename).expanduser()
+        local_candidates: list[Path] = []
+        if raw_path.is_absolute():
+            local_candidates.append(raw_path)
+        else:
+            local_candidates.extend(
+                [
+                    Path.cwd() / raw_path,
+                    Path(__file__).parent / raw_path,
+                    raw_path,
+                    Path(__file__).with_name(raw_path.name),
+                ]
+            )
+
+        # Keep order and deduplicate.
+        dedup_candidates: list[Path] = []
+        seen: set[str] = set()
+        for candidate in local_candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup_candidates.append(candidate)
+
+        if source not in {"auto", "local", "hf"}:
+            raise ValueError(
+                f"Invalid deepmimic.reference_source='{source}'. "
+                "Expected one of {'auto', 'local', 'hf'}."
+            )
+
+        if source in {"auto", "local"}:
+            for candidate in dedup_candidates:
+                if candidate.exists():
+                    return candidate
+
+        if source in {"auto", "hf"}:
+            try:
+                from huggingface_hub import hf_hub_download
+            except ImportError as exc:
+                if source == "hf":
+                    raise ImportError(
+                        "huggingface_hub is required when deepmimic.reference_source='hf'."
+                    ) from exc
+            else:
+                try:
+                    hf_path = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        repo_type=repo_type,
+                    )
+                    return Path(hf_path)
+                except Exception as exc:
+                    if source == "hf":
+                        raise RuntimeError(
+                            "Failed to download reference from Hugging Face: "
+                            f"repo_id={repo_id}, repo_type={repo_type}, filename={filename}"
+                        ) from exc
+
+        tried = ", ".join(str(p) for p in dedup_candidates)
+        raise FileNotFoundError(
+            "Could not resolve mocap reference file. "
+            f"source={source}, filename={filename}, local_candidates=[{tried}]"
+        )
+
     def _load_mocap_reference(self) -> None:
-        reference_path = Path(__file__).with_name("walk1_subject1.npz")
+        reference_path = self._resolve_reference_path()
+        print(f"[G1MocapTracking] Loading mocap reference: {reference_path}")
         with np.load(reference_path, allow_pickle=True) as npz_file:
             reference = np.asarray(npz_file["qpos"], dtype=np.float32)
             reference_qvel = np.asarray(npz_file["qvel"], dtype=np.float32)

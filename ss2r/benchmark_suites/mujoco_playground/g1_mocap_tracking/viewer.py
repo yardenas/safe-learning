@@ -875,6 +875,35 @@ def main() -> None:
         action="store_true",
         help="Sample SAC actions stochastically in policy mode.",
     )
+    parser.add_argument(
+        "--reference-filename",
+        type=str,
+        default=None,
+        help=(
+            "Mocap reference filename/path. "
+            "Supports local paths or Hugging Face dataset paths like "
+            "'Lafan1/mocap/UnitreeG1/walk1_subject1.npz'."
+        ),
+    )
+    parser.add_argument(
+        "--reference-source",
+        type=str,
+        default=None,
+        choices=["auto", "local", "hf"],
+        help="Reference lookup mode for mocap npz: auto, local, or hf.",
+    )
+    parser.add_argument(
+        "--reference-repo-id",
+        type=str,
+        default=None,
+        help="Hugging Face dataset repo id for mocap files.",
+    )
+    parser.add_argument(
+        "--reference-repo-type",
+        type=str,
+        default=None,
+        help="Hugging Face repo type (defaults to dataset).",
+    )
     parser.add_argument("--print-every", type=int, default=0)
     parser.add_argument("--tree-num-samples", type=int, default=128)
     parser.add_argument("--tree-horizon", type=int, default=25)
@@ -899,6 +928,15 @@ def main() -> None:
     args = parser.parse_args()
 
     config_overrides = _parse_config_overrides(args.config_override)
+    if args.reference_filename is not None:
+        config_overrides["deepmimic.reference_filename"] = args.reference_filename
+    if args.reference_source is not None:
+        config_overrides["deepmimic.reference_source"] = args.reference_source
+    if args.reference_repo_id is not None:
+        config_overrides["deepmimic.reference_repo_id"] = args.reference_repo_id
+    if args.reference_repo_type is not None:
+        config_overrides["deepmimic.reference_repo_type"] = args.reference_repo_type
+
     run_viewer(
         seed=args.seed,
         action_mode=args.action_mode,
