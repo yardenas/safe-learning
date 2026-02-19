@@ -1,7 +1,9 @@
 """DeepMimic mocap tracking task for Unitree G1."""
 
 import re
+import tempfile
 import warnings
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -15,6 +17,42 @@ from mujoco_playground._src import collision, mjx_env
 from mujoco_playground._src.collision import geoms_colliding
 from mujoco_playground._src.locomotion.g1 import base as g1_base
 from mujoco_playground._src.locomotion.g1 import g1_constants as consts
+
+_VENDORED_LOCO_G1_MIMIC_SITES: tuple[tuple[str, dict[str, str]], ...] = (
+    ("pelvis", {"name": "pelvis_mimic"}),
+    ("left_hip_pitch_link", {"name": "left_hip_mimic", "pos": "0.0 0.05 0.0"}),
+    ("left_knee_link", {"name": "left_knee_mimic", "pos": "0.0 0.0 0.0"}),
+    (
+        "left_ankle_roll_link",
+        {"name": "left_foot_mimic", "pos": "0.035 0.0 -0.01"},
+    ),
+    ("right_hip_pitch_link", {"name": "right_hip_mimic", "pos": "0.0 -0.05 0.0"}),
+    ("right_knee_link", {"name": "right_knee_mimic", "pos": "0.0 0.0 0.0"}),
+    (
+        "right_ankle_roll_link",
+        {"name": "right_foot_mimic", "pos": "0.035 0.0 -0.01"},
+    ),
+    ("torso_link", {"name": "upper_body_mimic", "pos": "0.01 0.0 0.2"}),
+    ("torso_link", {"name": "head_mimic", "pos": "0.01 0.0 0.4"}),
+    ("left_shoulder_roll_link", {"name": "left_shoulder_mimic"}),
+    ("left_elbow_link", {"name": "left_elbow_mimic"}),
+    (
+        "left_wrist_roll_rubber_hand",
+        {"name": "left_hand_mimic", "pos": "0.2 0.0 0.0"},
+    ),
+    ("right_shoulder_roll_link", {"name": "right_shoulder_mimic"}),
+    ("right_elbow_link", {"name": "right_elbow_mimic"}),
+    (
+        "right_wrist_roll_rubber_hand",
+        {"name": "right_hand_mimic", "pos": "0.2 0.0 0.0"},
+    ),
+)
+
+# Loco model and mujoco_playground model differ in wrist body naming.
+_MIMIC_SITE_BODY_REMAP: dict[str, str] = {
+    "left_wrist_roll_rubber_hand": "left_wrist_roll_link",
+    "right_wrist_roll_rubber_hand": "right_wrist_roll_link",
+}
 
 
 def _atleast_3d(
@@ -232,17 +270,136 @@ def default_config() -> config_dict.ConfigDict:
 
 
 class G1MocapTracking(g1_base.G1Env):
+    @staticmethod
+    def _is_mimic_site_element(site_elem: ET.Element) -> bool:
+        name = str(site_elem.attrib.get("name", ""))
+        site_class = str(site_elem.attrib.get("class", ""))
+        return name.endswith("_mimic") or site_class == "mimic"
+
+    @classmethod
+    def _vendored_mimic_sites_by_body(cls) -> dict[str, list[dict[str, str]]]:
+        source_sites_by_body: dict[str, list[dict[str, str]]] = {}
+        for body_name, attrs in _VENDORED_LOCO_G1_MIMIC_SITES:
+            mapped_body = _MIMIC_SITE_BODY_REMAP.get(body_name, body_name)
+            attrs_with_size = dict(attrs)
+            if "size" not in attrs_with_size:
+                attrs_with_size["size"] = "0.01"
+            source_sites_by_body.setdefault(mapped_body, []).append(attrs_with_size)
+        return source_sites_by_body
+
+    @staticmethod
+    def _absolutize_xml_paths(root: ET.Element, xml_dir: Path) -> None:
+        for include_elem in root.findall(".//include"):
+            include_path = include_elem.attrib.get("file", "")
+            if include_path and not Path(include_path).is_absolute():
+                include_elem.attrib["file"] = str((xml_dir / include_path).resolve())
+
+        compiler_elem = root.find("compiler")
+        if compiler_elem is None:
+            return
+        for attr in ("meshdir", "texturedir"):
+            rel_path = compiler_elem.attrib.get(attr, "")
+            if rel_path and not Path(rel_path).is_absolute():
+                compiler_elem.attrib[attr] = str((xml_dir / rel_path).resolve())
+
+    @classmethod
+    def _create_augmented_task_xml(
+        cls,
+        task_xml_path: Path,
+        config: config_dict.ConfigDict,
+        config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]],
+    ) -> tuple[Path, list[str]]:
+        del config, config_overrides
+        source_sites_by_body = cls._vendored_mimic_sites_by_body()
+
+        if not source_sites_by_body:
+            raise ValueError(
+                "No vendored mimic proxy sites are available for dynamic injection."
+            )
+
+        target_tree = ET.parse(task_xml_path)
+        target_root = target_tree.getroot()
+
+        # Remove existing mimic proxy sites from target XML.
+        removed_sites = 0
+        for body_elem in target_root.iter("body"):
+            for site_elem in list(body_elem.findall("site")):
+                if cls._is_mimic_site_element(site_elem):
+                    body_elem.remove(site_elem)
+                    removed_sites += 1
+
+        target_body_by_name: dict[str, ET.Element] = {}
+        for body_elem in target_root.iter("body"):
+            body_name = body_elem.attrib.get("name", "")
+            if body_name:
+                target_body_by_name[body_name] = body_elem
+
+        added_site_names: list[str] = []
+        missing_bodies: list[str] = []
+        for body_name, sites in source_sites_by_body.items():
+            target_body = target_body_by_name.get(body_name)
+            if target_body is None:
+                missing_bodies.append(body_name)
+                continue
+            for site_attrs in sites:
+                ET.SubElement(target_body, "site", site_attrs)
+                added_site_names.append(site_attrs["name"])
+
+        cls._absolutize_xml_paths(target_root, task_xml_path.parent)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".xml",
+            prefix="g1_mocap_augmented_",
+            delete=False,
+        ) as tmp_file:
+            target_tree.write(tmp_file.name, encoding="unicode")
+            augmented_path = Path(tmp_file.name)
+
+        print(
+            "[G1MocapTracking] dynamic mimic sites: "
+            f"source=vendored_loco_g1_23dof, removed={removed_sites}, added={len(added_site_names)}"
+        )
+        if missing_bodies:
+            print(
+                "[G1MocapTracking] source bodies missing in target model: "
+                f"{sorted(set(missing_bodies))}"
+            )
+
+        return augmented_path, added_site_names
+
     def __init__(
         self,
         task: str = "flat_terrain",
         config: config_dict.ConfigDict = default_config(),
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
     ):
+        base_xml_path = Path(consts.task_to_xml(task).as_posix())
+        xml_path_to_load = base_xml_path
+        cleanup_xml_path: Path | None = None
+        self._dynamic_mimic_site_names: list[str] = []
+        try:
+            (
+                xml_path_to_load,
+                self._dynamic_mimic_site_names,
+            ) = self._create_augmented_task_xml(base_xml_path, config, config_overrides)
+            cleanup_xml_path = xml_path_to_load
+        except Exception as exc:
+            warnings.warn(
+                "[G1MocapTracking] Failed to augment XML with dynamic mimic sites; "
+                f"falling back to task XML. error={exc}",
+                RuntimeWarning,
+            )
+            xml_path_to_load = base_xml_path
+            self._dynamic_mimic_site_names = []
+
         super().__init__(
-            xml_path=consts.task_to_xml(task).as_posix(),
+            xml_path=str(xml_path_to_load),
             config=config,
             config_overrides=config_overrides,
         )
+        if cleanup_xml_path is not None:
+            cleanup_xml_path.unlink(missing_ok=True)
         self._post_init()
 
     def _post_init(self) -> None:
@@ -268,6 +425,7 @@ class G1MocapTracking(g1_base.G1Env):
         self._precompute_reference_features()
         self._validate_indices_and_shapes()
         self._init_grounded_reset_from_reference()
+        self._validate_observation_dimensions()
 
         self._reward_metric_keys = [
             "qpos_reward",
@@ -282,6 +440,57 @@ class G1MocapTracking(g1_base.G1Env):
             "total_penalties",
             "mimic_total",
         ]
+
+    def _validate_observation_dimensions(self) -> None:
+        proprio_dim = int(self._deepmimic_qpos_ind_np.shape[0]) + int(
+            self._deepmimic_qvel_ind_np.shape[0]
+        )
+        n_sites = int(self._mimic_site_ids_np.shape[0])
+        n_rel_sites = max(0, n_sites - 1)
+        current_site_dim = n_rel_sites * (3 + 3 + 6)
+
+        target_dim = (
+            int(self._reference_goal_qpos.shape[1])
+            + int(self._reference_goal_qvel.shape[1])
+            + int(self._reference_rpos.shape[1])
+            + int(self._reference_rquat.shape[1])
+            + int(self._reference_rvel.shape[1])
+        )
+        expected_total_dim = proprio_dim + current_site_dim + target_dim
+
+        sample_data = mjx_env.init(
+            self.mjx_model,
+            qpos=self._reference[0],
+            qvel=self._reference_qvel[0],
+            ctrl=self._default_motor_targets,
+        )
+        sample_info = {"reference_start_idx": jp.int32(0)}
+        sample_contact = jp.zeros((self._feet_geom_id.shape[0],), dtype=jp.bool_)
+        sample_obs = self._get_obs(sample_data, sample_info, sample_contact)
+        actual_total_dim = int(sample_obs.shape[0])
+
+        print(
+            "[G1MocapTracking] obs dims: "
+            f"mimic_sites={n_sites}, rel_sites={n_rel_sites}, "
+            f"proprio={proprio_dim}, current_site={current_site_dim}, "
+            f"target={target_dim}, expected_total={expected_total_dim}, "
+            f"actual_total={actual_total_dim}"
+        )
+
+        if actual_total_dim != expected_total_dim:
+            warnings.warn(
+                "[G1MocapTracking] observation dimension mismatch: "
+                f"expected_total={expected_total_dim}, actual_total={actual_total_dim}",
+                RuntimeWarning,
+            )
+
+        # DeepMimic GoalTrajMimic convention with UnitreeG1 + 15 mimic sites.
+        if n_sites == 15 and expected_total_dim != 450:
+            warnings.warn(
+                "[G1MocapTracking] expected 450-dim observation for 15 mimic sites, "
+                f"got {expected_total_dim}.",
+                RuntimeWarning,
+            )
 
     def _warn_if_duplicates(self, name: str, values: np.ndarray) -> None:
         unique_count = len(np.unique(values))
@@ -484,40 +693,35 @@ class G1MocapTracking(g1_base.G1Env):
         available_sites = [
             str(self._mj_model.site(i).name) for i in range(self._mj_model.nsite)
         ]
+        available_set = set(available_sites)
         mimic_site_names: list[str] = []
         site_ids_list: list[int] = []
-        for site_id in range(self._mj_model.nsite):
-            site_name = str(self._mj_model.site(site_id).name)
-            if mimic_site_regex.fullmatch(site_name):
-                mimic_site_names.append(site_name)
-                site_ids_list.append(site_id)
+        site_source = "dynamic_from_loco_xml"
 
-        site_source = f"regex='{mimic_site_regex.pattern}'"
+        if self._dynamic_mimic_site_names:
+            for site_name in self._dynamic_mimic_site_names:
+                if site_name in available_set:
+                    mimic_site_names.append(site_name)
+            mimic_site_names = list(dict.fromkeys(mimic_site_names))
+            site_ids_list = [self._mj_model.site(name).id for name in mimic_site_names]
+        else:
+            for site_id in range(self._mj_model.nsite):
+                site_name = str(self._mj_model.site(site_id).name)
+                if mimic_site_regex.fullmatch(site_name):
+                    mimic_site_names.append(site_name)
+                    site_ids_list.append(site_id)
+            site_source = f"regex='{mimic_site_regex.pattern}'"
+
         if len(site_ids_list) < 2:
-            available_set = set(available_sites)
-            preferred_site_names = (
-                list(consts.FEET_SITES)
-                + list(consts.HAND_SITES)
-                + ["imu_in_pelvis", "imu_in_torso"]
-            )
-            fallback_names = [
-                name for name in preferred_site_names if name in available_set
-            ]
-            fallback_names = list(dict.fromkeys(fallback_names))
-            if len(fallback_names) < 2:
-                fallback_names = list(available_sites)
-                site_source = "all_model_sites"
-            else:
-                site_source = "preferred_end_effectors_and_imu"
-
+            fallback_names = list(available_sites)
             if len(fallback_names) < 2:
                 raise ValueError(
                     "DeepMimic requires at least 2 sites for relative features. "
                     f"Found {len(fallback_names)}. Available sites: {available_sites}"
                 )
-
             mimic_site_names = fallback_names
             site_ids_list = [self._mj_model.site(name).id for name in mimic_site_names]
+            site_source = "all_model_sites"
 
         site_ids = np.array(site_ids_list, dtype=np.int32)
         site_body_ids = self._mj_model.site_bodyid[site_ids].astype(np.int32)
@@ -1116,13 +1320,19 @@ class G1MocapTracking(g1_base.G1Env):
     def _get_obs(
         self, data: mjx.Data, info: dict[str, Any], contact: jax.Array
     ) -> jax.Array:
+        del contact
         ref_idx = self._reference_index(data.time, info["reference_start_idx"])
 
+        # Match loco UnitreeG1 default proprioception:
+        # [q_root + joint q, dq_root + joint dq].
         qpos_obs = data.qpos[self._deepmimic_qpos_ind]
         qvel_obs = data.qvel[self._deepmimic_qvel_ind]
+
+        # Match loco-mujoco GoalTrajMimic ordering:
+        # [current relative-site features, reference trajectory features].
         rpos_obs, rquat_obs, rvel_obs = self._current_relative_site_features(data)
 
-        ref_goal = jp.hstack(
+        traj_goal_obs = jp.hstack(
             [
                 self._reference_goal_qpos[ref_idx],
                 self._reference_goal_qvel[ref_idx],
@@ -1132,17 +1342,17 @@ class G1MocapTracking(g1_base.G1Env):
             ]
         )
 
-        obs = jp.hstack(
+        state_obs = jp.hstack(
             [
                 qpos_obs,
                 qvel_obs,
                 rpos_obs,
                 rquat_obs,
                 rvel_obs,
-                ref_goal,
+                traj_goal_obs,
             ]
         )
-        return obs
+        return state_obs
 
     def _out_of_bounds_action_cost(self, action: jax.Array) -> jax.Array:
         lower_bound = -jp.ones_like(action)
