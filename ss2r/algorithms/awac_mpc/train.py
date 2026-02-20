@@ -67,18 +67,14 @@ def _init_training_state(
     policy_optimizer: optax.GradientTransformation,
     qr_optimizer: optax.GradientTransformation,
     dual_optimizer: optax.GradientTransformation,
-    dual_alpha_mean_init: float,
-    dual_alpha_std_init: float,
+    dual_alpha_init: float,
 ) -> TrainingState:
     key_policy, key_qr, _ = jax.random.split(key, 3)
     policy_params = sac_network.policy_network.init(key_policy)
     policy_optimizer_state = policy_optimizer.init(policy_params)
     qr_params = sac_network.qr_network.init(key_qr)
     qr_optimizer_state = qr_optimizer.init(qr_params)
-    dual_params = {
-        "log_alpha_mean": jnp.asarray(_inv_softplus(dual_alpha_mean_init)),
-        "log_alpha_std": jnp.asarray(_inv_softplus(dual_alpha_std_init)),
-    }
+    dual_params = {"log_alpha": jnp.asarray(_inv_softplus(dual_alpha_init))}
     dual_optimizer_state = dual_optimizer.init(dual_params)
     if isinstance(obs_size, Mapping):
         obs_shape = {
@@ -309,10 +305,8 @@ def train(
     mpo_eta_epsilon: float = 0.1,
     mpo_eta_opt_maxiter: int = 10,
     mpo_num_action_samples: int = 16,
-    mpo_kl_mean_epsilon: float = 5e-4,
-    mpo_kl_std_epsilon: float = 1e-5,
-    mpo_alpha_mean_init: float = 1.0,
-    mpo_alpha_std_init: float = 100.0,
+    mpo_kl_regularization: float = 1.0,
+    mpo_kl_epsilon: float = 0.0,
     mpo_dual_learning_rate: Optional[float] = None,
     n_critics: int = 2,
     n_heads: int = 1,
@@ -357,16 +351,12 @@ def train(
         raise ValueError(
             "mpo_num_action_samples must be >= 1, " f"got {mpo_num_action_samples}."
         )
-    if mpo_kl_mean_epsilon < 0.0:
+    if mpo_kl_regularization < 0.0:
         raise ValueError(
-            "mpo_kl_mean_epsilon must be >= 0, " f"got {mpo_kl_mean_epsilon}."
+            "mpo_kl_regularization must be >= 0, " f"got {mpo_kl_regularization}."
         )
-    if mpo_kl_std_epsilon < 0.0:
-        raise ValueError(f"mpo_kl_std_epsilon must be >= 0, got {mpo_kl_std_epsilon}.")
-    if mpo_alpha_mean_init <= 0.0:
-        raise ValueError(f"mpo_alpha_mean_init must be > 0, got {mpo_alpha_mean_init}.")
-    if mpo_alpha_std_init <= 0.0:
-        raise ValueError(f"mpo_alpha_std_init must be > 0, got {mpo_alpha_std_init}.")
+    if mpo_kl_epsilon < 0.0:
+        raise ValueError(f"mpo_kl_epsilon must be >= 0, got {mpo_kl_epsilon}.")
     if max_replay_size is None:
         max_replay_size = num_timesteps
     if planner_mode and controller_name != "tree":
@@ -437,8 +427,7 @@ def train(
         policy_optimizer,
         qr_optimizer,
         dual_optimizer,
-        dual_alpha_mean_init=mpo_alpha_mean_init,
-        dual_alpha_std_init=mpo_alpha_std_init,
+        dual_alpha_init=max(mpo_kl_regularization, 1e-8),
     )
 
     if restore_checkpoint_path is not None:
@@ -490,14 +479,21 @@ def train(
             maybe_dual_optimizer_state = params[8]
             if (
                 isinstance(maybe_dual_params, Mapping)
-                and "log_alpha_mean" in maybe_dual_params
-                and "log_alpha_std" in maybe_dual_params
+                and "log_alpha" in maybe_dual_params
             ):
                 training_state = training_state.replace(  # type: ignore
                     dual_params=maybe_dual_params,
                     dual_optimizer_state=restore_state(
                         maybe_dual_optimizer_state, training_state.dual_optimizer_state
                     ),
+                )
+            elif (
+                isinstance(maybe_dual_params, Mapping)
+                and "log_alpha_mean" in maybe_dual_params
+            ):
+                training_state = training_state.replace(  # type: ignore
+                    dual_params={"log_alpha": maybe_dual_params["log_alpha_mean"]},
+                    dual_optimizer_state=training_state.dual_optimizer_state,
                 )
 
     env_keys = jax.random.split(rng, num_envs)
@@ -562,8 +558,8 @@ def train(
         mpo_eta_epsilon=mpo_eta_epsilon,
         mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         mpo_num_action_samples=mpo_num_action_samples,
-        mpo_kl_mean_epsilon=mpo_kl_mean_epsilon,
-        mpo_kl_std_epsilon=mpo_kl_std_epsilon,
+        mpo_kl_regularization=mpo_kl_regularization,
+        mpo_kl_epsilon=mpo_kl_epsilon,
         use_bro=use_bro,
     )
     critic_update = gradients.gradient_update_fn(
@@ -778,8 +774,7 @@ def train(
 
         (dual_value, dual_aux), new_dual_params, new_dual_optimizer_state = dual_update(
             training_state.dual_params,
-            aux["kl_mean"],
-            aux["kl_std"],
+            aux["kl_target_current_mean"],
             optimizer_state=training_state.dual_optimizer_state,
             params=training_state.dual_params,
         )

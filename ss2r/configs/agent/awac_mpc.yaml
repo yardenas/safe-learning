@@ -18,10 +18,8 @@ mpo_eta: 1.0
 mpo_eta_epsilon: 0.1
 mpo_eta_opt_maxiter: 10
 mpo_num_action_samples: 16
-mpo_kl_mean_epsilon: 5e-4
-mpo_kl_std_epsilon: 1e-5
-mpo_alpha_mean_init: 1.0
-mpo_alpha_std_init: 100.0
+mpo_kl_regularization: 1.0
+mpo_kl_epsilon: 0.0
 mpo_dual_learning_rate: 3e-4
 actor_update_source: planner_online
 
