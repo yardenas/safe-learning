@@ -103,49 +103,22 @@ def make_losses(
         dist_params = policy_network.apply(
             normalizer_params, policy_params, transitions.observation
         )
-        key, next_key = jax.random.split(key)
         pi_action = parametric_action_distribution.sample(dist_params, key)
         q_pi = qr_network.apply(
             normalizer_params, q_params, transitions.observation, pi_action
         )
         v = _reduce_q(q_pi, use_bro)
-
-        next_dist_params = policy_network.apply(
-            normalizer_params, policy_params, transitions.next_observation
-        )
-        next_pi_action = parametric_action_distribution.sample(
-            next_dist_params, next_key
-        )
-        next_q_pi = qr_network.apply(
-            normalizer_params, q_params, transitions.next_observation, next_pi_action
-        )
-        next_v = _reduce_q(next_q_pi, use_bro)
-
-        q_data = qr_network.apply(
+        q = qr_network.apply(
             normalizer_params, q_params, transitions.observation, transitions.action
         )
-        q_data = _reduce_q(q_data, use_bro)
-        truncation = transitions.extras["state_extras"]["truncation"]
-        loss_mask = 1.0 - truncation
-
+        q = _reduce_q(q, use_bro)
         if precomputed_advantage is not None:
             advantage = precomputed_advantage
         else:
-            advantage = (
-                transitions.reward * reward_scaling
-                + transitions.discount * (discounting * next_v)
-                - v
-            )
+            advantage = q - v
         if normalize_advantage:
-            denom = jnp.maximum(jnp.sum(loss_mask), 1.0)
-            adv_mean = jnp.sum(advantage * loss_mask) / denom
-            centered_advantage = (advantage - adv_mean) * loss_mask
-            adv_std = jnp.sqrt(jnp.sum(jnp.square(centered_advantage)) / denom + 1e-8)
-            advantage = centered_advantage / adv_std
-        else:
-            advantage = advantage * loss_mask
-
-        unclipped_weights = jnp.exp(advantage / awac_lambda) * loss_mask
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+        unclipped_weights = jnp.exp(advantage / awac_lambda)
         weights = unclipped_weights
         if max_weight is not None:
             weights = jnp.minimum(weights, max_weight)
@@ -155,8 +128,7 @@ def make_losses(
         )
         loss = -(log_prob * weights).mean()
         clip_fraction = (
-            jnp.sum((unclipped_weights > max_weight).astype(jnp.float32) * loss_mask)
-            / jnp.maximum(jnp.sum(loss_mask), 1.0)
+            jnp.mean((unclipped_weights > max_weight).astype(jnp.float32))
             if max_weight is not None
             else jnp.zeros(())
         )
@@ -178,9 +150,7 @@ def make_losses(
             "log_prob_min": jnp.min(log_prob),
             "log_prob_max": jnp.max(log_prob),
             "v_pi_mean": jnp.mean(v),
-            "next_v_pi_mean": jnp.mean(next_v),
-            "q_data_mean": jnp.mean(q_data),
-            "truncation_fraction": jnp.mean(truncation),
+            "q_data_mean": jnp.mean(q),
         }
         return loss, aux
 
