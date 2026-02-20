@@ -14,9 +14,8 @@ num_critic_updates_per_actor_update: 1
 deterministic_eval: true
 
 rollout_length: 1
-awac_lambda: 1.0
-normalize_advantage: false
-max_weight: 100.0
+mpo_eta: 1.0
+mpo_num_action_samples: 16
 actor_update_source: planner_online
 
 policy_hidden_layer_sizes: [128, 128]

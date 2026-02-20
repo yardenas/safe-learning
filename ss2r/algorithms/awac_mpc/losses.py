@@ -1,4 +1,4 @@
-"""AWAC-style losses for tree-MPC rollouts."""
+"""MPO-weighted actor losses and TD critic losses for tree-MPC rollouts."""
 
 from typing import Any, TypeAlias
 
@@ -13,17 +13,10 @@ Transition: TypeAlias = types.Transition
 
 
 def atanh_with_slack(y: jnp.ndarray, eps: float = 1e-5) -> jnp.ndarray:
-    """
-    Stable inverse tanh with configurable slack.
-    Clips y to [-1+eps, 1-eps] before applying atanh.
-    """
+    """Stable inverse tanh used before log_prob evaluation."""
     y = y.astype(jnp.float32)
     eps_arr = jnp.asarray(eps, dtype=jnp.float32)
-
-    # Clip with "extra" margin away from ±1
     y = jnp.clip(y, -1.0 + eps_arr, 1.0 - eps_arr)
-
-    # Equivalent to jnp.arctanh(y) but explicitly uses log1p (stable near 0 and 1)
     return 0.5 * (jnp.log1p(y) - jnp.log1p(-y))
 
 
@@ -38,11 +31,17 @@ def make_losses(
     *,
     reward_scaling: float,
     discounting: float,
-    awac_lambda: float,
-    normalize_advantage: bool,
+    mpo_eta: float,
+    mpo_num_action_samples: int,
     use_bro: bool,
-    max_weight: float | None = None,
 ):
+    if mpo_eta <= 0.0:
+        raise ValueError(f"mpo_eta must be > 0, got {mpo_eta}.")
+    if mpo_num_action_samples < 1:
+        raise ValueError(
+            f"mpo_num_action_samples must be >= 1, got {mpo_num_action_samples}."
+        )
+
     policy_network = sac_network.policy_network
     qr_network = sac_network.qr_network
     parametric_action_distribution = sac_network.parametric_action_distribution
@@ -96,92 +95,41 @@ def make_losses(
         transitions: Transition,
         key: PRNGKey,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-        precomputed_advantage = transitions.extras["policy_extras"].get(
-            "advantage", None
-        )
-
         dist_params = policy_network.apply(
             normalizer_params, policy_params, transitions.observation
         )
-        key, next_key = jax.random.split(key)
-        pi_action = parametric_action_distribution.sample(dist_params, key)
-        q_pi = qr_network.apply(
-            normalizer_params, q_params, transitions.observation, pi_action
-        )
-        v = _reduce_q(q_pi, use_bro)
+        sample_keys = jax.random.split(key, mpo_num_action_samples)
 
-        next_dist_params = policy_network.apply(
-            normalizer_params, policy_params, transitions.next_observation
-        )
-        next_pi_action = parametric_action_distribution.sample(
-            next_dist_params, next_key
-        )
-        next_q_pi = qr_network.apply(
-            normalizer_params, q_params, transitions.next_observation, next_pi_action
-        )
-        next_v = _reduce_q(next_q_pi, use_bro)
+        sampled_actions = jax.vmap(
+            lambda sample_k: parametric_action_distribution.sample(
+                dist_params, sample_k
+            )
+        )(sample_keys)
+        sampled_log_probs = jax.vmap(
+            lambda action: parametric_action_distribution.log_prob(
+                dist_params, atanh_with_slack(action)
+            )
+        )(sampled_actions)
+        sampled_q_values = jax.vmap(
+            lambda sampled_action: _reduce_q(
+                qr_network.apply(
+                    normalizer_params, q_params, transitions.observation, sampled_action
+                ),
+                use_bro,
+            )
+        )(sampled_actions)
+        # [num_samples, batch] -> [batch, num_samples]
+        sampled_log_probs = jnp.swapaxes(sampled_log_probs, 0, 1)
+        sampled_q_values = jnp.swapaxes(sampled_q_values, 0, 1)
 
-        q_data = qr_network.apply(
-            normalizer_params, q_params, transitions.observation, transitions.action
-        )
-        q_data = _reduce_q(q_data, use_bro)
+        mpo_scores = sampled_q_values / mpo_eta
+        mpo_scores = mpo_scores - jnp.max(mpo_scores, axis=-1, keepdims=True)
+        mpo_weights = jax.nn.softmax(mpo_scores, axis=-1)
+        mpo_weights = jax.lax.stop_gradient(mpo_weights)
+        loss_per_state = -jnp.sum(mpo_weights * sampled_log_probs, axis=-1)
         truncation = transitions.extras["state_extras"]["truncation"]
         loss_mask = 1.0 - truncation
-
-        if precomputed_advantage is not None:
-            advantage = precomputed_advantage
-        else:
-            advantage = (
-                transitions.reward * reward_scaling
-                + transitions.discount * (discounting * next_v)
-                - v
-            )
-        if normalize_advantage:
-            denom = jnp.maximum(jnp.sum(loss_mask), 1.0)
-            adv_mean = jnp.sum(advantage * loss_mask) / denom
-            centered_advantage = (advantage - adv_mean) * loss_mask
-            adv_std = jnp.sqrt(jnp.sum(jnp.square(centered_advantage)) / denom + 1e-8)
-            advantage = centered_advantage / adv_std
-        else:
-            advantage = advantage * loss_mask
-
-        unclipped_weights = jnp.exp(advantage / awac_lambda) * loss_mask
-        weights = unclipped_weights
-        if max_weight is not None:
-            weights = jnp.minimum(weights, max_weight)
-        weights = jax.lax.stop_gradient(weights)
-        log_prob = parametric_action_distribution.log_prob(
-            dist_params, atanh_with_slack(transitions.action)
-        )
-        loss = -(log_prob * weights).mean()
-        clip_fraction = (
-            jnp.sum((unclipped_weights > max_weight).astype(jnp.float32) * loss_mask)
-            / jnp.maximum(jnp.sum(loss_mask), 1.0)
-            if max_weight is not None
-            else jnp.zeros(())
-        )
-        aux = {
-            "advantage_mean": jnp.mean(advantage),
-            "advantage_std": jnp.std(advantage),
-            "advantage_min": jnp.min(advantage),
-            "advantage_max": jnp.max(advantage),
-            "weight_mean": jnp.mean(weights),
-            "weight_std": jnp.std(weights),
-            "weight_min": jnp.min(weights),
-            "weight_max": jnp.max(weights),
-            "weight_clip_fraction": clip_fraction,
-            "max_weight_limit": jnp.asarray(
-                -1.0 if max_weight is None else max_weight, dtype=jnp.float32
-            ),
-            "log_prob_mean": jnp.mean(log_prob),
-            "log_prob_std": jnp.std(log_prob),
-            "log_prob_min": jnp.min(log_prob),
-            "log_prob_max": jnp.max(log_prob),
-            "v_pi_mean": jnp.mean(v),
-            "next_v_pi_mean": jnp.mean(next_v),
-            "q_data_mean": jnp.mean(q_data),
-            "truncation_fraction": jnp.mean(truncation),
-        }
-        return loss, aux
+        loss = jnp.mean(loss_per_state * loss_mask)
+        return loss, {}
 
     return critic_loss, actor_loss

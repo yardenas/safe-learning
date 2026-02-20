@@ -285,9 +285,8 @@ def train(
     num_critic_updates_per_actor_update: int = 1,
     deterministic_eval: bool = False,
     rollout_length: int = 1,
-    awac_lambda: float = 1.0,
-    normalize_advantage: bool = False,
-    max_weight: float | None = None,
+    mpo_eta: float = 1.0,
+    mpo_num_action_samples: int = 16,
     n_critics: int = 2,
     n_heads: int = 1,
     use_bro: bool = True,
@@ -319,6 +318,12 @@ def train(
         raise ValueError("prefill_steps must be >= 0.")
     if critic_pretrain_ratio < 0:
         raise ValueError("critic_pretrain_ratio must be >= 0.")
+    if mpo_eta <= 0.0:
+        raise ValueError(f"mpo_eta must be > 0, got {mpo_eta}.")
+    if mpo_num_action_samples < 1:
+        raise ValueError(
+            "mpo_num_action_samples must be >= 1, " f"got {mpo_num_action_samples}."
+        )
     if max_replay_size is None:
         max_replay_size = num_timesteps
     if planner_mode and controller_name != "tree":
@@ -473,10 +478,9 @@ def train(
         sac_network,
         reward_scaling=reward_scaling,
         discounting=discounting,
-        awac_lambda=awac_lambda,
-        normalize_advantage=normalize_advantage,
+        mpo_eta=mpo_eta,
+        mpo_num_action_samples=mpo_num_action_samples,
         use_bro=use_bro,
-        max_weight=max_weight,
     )
     critic_update = gradients.gradient_update_fn(
         critic_loss_fn, qr_optimizer, pmap_axis_name=None, has_aux=True
