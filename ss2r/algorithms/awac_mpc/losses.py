@@ -1,4 +1,4 @@
-"""MPO-weighted actor losses and TD critic losses for tree-MPC rollouts."""
+"""MPO actor losses and TD critic losses for tree-MPC rollouts."""
 
 from typing import Any, TypeAlias
 
@@ -6,18 +6,11 @@ import jax
 import jax.numpy as jnp
 from brax.training import types
 from brax.training.types import Params, PRNGKey
+from jax.scipy import optimize as jax_optimize
 
 from ss2r.algorithms.sac.networks import SafeSACNetworks
 
 Transition: TypeAlias = types.Transition
-
-
-def atanh_with_slack(y: jnp.ndarray, eps: float = 1e-5) -> jnp.ndarray:
-    """Stable inverse tanh used before log_prob evaluation."""
-    y = y.astype(jnp.float32)
-    eps_arr = jnp.asarray(eps, dtype=jnp.float32)
-    y = jnp.clip(y, -1.0 + eps_arr, 1.0 - eps_arr)
-    return 0.5 * (jnp.log1p(y) - jnp.log1p(-y))
 
 
 def _reduce_q(q_values: jax.Array, use_bro: bool) -> jax.Array:
@@ -26,21 +19,113 @@ def _reduce_q(q_values: jax.Array, use_bro: bool) -> jax.Array:
     return jnp.min(q_values, axis=-1)
 
 
+def _logmeanexp(x: jax.Array, axis: int = -1) -> jax.Array:
+    x_max = jnp.max(x, axis=axis, keepdims=True)
+    lme = jnp.log(jnp.mean(jnp.exp(x - x_max), axis=axis, keepdims=True)) + x_max
+    return jnp.squeeze(lme, axis=axis)
+
+
+def _solve_eta_dual(
+    q_values: jax.Array,
+    mpo_eta_epsilon: float,
+    mpo_eta_init: float,
+    mpo_eta_opt_maxiter: int,
+) -> jax.Array:
+    q_values = jax.lax.stop_gradient(q_values)
+    x0 = jnp.asarray([jnp.log(mpo_eta_init)], dtype=jnp.float32)
+
+    def eta_dual(log_eta_vec: jax.Array) -> jax.Array:
+        eta = jnp.exp(log_eta_vec[0]) + 1e-8
+        scaled_q = q_values / eta
+        lme = _logmeanexp(scaled_q, axis=-1)
+        return eta * (mpo_eta_epsilon + jnp.mean(lme))
+
+    result = jax_optimize.minimize(
+        eta_dual,
+        x0,
+        method="BFGS",
+        options={"maxiter": mpo_eta_opt_maxiter},
+    )
+    return jnp.exp(result.x[0]) + 1e-8
+
+
+def _sample_raw_actions(
+    dist_params: jax.Array,
+    key: PRNGKey,
+    num_action_samples: int,
+    parametric_action_distribution,
+) -> tuple[jax.Array, jax.Array]:
+    sample_keys = jax.random.split(key, num_action_samples)
+    raw_actions_nba = jax.vmap(
+        lambda k: parametric_action_distribution.sample_no_postprocessing(
+            dist_params, k
+        )
+    )(sample_keys)
+    actions_nba = jax.vmap(parametric_action_distribution.postprocess)(raw_actions_nba)
+    return raw_actions_nba, actions_nba
+
+
+def _dist_params_to_mean_logstd(
+    dist_params: jax.Array,
+    parametric_action_distribution,
+) -> tuple[jax.Array, jax.Array]:
+    """Extract pre-squash Gaussian mean/log-std using Brax's distribution path."""
+    dist = parametric_action_distribution.create_dist(dist_params)
+    mean = dist.loc
+    logstd = jnp.log(dist.scale)
+    return mean, logstd
+
+
+def _gaussian_kl_target_current(
+    target_mean: jax.Array,
+    target_logstd: jax.Array,
+    current_mean: jax.Array,
+    current_logstd: jax.Array,
+) -> jax.Array:
+    """KL(N_target || N_current), summed over action dimensions."""
+    target_var = jnp.exp(2.0 * target_logstd)
+    current_var = jnp.exp(2.0 * current_logstd)
+    kl_vec = (
+        (target_var + jnp.square(target_mean - current_mean))
+        / (2.0 * current_var + 1e-8)
+        + current_logstd
+        - target_logstd
+        - 0.5
+    )
+    return jnp.sum(kl_vec, axis=-1)
+
+
 def make_losses(
     sac_network: SafeSACNetworks,
     *,
     reward_scaling: float,
     discounting: float,
-    mpo_eta: float,
+    mpo_eta_init: float,
+    mpo_eta_epsilon: float,
+    mpo_eta_opt_maxiter: int,
     mpo_num_action_samples: int,
+    mpo_kl_regularization: float,
+    mpo_kl_epsilon: float,
     use_bro: bool,
 ):
-    if mpo_eta <= 0.0:
-        raise ValueError(f"mpo_eta must be > 0, got {mpo_eta}.")
+    if mpo_eta_init <= 0.0:
+        raise ValueError(f"mpo_eta_init must be > 0, got {mpo_eta_init}.")
+    if mpo_eta_epsilon <= 0.0:
+        raise ValueError(f"mpo_eta_epsilon must be > 0, got {mpo_eta_epsilon}.")
+    if mpo_eta_opt_maxiter < 1:
+        raise ValueError(
+            f"mpo_eta_opt_maxiter must be >= 1, got {mpo_eta_opt_maxiter}."
+        )
     if mpo_num_action_samples < 1:
         raise ValueError(
             f"mpo_num_action_samples must be >= 1, got {mpo_num_action_samples}."
         )
+    if mpo_kl_regularization < 0.0:
+        raise ValueError(
+            f"mpo_kl_regularization must be >= 0, got {mpo_kl_regularization}."
+        )
+    if mpo_kl_epsilon < 0.0:
+        raise ValueError(f"mpo_kl_epsilon must be >= 0, got {mpo_kl_epsilon}.")
 
     policy_network = sac_network.policy_network
     qr_network = sac_network.qr_network
@@ -90,46 +175,94 @@ def make_losses(
 
     def actor_loss(
         policy_params: Params,
+        target_policy_params: Params,
         normalizer_params: Any,
         q_params: Params,
         transitions: Transition,
         key: PRNGKey,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-        dist_params = policy_network.apply(
-            normalizer_params, policy_params, transitions.observation
+        target_dist_params = policy_network.apply(
+            normalizer_params, target_policy_params, transitions.observation
         )
-        sample_keys = jax.random.split(key, mpo_num_action_samples)
+        raw_actions_nba, actions_nba = _sample_raw_actions(
+            target_dist_params,
+            key,
+            mpo_num_action_samples,
+            parametric_action_distribution,
+        )
 
-        sampled_actions = jax.vmap(
-            lambda sample_k: parametric_action_distribution.sample(
-                dist_params, sample_k
-            )
-        )(sample_keys)
-        sampled_log_probs = jax.vmap(
-            lambda action: parametric_action_distribution.log_prob(
-                dist_params, atanh_with_slack(action)
-            )
-        )(sampled_actions)
         sampled_q_values = jax.vmap(
-            lambda sampled_action: _reduce_q(
+            lambda sampled_actions_ba: _reduce_q(
                 qr_network.apply(
-                    normalizer_params, q_params, transitions.observation, sampled_action
+                    normalizer_params,
+                    q_params,
+                    transitions.observation,
+                    sampled_actions_ba,
                 ),
                 use_bro,
             )
-        )(sampled_actions)
-        # [num_samples, batch] -> [batch, num_samples]
-        sampled_log_probs = jnp.swapaxes(sampled_log_probs, 0, 1)
+        )(actions_nba)
+        # [N, B] -> [B, N]
         sampled_q_values = jnp.swapaxes(sampled_q_values, 0, 1)
 
-        mpo_scores = sampled_q_values / mpo_eta
+        eta = _solve_eta_dual(
+            sampled_q_values,
+            mpo_eta_epsilon=mpo_eta_epsilon,
+            mpo_eta_init=mpo_eta_init,
+            mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
+        )
+        mpo_scores = sampled_q_values / eta
         mpo_scores = mpo_scores - jnp.max(mpo_scores, axis=-1, keepdims=True)
         mpo_weights = jax.nn.softmax(mpo_scores, axis=-1)
         mpo_weights = jax.lax.stop_gradient(mpo_weights)
-        loss_per_state = -jnp.sum(mpo_weights * sampled_log_probs, axis=-1)
-        truncation = transitions.extras["state_extras"]["truncation"]
-        loss_mask = 1.0 - truncation
-        loss = jnp.mean(loss_per_state * loss_mask)
-        return loss, {}
+
+        current_dist_params = policy_network.apply(
+            normalizer_params, policy_params, transitions.observation
+        )
+        sampled_log_probs_current = jax.vmap(
+            lambda raw_actions_ba: parametric_action_distribution.log_prob(
+                current_dist_params, raw_actions_ba
+            )
+        )(raw_actions_nba)
+        # [N, B] -> [B, N]
+        sampled_log_probs_current = jnp.swapaxes(sampled_log_probs_current, 0, 1)
+
+        nll_loss_per_state = -jnp.sum(mpo_weights * sampled_log_probs_current, axis=-1)
+        nll_loss = jnp.mean(nll_loss_per_state)
+
+        target_mean, target_logstd = _dist_params_to_mean_logstd(
+            target_dist_params, parametric_action_distribution
+        )
+        current_mean, current_logstd = _dist_params_to_mean_logstd(
+            current_dist_params, parametric_action_distribution
+        )
+        kl_per_state = _gaussian_kl_target_current(
+            target_mean=target_mean,
+            target_logstd=target_logstd,
+            current_mean=current_mean,
+            current_logstd=current_logstd,
+        )
+        kl_mean = jnp.mean(kl_per_state)
+        kl_excess = jnp.maximum(kl_mean - mpo_kl_epsilon, 0.0)
+        kl_penalty = mpo_kl_regularization * kl_excess
+
+        loss = nll_loss + kl_penalty
+        weight_entropy = -jnp.mean(
+            jnp.sum(mpo_weights * jnp.log(mpo_weights + 1e-8), axis=-1)
+        )
+        aux = {
+            "eta": eta,
+            "nll_loss": nll_loss,
+            "kl_target_current_mean": kl_mean,
+            "kl_excess": kl_excess,
+            "kl_penalty": kl_penalty,
+            "weight_entropy": weight_entropy,
+            "weight_min": jnp.min(mpo_weights),
+            "weight_max": jnp.max(mpo_weights),
+            "weight_mean": jnp.mean(mpo_weights),
+            "q_sample_mean": jnp.mean(sampled_q_values),
+            "q_sample_std": jnp.std(sampled_q_values),
+        }
+        return loss, aux
 
     return critic_loss, actor_loss

@@ -1,4 +1,4 @@
-"""AWAC-style training with optional TreeMPC actor supervision."""
+"""MPO-style training with optional TreeMPC actor supervision."""
 
 import time
 from types import SimpleNamespace
@@ -43,6 +43,7 @@ ActorUpdateSource = Literal["planner_online", "critic_replay"]
 class TrainingState:
     policy_optimizer_state: optax.OptState
     policy_params: Params
+    target_policy_params: Params
     qr_optimizer_state: optax.OptState
     qr_params: Params
     target_qr_params: Params
@@ -73,6 +74,7 @@ def _init_training_state(
     return TrainingState(  # type: ignore
         policy_optimizer_state=policy_optimizer_state,
         policy_params=policy_params,
+        target_policy_params=policy_params,
         qr_optimizer_state=qr_optimizer_state,
         qr_params=qr_params,
         target_qr_params=qr_params,
@@ -286,7 +288,11 @@ def train(
     deterministic_eval: bool = False,
     rollout_length: int = 1,
     mpo_eta: float = 1.0,
+    mpo_eta_epsilon: float = 0.1,
+    mpo_eta_opt_maxiter: int = 10,
     mpo_num_action_samples: int = 16,
+    mpo_kl_regularization: float = 1.0,
+    mpo_kl_epsilon: float = 0.0,
     n_critics: int = 2,
     n_heads: int = 1,
     use_bro: bool = True,
@@ -320,10 +326,22 @@ def train(
         raise ValueError("critic_pretrain_ratio must be >= 0.")
     if mpo_eta <= 0.0:
         raise ValueError(f"mpo_eta must be > 0, got {mpo_eta}.")
+    if mpo_eta_epsilon <= 0.0:
+        raise ValueError(f"mpo_eta_epsilon must be > 0, got {mpo_eta_epsilon}.")
+    if mpo_eta_opt_maxiter < 1:
+        raise ValueError(
+            "mpo_eta_opt_maxiter must be >= 1, " f"got {mpo_eta_opt_maxiter}."
+        )
     if mpo_num_action_samples < 1:
         raise ValueError(
             "mpo_num_action_samples must be >= 1, " f"got {mpo_num_action_samples}."
         )
+    if mpo_kl_regularization < 0.0:
+        raise ValueError(
+            "mpo_kl_regularization must be >= 0, " f"got {mpo_kl_regularization}."
+        )
+    if mpo_kl_epsilon < 0.0:
+        raise ValueError(f"mpo_kl_epsilon must be >= 0, got {mpo_kl_epsilon}.")
     if max_replay_size is None:
         max_replay_size = num_timesteps
     if planner_mode and controller_name != "tree":
@@ -397,6 +415,7 @@ def train(
             training_state = training_state.replace(  # type: ignore
                 normalizer_params=params[0],
                 policy_params=params[1],
+                target_policy_params=params[1],
                 qr_params=params[3],
                 target_qr_params=params[3],
                 policy_optimizer_state=restore_state(
@@ -406,10 +425,25 @@ def train(
                     params[8], training_state.qr_optimizer_state
                 ),
             )
+        elif len(params) >= 7:
+            training_state = training_state.replace(  # type: ignore
+                normalizer_params=params[0],
+                policy_params=params[1],
+                target_policy_params=params[6],
+                qr_params=params[2],
+                target_qr_params=params[3],
+                policy_optimizer_state=restore_state(
+                    params[4], training_state.policy_optimizer_state
+                ),
+                qr_optimizer_state=restore_state(
+                    params[5], training_state.qr_optimizer_state
+                ),
+            )
         else:
             training_state = training_state.replace(  # type: ignore
                 normalizer_params=params[0],
                 policy_params=params[1],
+                target_policy_params=params[1],
                 qr_params=params[2],
                 target_qr_params=params[3],
                 policy_optimizer_state=restore_state(
@@ -478,8 +512,12 @@ def train(
         sac_network,
         reward_scaling=reward_scaling,
         discounting=discounting,
-        mpo_eta=mpo_eta,
+        mpo_eta_init=mpo_eta,
+        mpo_eta_epsilon=mpo_eta_epsilon,
+        mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         mpo_num_action_samples=mpo_num_action_samples,
+        mpo_kl_regularization=mpo_kl_regularization,
+        mpo_kl_epsilon=mpo_kl_epsilon,
         use_bro=use_bro,
     )
     critic_update = gradients.gradient_update_fn(
@@ -639,6 +677,7 @@ def train(
                     new_policy_optimizer_state_i,
                 ) = actor_update(
                     policy_params,
+                    training_state.target_policy_params,
                     training_state.normalizer_params,
                     qr_params,
                     minibatch,
@@ -677,6 +716,7 @@ def train(
                 new_policy_optimizer_state,
             ) = actor_update(
                 training_state.policy_params,
+                training_state.target_policy_params,
                 training_state.normalizer_params,
                 qr_params,
                 actor_transitions,
@@ -695,9 +735,13 @@ def train(
             new_policy_optimizer_state,
             training_state.policy_optimizer_state,
         )
+        new_target_policy_params = polyak(
+            training_state.target_policy_params, policy_params
+        )
         new_training_state = training_state.replace(  # type: ignore
             policy_optimizer_state=policy_optimizer_state,
             policy_params=policy_params,
+            target_policy_params=new_target_policy_params,
             qr_optimizer_state=qr_optimizer_state,
             qr_params=qr_params,
             target_qr_params=new_target_qr_params,
@@ -974,6 +1018,7 @@ def train(
                 training_state.target_qr_params,
                 training_state.policy_optimizer_state,
                 training_state.qr_optimizer_state,
+                training_state.target_policy_params,
             )
             dummy_ckpt_config = config_dict.ConfigDict()
             checkpoint.save(checkpoint_logdir, current_step, params, dummy_ckpt_config)
@@ -995,6 +1040,7 @@ def train(
         training_state.target_qr_params,
         training_state.policy_optimizer_state,
         training_state.qr_optimizer_state,
+        training_state.target_policy_params,
     )
     logging.info("total steps: %s", total_steps)
     return make_policy, params, metrics
