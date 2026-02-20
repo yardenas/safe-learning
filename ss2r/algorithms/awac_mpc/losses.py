@@ -8,6 +8,7 @@ from brax.training import types
 from brax.training.types import Params, PRNGKey
 
 from ss2r.algorithms.sac.networks import SafeSACNetworks
+from ss2r.algorithms.sac.q_transforms import QTransformation
 
 Transition: TypeAlias = types.Transition
 
@@ -38,41 +39,76 @@ def make_losses(
     *,
     reward_scaling: float,
     discounting: float,
+    action_size: int,
     awac_lambda: float,
     normalize_advantage: bool,
     use_bro: bool,
+    target_entropy: float | None = None,
     max_weight: float | None = None,
 ):
+    target_entropy = -0.5 * action_size if target_entropy is None else target_entropy
     policy_network = sac_network.policy_network
     qr_network = sac_network.qr_network
     parametric_action_distribution = sac_network.parametric_action_distribution
+
+    def alpha_loss(
+        log_alpha: jnp.ndarray,
+        policy_params: Params,
+        normalizer_params: Any,
+        transitions: Transition,
+        key: PRNGKey,
+    ) -> jnp.ndarray:
+        dist_params = policy_network.apply(
+            normalizer_params, policy_params, transitions.observation
+        )
+        action = parametric_action_distribution.sample_no_postprocessing(
+            dist_params, key
+        )
+        log_prob = parametric_action_distribution.log_prob(dist_params, action)
+        alpha = jnp.exp(log_alpha)
+        loss = alpha * jax.lax.stop_gradient(-log_prob - target_entropy)
+        return jnp.mean(loss)
 
     def critic_loss(
         q_params: Params,
         policy_params: Params,
         normalizer_params: Any,
         target_q_params: Params,
+        alpha: jnp.ndarray,
         transitions: Transition,
         key: PRNGKey,
+        target_q_fn: QTransformation,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
         action = transitions.action
         q_old_action = qr_network.apply(
             normalizer_params, q_params, transitions.observation, action
         )
-        key, next_key = jax.random.split(key)
-        next_dist_params = policy_network.apply(
-            normalizer_params, policy_params, transitions.next_observation
+        key, another_key = jax.random.split(key)
+
+        def policy(obs: jax.Array) -> tuple[jax.Array, jax.Array]:
+            next_dist_params = policy_network.apply(
+                normalizer_params, policy_params, obs
+            )
+            next_action = parametric_action_distribution.sample_no_postprocessing(
+                next_dist_params, key
+            )
+            next_log_prob = parametric_action_distribution.log_prob(
+                next_dist_params, next_action
+            )
+            next_action = parametric_action_distribution.postprocess(next_action)
+            return next_action, next_log_prob
+
+        q_fn = lambda obs, action: qr_network.apply(
+            normalizer_params, target_q_params, obs, action
         )
-        next_action = parametric_action_distribution.sample(next_dist_params, next_key)
-        next_q = qr_network.apply(
-            normalizer_params,
-            target_q_params,
-            transitions.next_observation,
-            next_action,
-        )
-        next_v = _reduce_q(next_q, use_bro)
-        target_q = transitions.reward * reward_scaling + transitions.discount * (
-            discounting * next_v
+        target_q = target_q_fn(
+            transitions,
+            q_fn,
+            policy,
+            discounting,
+            alpha,
+            reward_scaling,
+            another_key,
         )
         q_error = q_old_action - jnp.expand_dims(target_q, -1)
         truncation = transitions.extras["state_extras"]["truncation"]
@@ -93,6 +129,7 @@ def make_losses(
         policy_params: Params,
         normalizer_params: Any,
         q_params: Params,
+        alpha: jnp.ndarray,
         transitions: Transition,
         key: PRNGKey,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
@@ -103,7 +140,13 @@ def make_losses(
         dist_params = policy_network.apply(
             normalizer_params, policy_params, transitions.observation
         )
-        pi_action = parametric_action_distribution.sample(dist_params, key)
+        pi_action_raw = parametric_action_distribution.sample_no_postprocessing(
+            dist_params, key
+        )
+        pi_action_log_prob = parametric_action_distribution.log_prob(
+            dist_params, pi_action_raw
+        )
+        pi_action = parametric_action_distribution.postprocess(pi_action_raw)
         q_pi = qr_network.apply(
             normalizer_params, q_params, transitions.observation, pi_action
         )
@@ -127,6 +170,8 @@ def make_losses(
             dist_params, atanh_with_slack(transitions.action)
         )
         loss = -(log_prob * weights).mean()
+        exploration_loss = (alpha * pi_action_log_prob).mean()
+        loss += exploration_loss
         clip_fraction = (
             jnp.mean((unclipped_weights > max_weight).astype(jnp.float32))
             if max_weight is not None
@@ -151,7 +196,10 @@ def make_losses(
             "log_prob_max": jnp.max(log_prob),
             "v_pi_mean": jnp.mean(v),
             "q_data_mean": jnp.mean(q),
+            "exploration_loss": exploration_loss,
+            "awac_loss": loss - exploration_loss,
+            "alpha": jnp.asarray(alpha, dtype=jnp.float32),
         }
         return loss, aux
 
-    return critic_loss, actor_loss
+    return alpha_loss, critic_loss, actor_loss

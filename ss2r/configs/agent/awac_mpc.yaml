@@ -2,6 +2,10 @@ name: awac_mpc
 
 learning_rate: 3e-4
 critic_learning_rate: 3e-4
+alpha_learning_rate: 3e-4
+init_alpha: 1.
+min_alpha: 0.
+target_entropy: null
 discounting: 0.99
 batch_size: 256
 normalize_observations: true
@@ -23,6 +27,7 @@ policy_hidden_layer_sizes: [128, 128]
 value_hidden_layer_sizes: [512, 512]
 activation: swish
 use_bro: true
+entropy_bonus: true
 n_critics: 2
 n_heads: 1
 

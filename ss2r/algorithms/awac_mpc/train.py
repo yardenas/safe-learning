@@ -22,6 +22,7 @@ from ss2r.algorithms.awac_mpc import losses as awac_losses
 from ss2r.algorithms.hydrax_mpc.factory import make_controller, make_task
 from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPCModelParams, TreeMPCParams
 from ss2r.algorithms.sac import gradients
+from ss2r.algorithms.sac.q_transforms import QTransformation, SACBase
 from ss2r.algorithms.sac.types import (
     Metrics,
     ReplayBufferState,
@@ -48,6 +49,8 @@ class TrainingState:
     target_qr_params: Params
     gradient_steps: jnp.ndarray
     env_steps: jnp.ndarray
+    alpha_optimizer_state: optax.OptState
+    alpha_params: jnp.ndarray
     normalizer_params: running_statistics.RunningStatisticsState
 
 
@@ -55,10 +58,14 @@ def _init_training_state(
     key: PRNGKey,
     obs_size: int,
     sac_network,
+    init_alpha: float,
+    alpha_optimizer: optax.GradientTransformation,
     policy_optimizer: optax.GradientTransformation,
     qr_optimizer: optax.GradientTransformation,
 ) -> TrainingState:
     key_policy, key_qr = jax.random.split(key)
+    log_alpha = jnp.asarray(jnp.log(init_alpha), dtype=jnp.float32)
+    alpha_optimizer_state = alpha_optimizer.init(log_alpha)
     policy_params = sac_network.policy_network.init(key_policy)
     policy_optimizer_state = policy_optimizer.init(policy_params)
     qr_params = sac_network.qr_network.init(key_qr)
@@ -78,6 +85,8 @@ def _init_training_state(
         target_qr_params=qr_params,
         gradient_steps=jnp.zeros(()),
         env_steps=jnp.zeros(()),
+        alpha_optimizer_state=alpha_optimizer_state,
+        alpha_params=log_alpha,
         normalizer_params=normalizer_params,
     )
 
@@ -270,6 +279,10 @@ def train(
     wrap_env_fn: Optional[Callable[[Any], Any]] = None,
     learning_rate: float = 3e-4,
     critic_learning_rate: float = 3e-4,
+    alpha_learning_rate: float = 3e-4,
+    init_alpha: float = 1.0,
+    min_alpha: float = 0.0,
+    target_entropy: float | None = None,
     discounting: float = 0.99,
     seed: int = 0,
     batch_size: int = 256,
@@ -291,6 +304,8 @@ def train(
     n_critics: int = 2,
     n_heads: int = 1,
     use_bro: bool = True,
+    reward_q_transform: QTransformation | None = None,
+    entropy_bonus: bool = True,
     actor_update_source: ActorUpdateSource = "planner_online",
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     checkpoint_logdir: Optional[str] = None,
@@ -360,6 +375,10 @@ def train(
     )
     make_policy = make_inference_fn(sac_network)
 
+    if reward_q_transform is None:
+        reward_q_transform = SACBase(pessimistic_q=not use_bro)
+
+    alpha_optimizer = optax.adam(learning_rate=alpha_learning_rate)
     policy_optimizer = optax.adam(learning_rate=learning_rate)
     qr_optimizer = optax.adam(learning_rate=critic_learning_rate)
 
@@ -382,6 +401,8 @@ def train(
         init_key,
         obs_size,
         sac_network,
+        init_alpha,
+        alpha_optimizer,
         policy_optimizer,
         qr_optimizer,
     )
@@ -394,11 +415,32 @@ def train(
                 policy_params=params[1],
                 qr_params=params[3],
                 target_qr_params=params[3],
+                alpha_params=params[5],
                 policy_optimizer_state=restore_state(
                     params[6], training_state.policy_optimizer_state
                 ),
+                alpha_optimizer_state=restore_state(
+                    params[7], training_state.alpha_optimizer_state
+                ),
                 qr_optimizer_state=restore_state(
                     params[8], training_state.qr_optimizer_state
+                ),
+            )
+        elif len(params) >= 8:
+            training_state = training_state.replace(  # type: ignore
+                normalizer_params=params[0],
+                policy_params=params[1],
+                qr_params=params[2],
+                target_qr_params=params[3],
+                alpha_params=params[4],
+                policy_optimizer_state=restore_state(
+                    params[5], training_state.policy_optimizer_state
+                ),
+                alpha_optimizer_state=restore_state(
+                    params[6], training_state.alpha_optimizer_state
+                ),
+                qr_optimizer_state=restore_state(
+                    params[7], training_state.qr_optimizer_state
                 ),
             )
         else:
@@ -469,14 +511,19 @@ def train(
     rng, rb_key = jax.random.split(rng)
     buffer_state = replay_buffer.init(rb_key)
 
-    critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
+    alpha_loss_fn, critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
         sac_network,
         reward_scaling=reward_scaling,
         discounting=discounting,
+        action_size=action_size,
         awac_lambda=awac_lambda,
         normalize_advantage=normalize_advantage,
         use_bro=use_bro,
+        target_entropy=target_entropy,
         max_weight=max_weight,
+    )
+    alpha_update = gradients.gradient_update_fn(
+        alpha_loss_fn, alpha_optimizer, pmap_axis_name=None
     )
     critic_update = gradients.gradient_update_fn(
         critic_loss_fn, qr_optimizer, pmap_axis_name=None, has_aux=True
@@ -566,18 +613,32 @@ def train(
         unused_t,
     ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
         training_state, buffer_state, key, count = carry
-        key, key_critic, key_actor, key_planner = jax.random.split(key, 4)
+        key, key_alpha, key_critic, key_actor, key_planner = jax.random.split(key, 5)
 
         buffer_state, sampled = replay_buffer.sample(buffer_state)
 
         critic_transitions = _strip_policy_extras(sampled)
+        alpha_loss, alpha_params, alpha_optimizer_state = alpha_update(
+            training_state.alpha_params,
+            training_state.policy_params,
+            training_state.normalizer_params,
+            critic_transitions,
+            key_alpha,
+            optimizer_state=training_state.alpha_optimizer_state,
+        )
+        if entropy_bonus:
+            alpha = jnp.exp(training_state.alpha_params) + min_alpha
+        else:
+            alpha = 0.0
         (critic_loss, critic_aux), qr_params, qr_optimizer_state = critic_update(
             training_state.qr_params,
             training_state.policy_params,
             training_state.normalizer_params,
             training_state.target_qr_params,
+            alpha,
             critic_transitions,
             key_critic,
+            reward_q_transform,
             optimizer_state=training_state.qr_optimizer_state,
             params=training_state.qr_params,
         )
@@ -637,6 +698,7 @@ def train(
                     policy_params,
                     training_state.normalizer_params,
                     qr_params,
+                    alpha,
                     minibatch,
                     step_key,
                     optimizer_state=policy_optimizer_state,
@@ -675,6 +737,7 @@ def train(
                 training_state.policy_params,
                 training_state.normalizer_params,
                 qr_params,
+                alpha,
                 actor_transitions,
                 key_actor,
                 optimizer_state=training_state.policy_optimizer_state,
@@ -698,12 +761,16 @@ def train(
             qr_params=qr_params,
             target_qr_params=new_target_qr_params,
             gradient_steps=training_state.gradient_steps + 1,
+            alpha_optimizer_state=alpha_optimizer_state,
+            alpha_params=alpha_params,
         )
         actor_aux = {f"actor/{k}": v for k, v in aux.items()}
         critic_aux = {f"critic/{k}": v for k, v in critic_aux.items()}
         metrics = {
             "critic_loss": critic_loss,
             "actor_loss": actor_loss,
+            "alpha_loss": alpha_loss,
+            "alpha": jnp.exp(alpha_params),
             "planner/avg_rollout_return": planner_avg_rollout_return,
             **critic_aux,
             **actor_aux,
@@ -968,7 +1035,9 @@ def train(
                 training_state.policy_params,
                 training_state.qr_params,
                 training_state.target_qr_params,
+                training_state.alpha_params,
                 training_state.policy_optimizer_state,
+                training_state.alpha_optimizer_state,
                 training_state.qr_optimizer_state,
             )
             dummy_ckpt_config = config_dict.ConfigDict()
@@ -989,7 +1058,9 @@ def train(
         training_state.policy_params,
         training_state.qr_params,
         training_state.target_qr_params,
+        training_state.alpha_params,
         training_state.policy_optimizer_state,
+        training_state.alpha_optimizer_state,
         training_state.qr_optimizer_state,
     )
     logging.info("total steps: %s", total_steps)
