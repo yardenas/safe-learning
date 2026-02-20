@@ -6,12 +6,17 @@ defaults:
   - _self_
 
 training:
-  num_timesteps: 4000000
+  num_envs: 10
+  num_timesteps: 100000
+  action_repeat: 4
   safe: false
   train_domain_randomization: false
   eval_domain_randomization: false
   num_eval_episodes: 1
+  num_eval_envs: 64
 
 agent:
+  max_replay_size: 1000000
+  grad_updates_per_step: 10
+  batch_size: 128
   activation: swish
-  actor_update_source: critic_replay
