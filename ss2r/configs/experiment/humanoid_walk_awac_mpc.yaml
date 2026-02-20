@@ -16,7 +16,7 @@ training:
   num_eval_envs: 64
 
 agent:
-  max_replay_size: 1000000
+  max_replay_size: 100000
   grad_updates_per_step: 10
   batch_size: 128
   activation: swish
