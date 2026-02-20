@@ -12,6 +12,8 @@ from ss2r.algorithms.sac.q_transforms import QTransformation
 
 Transition: TypeAlias = types.Transition
 
+AWAC_VALUE_SAMPLES = 16
+
 
 def atanh_with_slack(y: jnp.ndarray, eps: float = 1e-5) -> jnp.ndarray:
     """
@@ -140,17 +142,27 @@ def make_losses(
         dist_params = policy_network.apply(
             normalizer_params, policy_params, transitions.observation
         )
+        key_v, key_exploration = jax.random.split(key)
+        v_sample_keys = jax.random.split(key_v, AWAC_VALUE_SAMPLES)
+        v_actions_raw = jax.vmap(
+            lambda sample_key: parametric_action_distribution.sample_no_postprocessing(
+                dist_params, sample_key
+            )
+        )(v_sample_keys)
+        v_actions = jax.vmap(parametric_action_distribution.postprocess)(v_actions_raw)
+        q_pi_samples = jax.vmap(
+            lambda sampled_action: qr_network.apply(
+                normalizer_params, q_params, transitions.observation, sampled_action
+            )
+        )(v_actions)
+        v = jnp.mean(_reduce_q(q_pi_samples, use_bro), axis=0)
+
         pi_action_raw = parametric_action_distribution.sample_no_postprocessing(
-            dist_params, key
+            dist_params, key_exploration
         )
         pi_action_log_prob = parametric_action_distribution.log_prob(
             dist_params, pi_action_raw
         )
-        pi_action = parametric_action_distribution.postprocess(pi_action_raw)
-        q_pi = qr_network.apply(
-            normalizer_params, q_params, transitions.observation, pi_action
-        )
-        v = _reduce_q(q_pi, use_bro)
         q = qr_network.apply(
             normalizer_params, q_params, transitions.observation, transitions.action
         )
