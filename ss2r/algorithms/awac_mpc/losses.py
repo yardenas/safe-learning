@@ -173,10 +173,10 @@ def make_losses(
             advantage = q - v
         if normalize_advantage:
             advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-        unclipped_weights = jnp.exp(advantage / awac_lambda)
+        unclipped_weights = advantage
         weights = unclipped_weights
         if max_weight is not None:
-            weights = jnp.minimum(weights, max_weight)
+            weights = jnp.clip(weights, -max_weight, max_weight)
         weights = jax.lax.stop_gradient(weights)
         log_prob = parametric_action_distribution.log_prob(
             dist_params, atanh_with_slack(transitions.action)
