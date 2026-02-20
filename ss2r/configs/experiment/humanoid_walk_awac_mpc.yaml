@@ -6,8 +6,7 @@ defaults:
   - _self_
 
 training:
-  num_envs: 10
-  num_timesteps: 100000
+  num_timesteps: 4000000
   safe: false
   train_domain_randomization: false
   eval_domain_randomization: false
@@ -15,7 +14,5 @@ training:
   num_eval_envs: 64
 
 agent:
-  max_replay_size: 100000
-  grad_updates_per_step: 10
-  batch_size: 128
+  batch_size: 1024
   activation: swish
