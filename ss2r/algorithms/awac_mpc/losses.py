@@ -76,6 +76,17 @@ def _dist_params_to_mean_logstd(
     return mean, logstd
 
 
+def _gaussian_diag_log_prob(
+    actions: jax.Array,
+    mean: jax.Array,
+    logstd: jax.Array,
+) -> jax.Array:
+    var = jnp.exp(2.0 * logstd)
+    log2pi = jnp.log(2.0 * jnp.pi)
+    quad = jnp.square(actions - mean) / (var + 1e-8)
+    return -0.5 * jnp.sum(quad + 2.0 * logstd + log2pi, axis=-1)
+
+
 def _gaussian_kl_target_current(
     target_mean: jax.Array,
     target_logstd: jax.Array,
@@ -95,6 +106,34 @@ def _gaussian_kl_target_current(
     return jnp.sum(kl_vec, axis=-1)
 
 
+def _gaussian_kl_mean_only(
+    target_mean: jax.Array,
+    target_logstd: jax.Array,
+    current_mean: jax.Array,
+) -> jax.Array:
+    """KL where only mean changes: KL(N_t(mu_t,s_t) || N(mu,s_t))."""
+    target_var = jnp.exp(2.0 * target_logstd)
+    kl_vec = 0.5 * jnp.square(target_mean - current_mean) / (target_var + 1e-8)
+    return jnp.sum(kl_vec, axis=-1)
+
+
+def _gaussian_kl_std_only(
+    target_logstd: jax.Array,
+    current_logstd: jax.Array,
+) -> jax.Array:
+    """KL where only std changes: KL(N_t(mu_t,s_t) || N(mu_t,s))."""
+    target_var = jnp.exp(2.0 * target_logstd)
+    current_var = jnp.exp(2.0 * current_logstd)
+    kl_vec = (
+        current_logstd - target_logstd + target_var / (2.0 * current_var + 1e-8) - 0.5
+    )
+    return jnp.sum(kl_vec, axis=-1)
+
+
+def _positive_dual(raw: jax.Array) -> jax.Array:
+    return jax.nn.softplus(raw) + 1e-8
+
+
 def make_losses(
     sac_network: SafeSACNetworks,
     *,
@@ -104,8 +143,8 @@ def make_losses(
     mpo_eta_epsilon: float,
     mpo_eta_opt_maxiter: int,
     mpo_num_action_samples: int,
-    mpo_kl_regularization: float,
-    mpo_kl_epsilon: float,
+    mpo_kl_mean_epsilon: float,
+    mpo_kl_std_epsilon: float,
     use_bro: bool,
 ):
     if mpo_eta_init <= 0.0:
@@ -120,12 +159,12 @@ def make_losses(
         raise ValueError(
             f"mpo_num_action_samples must be >= 1, got {mpo_num_action_samples}."
         )
-    if mpo_kl_regularization < 0.0:
+    if mpo_kl_mean_epsilon < 0.0:
         raise ValueError(
-            f"mpo_kl_regularization must be >= 0, got {mpo_kl_regularization}."
+            f"mpo_kl_mean_epsilon must be >= 0, got {mpo_kl_mean_epsilon}."
         )
-    if mpo_kl_epsilon < 0.0:
-        raise ValueError(f"mpo_kl_epsilon must be >= 0, got {mpo_kl_epsilon}.")
+    if mpo_kl_std_epsilon < 0.0:
+        raise ValueError(f"mpo_kl_std_epsilon must be >= 0, got {mpo_kl_std_epsilon}.")
 
     policy_network = sac_network.policy_network
     qr_network = sac_network.qr_network
@@ -176,6 +215,7 @@ def make_losses(
     def actor_loss(
         policy_params: Params,
         target_policy_params: Params,
+        dual_params: Params,
         normalizer_params: Any,
         q_params: Params,
         transitions: Transition,
@@ -226,36 +266,79 @@ def make_losses(
         )(raw_actions_nba)
         # [N, B] -> [B, N]
         sampled_log_probs_current = jnp.swapaxes(sampled_log_probs_current, 0, 1)
+        nll_loss = jnp.mean(-jnp.sum(mpo_weights * sampled_log_probs_current, axis=-1))
 
-        nll_loss_per_state = -jnp.sum(mpo_weights * sampled_log_probs_current, axis=-1)
-        nll_loss = jnp.mean(nll_loss_per_state)
-
+        raw_actions_bna = jnp.swapaxes(raw_actions_nba, 0, 1)
         target_mean, target_logstd = _dist_params_to_mean_logstd(
             target_dist_params, parametric_action_distribution
         )
         current_mean, current_logstd = _dist_params_to_mean_logstd(
             current_dist_params, parametric_action_distribution
         )
-        kl_per_state = _gaussian_kl_target_current(
-            target_mean=target_mean,
-            target_logstd=target_logstd,
-            current_mean=current_mean,
-            current_logstd=current_logstd,
-        )
-        kl_mean = jnp.mean(kl_per_state)
-        kl_excess = jnp.maximum(kl_mean - mpo_kl_epsilon, 0.0)
-        kl_penalty = mpo_kl_regularization * kl_excess
 
-        loss = nll_loss + kl_penalty
+        # Standard MPO M-step decomposition.
+        log_prob_mean = _gaussian_diag_log_prob(
+            raw_actions_bna,
+            current_mean[:, None, :],
+            target_logstd[:, None, :],
+        )
+        log_prob_std = _gaussian_diag_log_prob(
+            raw_actions_bna,
+            target_mean[:, None, :],
+            current_logstd[:, None, :],
+        )
+        nll_mean = jnp.mean(-jnp.sum(mpo_weights * log_prob_mean, axis=-1))
+        nll_std = jnp.mean(-jnp.sum(mpo_weights * log_prob_std, axis=-1))
+        nll_decoupled = nll_mean + nll_std
+
+        kl_mean = jnp.mean(
+            _gaussian_kl_mean_only(
+                target_mean=target_mean,
+                target_logstd=target_logstd,
+                current_mean=current_mean,
+            )
+        )
+        kl_std = jnp.mean(
+            _gaussian_kl_std_only(
+                target_logstd=target_logstd,
+                current_logstd=current_logstd,
+            )
+        )
+        alpha_mean = _positive_dual(dual_params["log_alpha_mean"])
+        alpha_std = _positive_dual(dual_params["log_alpha_std"])
+
+        kl_mean_penalty = jax.lax.stop_gradient(alpha_mean) * (
+            kl_mean - mpo_kl_mean_epsilon
+        )
+        kl_std_penalty = jax.lax.stop_gradient(alpha_std) * (
+            kl_std - mpo_kl_std_epsilon
+        )
+
+        loss = nll_decoupled + kl_mean_penalty + kl_std_penalty
+        kl_target_current = jnp.mean(
+            _gaussian_kl_target_current(
+                target_mean=target_mean,
+                target_logstd=target_logstd,
+                current_mean=current_mean,
+                current_logstd=current_logstd,
+            )
+        )
         weight_entropy = -jnp.mean(
             jnp.sum(mpo_weights * jnp.log(mpo_weights + 1e-8), axis=-1)
         )
         aux = {
             "eta": eta,
             "nll_loss": nll_loss,
-            "kl_target_current_mean": kl_mean,
-            "kl_excess": kl_excess,
-            "kl_penalty": kl_penalty,
+            "nll_decoupled": nll_decoupled,
+            "nll_mean": nll_mean,
+            "nll_std": nll_std,
+            "alpha_mean": alpha_mean,
+            "alpha_std": alpha_std,
+            "kl_target_current_mean": kl_target_current,
+            "kl_mean": kl_mean,
+            "kl_std": kl_std,
+            "kl_mean_penalty": kl_mean_penalty,
+            "kl_std_penalty": kl_std_penalty,
             "weight_entropy": weight_entropy,
             "weight_min": jnp.min(mpo_weights),
             "weight_max": jnp.max(mpo_weights),
@@ -265,4 +348,22 @@ def make_losses(
         }
         return loss, aux
 
-    return critic_loss, actor_loss
+    def dual_loss(
+        dual_params: Params,
+        kl_mean: jax.Array,
+        kl_std: jax.Array,
+    ) -> tuple[jax.Array, dict[str, jax.Array]]:
+        alpha_mean = _positive_dual(dual_params["log_alpha_mean"])
+        alpha_std = _positive_dual(dual_params["log_alpha_std"])
+        loss = alpha_mean * (mpo_kl_mean_epsilon - jax.lax.stop_gradient(kl_mean))
+        loss += alpha_std * (mpo_kl_std_epsilon - jax.lax.stop_gradient(kl_std))
+        aux = {
+            "dual_loss": loss,
+            "alpha_mean": alpha_mean,
+            "alpha_std": alpha_std,
+            "kl_mean_target": jnp.asarray(mpo_kl_mean_epsilon, dtype=kl_mean.dtype),
+            "kl_std_target": jnp.asarray(mpo_kl_std_epsilon, dtype=kl_std.dtype),
+        }
+        return loss, aux
+
+    return critic_loss, actor_loss, dual_loss
