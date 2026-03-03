@@ -19,17 +19,17 @@ from ss2r.benchmark_suites.mujoco_playground.cartpole.spidr_cartpole import (
     VisionSPiDRCartpole,
 )
 from ss2r.benchmark_suites.mujoco_playground.g1_joystick import g1_joystick
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking import (
-    G1MocapTracking,
-)
-from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking import (
-    default_config as g1_mocap_default_config,
-)
 from ss2r.benchmark_suites.mujoco_playground.go1_joystick import go1_joystick
 from ss2r.benchmark_suites.mujoco_playground.go2_joystick import (
     getup,
     handstand,
     joystick,
+)
+from ss2r.benchmark_suites.mujoco_playground.h1_mocap_tracking import (
+    H1MocapTracking,
+)
+from ss2r.benchmark_suites.mujoco_playground.h1_mocap_tracking import (
+    default_config as h1_mocap_default_config,
 )
 from ss2r.benchmark_suites.mujoco_playground.humanoid import humanoid as dm_humanoid
 from ss2r.benchmark_suites.mujoco_playground.humanoid import (
@@ -61,9 +61,9 @@ locomotion.register_environment(
     joystick.default_config,
 )
 locomotion.register_environment(
-    "G1MocapTracking",
-    G1MocapTracking,
-    g1_mocap_default_config,
+    "H1MocapTracking",
+    H1MocapTracking,
+    h1_mocap_default_config,
 )
 locomotion.register_environment("Go2Getup", getup.Getup, getup.default_config)
 locomotion.register_environment(
@@ -603,7 +603,7 @@ render_fns = {
     "G1JoystickFlatTerrain": functools.partial(
         mujoco_playground.render, camera="track"
     ),
-    "G1MocapTracking": functools.partial(mujoco_playground.render),
+    "H1MocapTracking": functools.partial(mujoco_playground.render),
     "Go1JoystickFlatTerrain": functools.partial(
         mujoco_playground.render, camera="track"
     ),

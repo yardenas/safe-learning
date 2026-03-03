@@ -1,0 +1,43 @@
+defaults:
+  - mujoco_playground_base
+
+task_name: H1MocapTracking
+task_params:
+  ctrl_dt: 0.02
+  sim_dt: 0.002
+  episode_length: 1000
+  env_name: MjxUnitreeH1
+  disable_arms: false
+  goal_type: GoalTrajMimic
+  goal_params:
+    visualize_goal: true
+  control_type: DefaultControl
+  control_params: {}
+  reward_type: MimicReward
+  reward_params:
+    qpos_w_exp: 10.0
+    qvel_w_exp: 2.0
+    rpos_w_exp: 100.0
+    rquat_w_exp: 10.0
+    rvel_w_exp: 0.1
+    qpos_w_sum: 0.0
+    qvel_w_sum: 0.0
+    rpos_w_sum: 0.5
+    rquat_w_sum: 0.3
+    rvel_w_sum: 0.0
+    action_out_of_bounds_coeff: 0.01
+    joint_acc_coeff: 0.0
+    joint_torque_coeff: 0.0
+    action_rate_coeff: 0.0
+    sites_for_mimic:
+      - upper_body_mimic
+      - left_hand_mimic
+      - left_foot_mimic
+      - right_hand_mimic
+      - right_foot_mimic
+  loco:
+    dataset_name: walk1_subject5
+    reference_source: hf
+    reference_repo_id: robfiras/loco-mujoco-datasets
+    reference_repo_type: dataset
+    reference_dir: Lafan1/mocap/UnitreeH1

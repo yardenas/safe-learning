@@ -1,8 +1,0 @@
-robot_pose_modifier:
-  - left_shoulder_roll_joint: "np.pi/2"
-  - left_elbow_joint: "np.pi/2"
-  - right_shoulder_roll_joint: "-np.pi/2"
-  - right_elbow_joint: "np.pi/2"
-
-
-env_params: {}

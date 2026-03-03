@@ -1,0 +1,26 @@
+site_joint_matches:
+  right_hand_mimic:
+    smpl_joint: "R_Wrist"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 0.0
+    solref: [ 0.005, 1.0 ]
+    solimp: [ 9.5e-01, 9.8e-01, 1.0e-02, 5.0e-01, 2.0e+00 ]
+  left_hand_mimic:
+    smpl_joint: "L_Wrist"
+    equality_constraint_type: mjEQ_WELD
+    torque_scale: 0.0
+    solref: [ 0.005, 1.0 ]
+    solimp: [ 9.5e-01, 9.8e-01, 1.0e-02, 5.0e-01, 2.0e+00 ]
+
+
+robot_pose_modifier:
+  - l_arm_shx: "np.pi/2"
+  - left_elbow: "np.pi/2"
+  - r_arm_shx: "-np.pi/2"
+  - right_elbow: "np.pi/2"
+
+optimization_params:
+  z_offset_feet: -0.1
+
+env_params:
+  disable_arms: false
