@@ -25,7 +25,7 @@ def default_config() -> config_dict.ConfigDict:
         env_name="MjxUnitreeH1",
         disable_arms=False,
         goal_type="GoalTrajMimic",
-        goal_params=config_dict.create(visualize_goal=True),
+        goal_params=config_dict.create(visualize_goal=False),
         control_type="DefaultControl",
         control_params=config_dict.create(),
         reward_type="MimicReward",

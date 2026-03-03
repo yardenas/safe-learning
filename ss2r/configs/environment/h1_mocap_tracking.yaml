@@ -10,7 +10,7 @@ task_params:
   disable_arms: false
   goal_type: GoalTrajMimic
   goal_params:
-    visualize_goal: true
+    visualize_goal: false
   control_type: DefaultControl
   control_params: {}
   reward_type: MimicReward
