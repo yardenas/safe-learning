@@ -1,7 +1,7 @@
 import mujoco
 from mujoco import MjSpec
 
-from .unitreeH1 import UnitreeH1
+from .unitreeH1 import UnitreeH1, _find_body
 
 
 class MjxUnitreeH1(UnitreeH1):
@@ -71,11 +71,11 @@ class MjxUnitreeH1(UnitreeH1):
             conaffinity=0,
         )
 
-        r_foot_b = spec.find_body("right_ankle_link")
+        r_foot_b = _find_body(spec, "right_ankle_link")
         r_foot_b.add_geom(name="right_foot1", **back_foot_attr)
         r_foot_b.add_geom(name="right_foot2", **front_foot_attr)
 
-        l_foot_b = spec.find_body("left_ankle_link")
+        l_foot_b = _find_body(spec, "left_ankle_link")
         l_foot_b.add_geom(name="left_foot1", **back_foot_attr)
         l_foot_b.add_geom(name="left_foot2", **front_foot_attr)
 

@@ -16,6 +16,15 @@ from ss2r.benchmark_suites.mujoco_playground.h1_mocap_tracking.loco_mujoco.envir
 )
 
 
+def _find_body(spec: MjSpec, body_name: str):
+    if hasattr(spec, "find_body"):
+        return spec.find_body(body_name)
+    for body in spec.bodies:
+        if body.name == body_name:
+            return body
+    raise ValueError(f"Body '{body_name}' not found in Mujoco specification.")
+
+
 class UnitreeH1(BaseRobotHumanoid):
 
     """
@@ -294,13 +303,13 @@ class UnitreeH1(BaseRobotHumanoid):
             MjSpec: Modified Mujoco specification.
         """
         # modify the arm orientation
-        left_shoulder_pitch_link = spec.find_body("left_shoulder_pitch_link")
+        left_shoulder_pitch_link = _find_body(spec, "left_shoulder_pitch_link")
         left_shoulder_pitch_link.quat = [1.0, 0.25, 0.1, 0.0]
-        right_elbow_link = spec.find_body("right_elbow_link")
+        right_elbow_link = _find_body(spec, "right_elbow_link")
         right_elbow_link.quat = [1.0, 0.0, 0.25, 0.0]
-        right_shoulder_pitch_link = spec.find_body("right_shoulder_pitch_link")
+        right_shoulder_pitch_link = _find_body(spec, "right_shoulder_pitch_link")
         right_shoulder_pitch_link.quat = [1.0, -0.25, 0.1, 0.0]
-        left_elbow_link = spec.find_body("left_elbow_link")
+        left_elbow_link = _find_body(spec, "left_elbow_link")
         left_elbow_link.quat = [1.0, 0.0, 0.25, 0.0]
 
         return spec
