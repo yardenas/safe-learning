@@ -9,7 +9,7 @@ from brax import envs
 from omegaconf import OmegaConf
 
 from ss2r import benchmark_suites
-from ss2r.algorithms import awac_mpc, hydrax_mpc, mbpo, ppo, sac, sbsrl
+from ss2r.algorithms import awac_mpc, mbpo, ppo, sac, sbsrl
 from ss2r.common.logging import TrainingLogger
 from ss2r.common.wandb import get_state_path, get_wandb_checkpoint
 
@@ -100,12 +100,6 @@ def get_train_fn(cfg):
             restore_checkpoint_path=restore_checkpoint_path,
             checkpoint_path=get_state_path(),
         )
-    elif cfg.agent.name == "hydrax_mpc":
-        train_fn = hydrax_mpc.get_train_fn(
-            cfg,
-            restore_checkpoint_path=restore_checkpoint_path,
-            checkpoint_path=get_state_path(),
-        )
     elif cfg.agent.name == "awac_mpc":
         train_fn = awac_mpc.get_train_fn(
             cfg,
@@ -138,19 +132,15 @@ def main(cfg):
     logger = TrainingLogger(cfg)
     train_fn = get_train_fn(cfg)
     planner_env = None
-    if cfg.agent.name == "hydrax_mpc":
-        train_env, eval_env = benchmark_suites.make_real_env(cfg)
-        use_vision = False
-    else:
-        train_env_wrap_fn, eval_env_wrap_fn = benchmark_suites.get_wrap_env_fn(cfg)
-        use_vision = "use_vision" in cfg.agent and cfg.agent.use_vision
-        train_env, eval_env = benchmark_suites.make(
-            cfg, train_env_wrap_fn, eval_env_wrap_fn
-        )
-        if cfg.agent.name == "awac_mpc":
-            actor_update_source = cfg.agent.get("actor_update_source", "planner_online")
-            if actor_update_source == "planner_online":
-                planner_env, _ = benchmark_suites.make_real_env(cfg)
+    train_env_wrap_fn, eval_env_wrap_fn = benchmark_suites.get_wrap_env_fn(cfg)
+    use_vision = "use_vision" in cfg.agent and cfg.agent.use_vision
+    train_env, eval_env = benchmark_suites.make(
+        cfg, train_env_wrap_fn, eval_env_wrap_fn
+    )
+    if cfg.agent.name == "awac_mpc":
+        actor_update_source = cfg.agent.get("actor_update_source", "planner_online")
+        if actor_update_source == "planner_online":
+            planner_env, _ = benchmark_suites.make_real_env(cfg)
     if use_vision:
         _validate_madrona_args(
             train_env,
@@ -179,25 +169,17 @@ def main(cfg):
             rng = jax.random.split(
                 jax.random.PRNGKey(cfg.training.seed), cfg.training.num_eval_envs
             )
-            if cfg.agent.name == "hydrax_mpc":
-                video = hydrax_mpc.render(
-                    eval_env,
-                    make_policy,
-                    cfg.training.episode_length,
-                    rng,
-                )
+            if len(params) != 2:
+                policy_params = params[:2]
             else:
-                if len(params) != 2:
-                    policy_params = params[:2]
-                else:
-                    policy_params = params
-                policy = make_policy(policy_params, deterministic=True)
-                video = benchmark_suites.render_fns[cfg.environment.task_name](
-                    eval_env,
-                    policy,
-                    cfg.training.episode_length,
-                    rng,
-                )
+                policy_params = params
+            policy = make_policy(policy_params, deterministic=True)
+            video = benchmark_suites.render_fns[cfg.environment.task_name](
+                eval_env,
+                policy,
+                cfg.training.episode_length,
+                rng,
+            )
             fps = (
                 1 / cfg.environment.task_params.ctrl_dt
                 if "task_params" in cfg.environment

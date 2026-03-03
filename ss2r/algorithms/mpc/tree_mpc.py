@@ -4,11 +4,55 @@ import jax
 import jax.nn as jnn
 import jax.numpy as jnp
 from flax import struct
-from hydrax.alg_base import Trajectory
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
-from .task import MujocoPlaygroundTask
+@struct.dataclass
+class Trajectory:
+    controls: jax.Array
+    knots: jax.Array
+    costs: jax.Array
+    trace_sites: Any
+
+
+class MujocoPlaygroundTask:
+    def __init__(self, env: mjx_env.MjxEnv, dt: float) -> None:
+        self.env = env
+        self.dt = float(dt)
+        ctrl_range = jnp.asarray(env.mj_model.actuator_ctrlrange, dtype=jnp.float32)
+        self.u_min = ctrl_range[:, 0]
+        self.u_max = ctrl_range[:, 1]
+
+    def running_cost(self, x: mjx.Data, u: jax.Array) -> float:
+        del u
+        if isinstance(x, dict):
+            reward = x.get("reward", None)
+            if reward is None:
+                raise ValueError(
+                    "Task payload missing reward; ensure env.step provides reward."
+                )
+            return -reward
+        if hasattr(x, "reward"):
+            return -x.reward
+        raise ValueError(
+            "Task running_cost expects reward in state payload or mjx.State."
+        )
+
+    def terminal_cost(self, x: jax.Array) -> float:
+        del x
+        return 0.0
+
+    def get_trace_sites(self, x: mjx.Data) -> jax.Array:
+        if hasattr(x, "site_xpos"):
+            return jnp.asarray(x.site_xpos, dtype=jnp.float32)
+        return jnp.zeros((0, 3), dtype=jnp.float32)
+
+
+def make_task(env: mjx_env.MjxEnv) -> MujocoPlaygroundTask:
+    env_dt = getattr(env, "_ctrl_dt", None)
+    if env_dt is None:
+        raise ValueError("Unable to infer controller dt from environment.")
+    return MujocoPlaygroundTask(env, float(env_dt))
 
 
 @struct.dataclass

@@ -1,7 +1,6 @@
 """MPO-style training with optional TreeMPC actor supervision."""
 
 import time
-from types import SimpleNamespace
 from typing import Any, Callable, Literal, Mapping, Optional, Tuple
 
 import jax
@@ -19,8 +18,12 @@ from ml_collections import config_dict
 
 import ss2r.algorithms.sac.networks as sac_networks
 from ss2r.algorithms.awac_mpc import losses as awac_losses
-from ss2r.algorithms.hydrax_mpc.factory import make_controller, make_task
-from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPCModelParams, TreeMPCParams
+from ss2r.algorithms.mpc.tree_mpc import (
+    TreeMPC,
+    TreeMPCModelParams,
+    TreeMPCParams,
+    make_task,
+)
 from ss2r.algorithms.sac import gradients
 from ss2r.algorithms.sac.types import (
     Metrics,
@@ -473,17 +476,9 @@ def train(
         controller_kwargs["n_heads"] = int(n_heads)
         controller_kwargs["use_bro"] = bool(use_bro)
         controller_kwargs["gamma"] = discounting
-        controller_cfg = SimpleNamespace(
-            agent={
-                "controller_name": controller_name,
-                "controller_kwargs": controller_kwargs,
-            },
-            training=SimpleNamespace(seed=seed),
-        )
         task = make_task(planner_env)  # type: ignore[arg-type]
-        controller = make_controller(controller_cfg, task, env=planner_env)  # type: ignore[arg-type]
-        if hasattr(controller, "bind_sac_network"):
-            controller.bind_sac_network(sac_network)
+        controller = TreeMPC(task=task, **controller_kwargs)
+        controller.bind_sac_network(sac_network)
         planner_params_template = _init_planner_params(controller, seed, None)
 
     dummy_planner_state = None

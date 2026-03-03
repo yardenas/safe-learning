@@ -25,8 +25,7 @@ from mujoco import MjData, mjx
 from orbax import checkpoint as ocp
 
 import ss2r.algorithms.sac.networks as sac_networks
-from ss2r.algorithms.hydrax_mpc.factory import make_task
-from ss2r.algorithms.hydrax_mpc.tree_mpc import TreeMPC, TreeMPCParams
+from ss2r.algorithms.mpc.tree_mpc import TreeMPC, TreeMPCParams, make_task
 from ss2r.benchmark_suites.mujoco_playground.h1_mocap_tracking.h1_mocap_env import (
     H1MocapTracking,
 )

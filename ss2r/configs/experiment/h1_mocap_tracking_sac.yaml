@@ -10,3 +10,7 @@ training:
   eval_domain_randomization: false
   safe: false
   value_privileged: false
+
+agent:
+  reward_scaling: 1.
+
