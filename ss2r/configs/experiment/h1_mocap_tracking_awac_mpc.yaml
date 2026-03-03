@@ -20,3 +20,4 @@ agent:
   batch_size: 512
   policy_hidden_layer_sizes: [256, 256, 256]
   value_hidden_layer_sizes: [512, 512]  # two block of BroNet
+  discounting: 0.95
