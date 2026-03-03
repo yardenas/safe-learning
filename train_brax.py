@@ -1,5 +1,6 @@
 import functools
 import logging
+import subprocess
 from pathlib import Path
 
 import hydra
@@ -13,6 +14,22 @@ from ss2r.common.logging import TrainingLogger
 from ss2r.common.wandb import get_state_path, get_wandb_checkpoint
 
 _LOG = logging.getLogger(__name__)
+
+
+def log_git_hash() -> None:
+    repo_root = Path(__file__).resolve().parent
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        _LOG.warning("Unable to determine git hash: %s", exc)
+        return
+    _LOG.info("Git hash: %s", result.stdout.strip())
 
 
 def locate_last_checkpoint() -> Path | None:
@@ -117,6 +134,7 @@ def main(cfg):
         f"Setting up experiment with the following configuration: "
         f"\n{OmegaConf.to_yaml(cfg)}"
     )
+    log_git_hash()
     logger = TrainingLogger(cfg)
     train_fn = get_train_fn(cfg)
     planner_env = None
