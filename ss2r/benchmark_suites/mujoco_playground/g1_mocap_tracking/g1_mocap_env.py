@@ -1,3 +1,6 @@
+"""G1 mocap tracking adapter backed by vendored loco_mujoco MJX env."""
+
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -5,14 +8,14 @@ import jax
 import jax.numpy as jp
 import mujoco
 import numpy as np
-from etils import epath
 from ml_collections import config_dict
 from mujoco import mjx
-from mujoco.mjx._src.math import quat_sub
 from mujoco_playground._src import mjx_env
 
-ROOT_PATH = epath.Path(__file__).parent / "assets"
-SCENE_XML = ROOT_PATH / "xmls" / "scene_23dof.xml"
+import ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.environments  # noqa: F401
+from ss2r.benchmark_suites.mujoco_playground.g1_mocap_tracking.loco_mujoco.task_factories.imitation_factory import (
+    ImitationFactory,
+)
 
 
 def default_config() -> config_dict.ConfigDict:
@@ -20,424 +23,269 @@ def default_config() -> config_dict.ConfigDict:
         ctrl_dt=0.02,
         sim_dt=0.002,
         episode_length=1000,
-        action_repeat=1,
-        action_scale=0.5,
-        noise_config=config_dict.create(
-            level=1.0,
-            scales=config_dict.create(
-                joint_pos=0.03,
-                joint_vel=1.5,
-                gravity=0.05,
-                linvel=0.1,
-                gyro=0.2,
+        loco=config_dict.create(
+            dataset_name="dance1_subject3",
+            reference_source="hf",
+            reference_repo_id="robfiras/loco-mujoco-datasets",
+            reference_repo_type="dataset",
+            reference_dir="Lafan1/mocap/UnitreeG1",
+            control_type="DefaultControl",
+            control_params=config_dict.create(),
+            mimic_reward=config_dict.create(
+                qpos_w_exp=10.0,
+                qvel_w_exp=2.0,
+                rpos_w_exp=100.0,
+                rquat_w_exp=10.0,
+                rvel_w_exp=0.1,
+                qpos_w_sum=0.4,
+                qvel_w_sum=0.2,
+                rpos_w_sum=0.5,
+                rquat_w_sum=0.3,
+                rvel_w_sum=0.1,
+                action_out_of_bounds_coeff=0.01,
+                joint_acc_coeff=0.0,
+                joint_torque_coeff=0.0,
+                action_rate_coeff=0.0,
             ),
         ),
-        reward_config=config_dict.create(
-            scales=config_dict.create(
-                configuration=-1.0,
-                foot_position=-5.0,
-                foot_orientation=-0.1,
-                control=-1.0,
-                action_rate=0.0,
-                alive=0.0,
-                termination=-100.0,
-            ),
-        ),
-        reference_path="ss2r/benchmark_suites/mujoco_playground/g1_mocap_tracking/walk1_subject1.npz",
-        random_start=True,
-        loop_reference=True,
-        reset_noise_scale=0.01,
-        termination_height=0.45,
-        termination_upvector_z=0.0,
     )
 
 
-def get_assets() -> Dict[str, bytes]:
-    assets: Dict[str, bytes] = {}
-    mjx_env.update_assets(assets, ROOT_PATH / "xmls", "*.xml")
-    mjx_env.update_assets(assets, ROOT_PATH / "xmls" / "assets")
-    path = mjx_env.MENAGERIE_PATH / "unitree_g1"
-    mjx_env.update_assets(assets, path, "*.xml")
-    mjx_env.update_assets(assets, path / "assets")
-    return assets
+def _lafan1_dataset_name(config: config_dict.ConfigDict) -> str:
+    dataset_candidates = [
+        _cfg_path_get(config, ("loco", "dataset_name"), None),
+        _cfg_path_get(
+            config,
+            ("task_factory", "params", "lafan1_dataset_conf", "dataset_name"),
+            None,
+        ),
+        _cfg_path_get(
+            config,
+            (
+                "experiment",
+                "task_factory",
+                "params",
+                "lafan1_dataset_conf",
+                "dataset_name",
+            ),
+            None,
+        ),
+    ]
+
+    raw_name: Any = "dance1_subject3"
+    for candidate in dataset_candidates:
+        if candidate is None:
+            continue
+        raw_name = candidate
+        break
+
+    if isinstance(raw_name, (list, tuple)):
+        raw_name = raw_name[0] if raw_name else "dance1_subject3"
+    name = str(raw_name).strip()
+    if not name:
+        name = "dance1_subject3"
+
+    name = Path(name).name
+    if name.endswith(".npz"):
+        name = name[:-4]
+    if name.endswith(".csv"):
+        name = name[:-4]
+    return name or "dance1_subject3"
 
 
-def _sensor_adr(mj_model: mujoco.MjModel, sensor_name: str) -> int:
-    sensor_id = mujoco.mj_name2id(
-        mj_model, mujoco.mjtObj.mjOBJ_SENSOR.value, sensor_name
+def _cfg_path_get(config: Any, path: tuple[str, ...], default: Any) -> Any:
+    current = config
+    for key in path:
+        if isinstance(current, Mapping):
+            if key not in current:
+                return default
+            current = current[key]
+            continue
+        if hasattr(current, key):
+            current = getattr(current, key)
+            continue
+        return default
+    return current
+
+
+def _episode_length(config: config_dict.ConfigDict) -> int:
+    candidates = [
+        _cfg_path_get(config, ("episode_length",), None),
+        _cfg_path_get(config, ("horizon",), None),
+        _cfg_path_get(config, ("env_params", "horizon"), None),
+        _cfg_path_get(config, ("experiment", "env_params", "horizon"), None),
+    ]
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return 1000
+
+
+def _to_plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _to_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_plain(v) for v in value]
+    return value
+
+
+def _control_spec(config: config_dict.ConfigDict) -> tuple[str, dict[str, Any]]:
+    control_type_candidates = [
+        _cfg_path_get(config, ("loco", "control_type"), None),
+        _cfg_path_get(config, ("control_type",), None),
+        _cfg_path_get(config, ("env_params", "control_type"), None),
+        _cfg_path_get(config, ("experiment", "env_params", "control_type"), None),
+    ]
+    control_type = next((c for c in control_type_candidates if c is not None), None)
+    control_type_str = (
+        str(control_type) if control_type is not None else "DefaultControl"
     )
-    if sensor_id < 0:
-        raise ValueError(f"Sensor `{sensor_name}` was not found in model.")
-    return int(mj_model.sensor_adr[sensor_id])
+
+    control_params_candidates = [
+        _cfg_path_get(config, ("loco", "control_params"), None),
+        _cfg_path_get(config, ("control_params",), None),
+        _cfg_path_get(config, ("env_params", "control_params"), None),
+        _cfg_path_get(config, ("experiment", "env_params", "control_params"), None),
+    ]
+    control_params_raw = next(
+        (c for c in control_params_candidates if c is not None), {}
+    )
+    control_params = (
+        _to_plain(control_params_raw) if isinstance(control_params_raw, Mapping) else {}
+    )
+    return control_type_str, control_params
+
+
+def _mimic_reward_params(config: config_dict.ConfigDict) -> dict[str, Any]:
+    defaults = {
+        "qpos_w_exp": 10.0,
+        "qvel_w_exp": 2.0,
+        "rpos_w_exp": 100.0,
+        "rquat_w_exp": 10.0,
+        "rvel_w_exp": 0.1,
+        "qpos_w_sum": 0.4,
+        "qvel_w_sum": 0.2,
+        "rpos_w_sum": 0.5,
+        "rquat_w_sum": 0.3,
+        "rvel_w_sum": 0.1,
+        "action_out_of_bounds_coeff": 0.01,
+        "joint_acc_coeff": 0.0,
+        "joint_torque_coeff": 0.0,
+        "action_rate_coeff": 0.0,
+    }
+    candidate_cfgs = [
+        _cfg_path_get(config, ("loco", "mimic_reward"), None),
+        _cfg_path_get(config, ("reward_params",), None),
+        _cfg_path_get(config, ("env_params", "reward_params"), None),
+        _cfg_path_get(config, ("experiment", "env_params", "reward_params"), None),
+    ]
+    reward_cfg = next((c for c in candidate_cfgs if c is not None), None)
+    if reward_cfg is None:
+        return defaults
+
+    out: dict[str, Any] = {}
+    for key, default_value in defaults.items():
+        value = _cfg_path_get(reward_cfg, (key,), default_value)
+        out[key] = float(value)
+    sites_for_mimic = _cfg_path_get(reward_cfg, ("sites_for_mimic",), None)
+    if sites_for_mimic is not None:
+        out["sites_for_mimic"] = list(sites_for_mimic)
+    return out
 
 
 class G1MocapTracking(mjx_env.MjxEnv):
-    """G1 mocap tracking task with direct actuator control."""
+    """Adapter that presents loco_mujoco MjxUnitreeG1 as a playground MjxEnv."""
 
     def __init__(
         self,
+        task: str = "flat_terrain",
         config: config_dict.ConfigDict = default_config(),
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
     ):
+        del task
         super().__init__(config, config_overrides)
-        self._model_assets = get_assets()
-        self._mj_model = mujoco.MjModel.from_xml_string(
-            SCENE_XML.read_text(),
-            assets=self._model_assets,
+
+        self._xml_path = str(
+            Path(__file__).resolve().parent
+            / "loco_mujoco"
+            / "models"
+            / "unitree_g1"
+            / "g1_23dof.xml"
         )
-        self._mj_model.opt.timestep = self.sim_dt
-        self._mj_model.vis.global_.offwidth = 3840
-        self._mj_model.vis.global_.offheight = 2160
-        self._mjx_model = mjx.put_model(self._mj_model)
-        self._xml_path = SCENE_XML.as_posix()
-        self._post_init()
 
-    def _resolve_reference_path(self, reference_path: str) -> Path:
-        if not reference_path:
-            raise ValueError(
-                "task_params.reference_path must point to a local mocap .npz file."
-            )
+        n_substeps = max(
+            1, int(round(float(self._config.ctrl_dt / self._config.sim_dt)))
+        )
+        dataset_name = _lafan1_dataset_name(self._config)
+        self._dataset_name = dataset_name
+        mimic_reward_params = _mimic_reward_params(self._config)
+        control_type, control_params = _control_spec(self._config)
 
-        raw = Path(reference_path)
-        candidates = []
-        if raw.is_absolute():
-            candidates.append(raw)
+        self._loco_env = ImitationFactory.make(
+            "MjxUnitreeG1",
+            lafan1_dataset_conf={"dataset_name": dataset_name},
+            reward_type="MimicReward",
+            reward_params=mimic_reward_params,
+            control_type=control_type,
+            control_params=control_params,
+            timestep=float(self._config.sim_dt),
+            n_substeps=n_substeps,
+            horizon=_episode_length(self._config),
+        )
+
+        self._mj_model = self._loco_env.model
+        self._mjx_model = self._loco_env.sys
+        self._action_size = int(np.prod(self._loco_env.info.action_space.shape))
+
+    def _to_playground_state(
+        self,
+        loco_state: Any,
+        *,
+        rng: jax.Array | None = None,
+        previous_state: mjx_env.State | None = None,
+    ) -> mjx_env.State:
+        if previous_state is None:
+            info = dict(loco_state.info)
+            metrics = {}
         else:
-            repo_root = Path(__file__).resolve().parents[4]
-            candidates.extend(
-                [
-                    Path.cwd() / raw,
-                    repo_root / raw,
-                    Path(ROOT_PATH) / raw,
-                ]
-            )
+            # Preserve wrapper-added carry structure for JAX scans.
+            info = dict(previous_state.info)
+            metrics = dict(previous_state.metrics)
 
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
+        info["_loco_state"] = loco_state
+        if rng is not None and "rng" not in info:
+            info["rng"] = rng
 
-        tried = "\n".join(str(c) for c in candidates)
-        raise ValueError(
-            "Could not find local mocap reference file. Set task_params.reference_path "
-            f"to an existing .npz. Tried:\n{tried}"
+        if previous_state is None:
+            reward = jp.asarray(loco_state.reward)
+            done = jp.asarray(loco_state.done, dtype=jp.float32)
+        else:
+            reward = jp.asarray(loco_state.reward, dtype=previous_state.reward.dtype)
+            done = jp.asarray(loco_state.done, dtype=previous_state.done.dtype)
+
+        return mjx_env.State(
+            data=loco_state.data,
+            obs=loco_state.observation,
+            reward=reward,
+            done=done,
+            metrics=metrics,
+            info=info,
         )
-
-    def _post_init(self) -> None:
-        self._nu = int(self._mj_model.nu)
-        self._init_q = jp.array(self._mj_model.qpos0)
-        self._default_pose = jp.array(self._mj_model.qpos0[7 : 7 + self._nu])
-
-        self._torso_imu_site_id = self._mj_model.site("imu_in_torso").id
-        self._pelvis_imu_site_id = self._mj_model.site("imu_in_pelvis").id
-
-        self._feet_site_id = np.array(
-            [
-                self._mj_model.site("left_foot").id,
-                self._mj_model.site("right_foot").id,
-            ]
-        )
-
-        self._torso_linvel_adr = _sensor_adr(self._mj_model, "imu_in_torso_linvel")
-        self._pelvis_gyro_adr = _sensor_adr(
-            self._mj_model, "imu-pelvis-angular-velocity"
-        )
-        self._left_foot_quat_adr = _sensor_adr(self._mj_model, "left_foot_orientation")
-        self._right_foot_quat_adr = _sensor_adr(
-            self._mj_model, "right_foot_orientation"
-        )
-
-        reference_path = self._resolve_reference_path(str(self._config.reference_path))
-        npz_file = np.load(reference_path, allow_pickle=False)
-        reference = np.asarray(npz_file["qpos"], dtype=np.float32)
-        if reference.shape[1] != self._mj_model.nq:  # type: ignore
-            raise ValueError(
-                "Reference qpos width does not match model nq: "
-                f"reference={reference.shape[1]}, nq={self._mj_model.nq}."  # type: ignore
-            )
-
-        self._reference = jp.array(reference)
-        self._reference_fps = float(np.asarray(npz_file["frequency"]).item())
-
-        (
-            ref_left_pos,
-            ref_left_quat,
-            ref_right_pos,
-            ref_right_quat,
-        ) = self._precompute_reference_feet(reference)
-        self._ref_left_pos = jp.array(ref_left_pos)
-        self._ref_left_quat = jp.array(ref_left_quat)
-        self._ref_right_pos = jp.array(ref_right_pos)
-        self._ref_right_quat = jp.array(ref_right_quat)
-
-        cost_weights = np.ones(self._mj_model.nq, dtype=np.float32)
-        cost_weights[:7] = 5.0
-        self._cost_weights = jp.array(cost_weights)
-
-    def _precompute_reference_feet(
-        self, reference: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        mj_data = mujoco.MjData(self._mj_model)
-        n_frames = reference.shape[0]  # type: ignore
-        left_foot_site_id = self._mj_model.site("left_foot").id
-        right_foot_site_id = self._mj_model.site("right_foot").id
-
-        ref_left_pos = np.zeros((n_frames, 3), dtype=np.float32)
-        ref_left_quat = np.zeros((n_frames, 4), dtype=np.float32)
-        ref_right_pos = np.zeros((n_frames, 3), dtype=np.float32)
-        ref_right_quat = np.zeros((n_frames, 4), dtype=np.float32)
-
-        for i in range(n_frames):
-            mj_data.qpos[:] = reference[i]
-            mujoco.mj_forward(self._mj_model, mj_data)
-            ref_left_pos[i] = mj_data.site_xpos[left_foot_site_id]
-            ref_right_pos[i] = mj_data.site_xpos[right_foot_site_id]
-            mujoco.mju_mat2Quat(
-                ref_left_quat[i],
-                mj_data.site_xmat[left_foot_site_id].reshape(-1),
-            )
-            mujoco.mju_mat2Quat(
-                ref_right_quat[i],
-                mj_data.site_xmat[right_foot_site_id].reshape(-1),
-            )
-
-        return ref_left_pos, ref_left_quat, ref_right_pos, ref_right_quat
-
-    def _sensor_vec(self, data: mjx.Data, adr: int, dim: int) -> jax.Array:
-        return data.sensordata[adr : adr + dim]
-
-    def _reference_index(self, t: jax.Array, start_idx: jax.Array) -> jax.Array:
-        idx = jp.int32(t * self._reference_fps) + jp.int32(start_idx)
-        if self._config.loop_reference:
-            return jp.mod(idx, self._reference.shape[0])
-        return jp.clip(idx, 0, self._reference.shape[0] - 1)
-
-    def _phase_from_index(self, idx: jax.Array) -> jax.Array:
-        theta = (
-            2.0
-            * jp.pi
-            * jp.asarray(idx, dtype=jp.float32)
-            / jp.asarray(self._reference.shape[0], dtype=jp.float32)
-        )
-        return jp.array([theta, theta + jp.pi], dtype=jp.float32)
-
-    def _get_gravity(self, data: mjx.Data) -> jax.Array:
-        return data.site_xmat[self._torso_imu_site_id].T @ jp.array([0.0, 0.0, -1.0])
-
-    def _get_local_linvel(self, data: mjx.Data) -> jax.Array:
-        linvel_world = self._sensor_vec(data, self._torso_linvel_adr, 3)
-        return data.site_xmat[self._torso_imu_site_id].T @ linvel_world
 
     def reset(self, rng: jax.Array) -> mjx_env.State:
-        rng, start_rng = jax.random.split(rng)
-        reference_start_idx = jax.lax.cond(
-            self._config.random_start,
-            lambda _: jax.random.randint(start_rng, (), 0, self._reference.shape[0]),
-            lambda _: jp.zeros((), dtype=jp.int32),
-            operand=None,
-        )
-
-        q_ref = self._reference[reference_start_idx]
-        qpos = q_ref
-        qvel = jp.zeros(self.mjx_model.nv)
-
-        rng, q_rng, v_rng = jax.random.split(rng, 3)
-        q_noise = self._config.reset_noise_scale * jax.random.normal(
-            q_rng, (self._mj_model.nq - 7,)
-        )
-        v_noise = self._config.reset_noise_scale * jax.random.normal(
-            v_rng, (self._mj_model.nv,)
-        )
-        qpos = qpos.at[7:].set(qpos[7:] + q_noise)
-        qvel = qvel + v_noise
-
-        data = mjx_env.make_data(
-            self.mj_model,
-            qpos=qpos,
-            qvel=qvel,
-            ctrl=q_ref[7 : 7 + self._nu],
-            nconmax=self._config.nconmax,
-            njmax=self._config.njmax,
-        )
-        data = mjx.forward(self.mjx_model, data)
-
-        info = {
-            "rng": rng,
-            "reference_start_idx": reference_start_idx,
-            "phase": self._phase_from_index(reference_start_idx),
-            "last_act": jp.zeros(self._nu),
-            "motor_targets": jp.zeros(self._nu),
-        }
-
-        metrics = {
-            f"reward/{k}": jp.zeros(()) for k in self._config.reward_config.scales
-        }
-
-        obs = self._get_obs(data, info)
-        reward, done = jp.zeros(2)
-        return mjx_env.State(data, obs, reward, done, metrics, info)
+        loco_state = self._loco_env.mjx_reset(rng)
+        return self._to_playground_state(loco_state, rng=rng)
 
     def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
-        action = jp.asarray(action)
-        motor_targets = self._default_pose + action * self._config.action_scale
-
-        data = mjx_env.step(
-            self.mjx_model,
-            state.data,
-            motor_targets,
-            self.n_substeps,
-        )
-
-        feet_pos = data.site_xpos[self._feet_site_id]
-
-        done = self._get_termination(data)
-        ref_idx_next = self._reference_index(
-            data.time,
-            state.info["reference_start_idx"],
-        )
-
-        rewards = self._get_reward(
-            data,
-            action,
-            state.info["last_act"],
-            motor_targets,
-            done,
-            ref_idx_next,
-            feet_pos,
-        )
-        rewards = {
-            key: value * self._config.reward_config.scales[key]
-            for key, value in rewards.items()
-        }
-        reward = sum(rewards.values()) * self.dt
-
-        state.info["last_act"] = action
-        state.info["motor_targets"] = motor_targets
-        state.info["phase"] = self._phase_from_index(ref_idx_next)
-
-        for key, value in rewards.items():
-            state.metrics[f"reward/{key}"] = value
-
-        obs = self._get_obs(data, state.info)
-        done = done.astype(reward.dtype)
-        return state.replace(data=data, obs=obs, reward=reward, done=done)
-
-    def _get_termination(self, data: mjx.Data) -> jax.Array:
-        gravity = self._get_gravity(data)
-        fall_termination = gravity[-1] < self._config.termination_upvector_z
-        height_termination = data.qpos[2] < self._config.termination_height
-        return (
-            fall_termination
-            | height_termination
-            | jp.isnan(data.qpos).any()
-            | jp.isnan(data.qvel).any()
-        )
-
-    def _get_obs(
-        self,
-        data: mjx.Data,
-        info: dict[str, Any],
-    ) -> jax.Array:
-        gyro = self._sensor_vec(data, self._pelvis_gyro_adr, 3)
-        info["rng"], noise_rng = jax.random.split(info["rng"])
-        noisy_gyro = (
-            gyro
-            + (2 * jax.random.uniform(noise_rng, shape=gyro.shape) - 1)
-            * self._config.noise_config.level
-            * self._config.noise_config.scales.gyro
-        )
-
-        gravity = self._get_gravity(data)
-        info["rng"], noise_rng = jax.random.split(info["rng"])
-        noisy_gravity = (
-            gravity
-            + (2 * jax.random.uniform(noise_rng, shape=gravity.shape) - 1)
-            * self._config.noise_config.level
-            * self._config.noise_config.scales.gravity
-        )
-
-        joint_angles = data.qpos[7 : 7 + self._nu]
-        info["rng"], noise_rng = jax.random.split(info["rng"])
-        noisy_joint_angles = (
-            joint_angles
-            + (2 * jax.random.uniform(noise_rng, shape=joint_angles.shape) - 1)
-            * self._config.noise_config.level
-            * self._config.noise_config.scales.joint_pos
-        )
-
-        joint_vel = data.qvel[6 : 6 + self._nu]
-        info["rng"], noise_rng = jax.random.split(info["rng"])
-        noisy_joint_vel = (
-            joint_vel
-            + (2 * jax.random.uniform(noise_rng, shape=joint_vel.shape) - 1)
-            * self._config.noise_config.level
-            * self._config.noise_config.scales.joint_vel
-        )
-
-        linvel = self._get_local_linvel(data)
-        info["rng"], noise_rng = jax.random.split(info["rng"])
-        noisy_linvel = (
-            linvel
-            + (2 * jax.random.uniform(noise_rng, shape=linvel.shape) - 1)
-            * self._config.noise_config.level
-            * self._config.noise_config.scales.linvel
-        )
-
-        phase = jp.concatenate([jp.cos(info["phase"]), jp.sin(info["phase"])])
-
-        state_vec = jp.hstack(
-            [
-                noisy_linvel,
-                noisy_gyro,
-                noisy_gravity,
-                noisy_joint_angles - self._default_pose,
-                noisy_joint_vel,
-                info["last_act"],
-                phase,
-            ]
-        )
-
-        return state_vec
-
-    def _get_reward(
-        self,
-        data: mjx.Data,
-        action: jax.Array,
-        last_act: jax.Array,
-        motor_targets: jax.Array,
-        done: jax.Array,
-        ref_idx: jax.Array,
-        feet_pos: jax.Array,
-    ) -> dict[str, jax.Array]:
-        q_ref = self._reference[ref_idx]
-        q_err = self._cost_weights * (data.qpos - q_ref)
-        configuration_cost = jp.sum(jp.square(q_err))
-
-        left_pos_err = feet_pos[0] - self._ref_left_pos[ref_idx]
-        right_pos_err = feet_pos[1] - self._ref_right_pos[ref_idx]
-        foot_position_cost = jp.sum(jp.square(left_pos_err)) + jp.sum(
-            jp.square(right_pos_err)
-        )
-
-        left_quat = self._sensor_vec(data, self._left_foot_quat_adr, 4)
-        right_quat = self._sensor_vec(data, self._right_foot_quat_adr, 4)
-        left_ori_err = quat_sub(left_quat, self._ref_left_quat[ref_idx])
-        right_ori_err = quat_sub(right_quat, self._ref_right_quat[ref_idx])
-        foot_orientation_cost = jp.sum(jp.square(left_ori_err)) + jp.sum(
-            jp.square(right_ori_err)
-        )
-
-        control_cost = jp.sum(jp.square(motor_targets - q_ref[7 : 7 + self._nu]))
-        action_rate_cost = jp.sum(jp.square(action - last_act))
-
-        return {
-            "configuration": configuration_cost,
-            "foot_position": foot_position_cost,
-            "foot_orientation": foot_orientation_cost,
-            "control": control_cost,
-            "action_rate": action_rate_cost,
-            "alive": jp.array(1.0),
-            "termination": done,
-        }
+        loco_state = state.info.get("_loco_state")
+        if loco_state is None:
+            raise ValueError("Missing loco state in state.info['_loco_state']")
+        next_loco_state = self._loco_env.mjx_step(loco_state, action)
+        return self._to_playground_state(next_loco_state, previous_state=state)
 
     @property
     def xml_path(self) -> str:
@@ -445,7 +293,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
 
     @property
     def action_size(self) -> int:
-        return self._mjx_model.nu
+        return self._action_size
 
     @property
     def mj_model(self) -> mujoco.MjModel:
@@ -454,3 +302,7 @@ class G1MocapTracking(mjx_env.MjxEnv):
     @property
     def mjx_model(self) -> mjx.Model:
         return self._mjx_model
+
+    def sample_command(self, rng: jax.Array) -> jax.Array:
+        del rng
+        return jp.zeros((3,))

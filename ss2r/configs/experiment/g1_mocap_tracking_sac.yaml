@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - g1_joystick
+  - override /environment: g1_mocap_tracking
+  - override /agent/penalizer: lagrangian
+  - _self_
+
+training:
+  train_domain_randomization: false
+  eval_domain_randomization: false
+  safe: false
+  value_privileged: false
