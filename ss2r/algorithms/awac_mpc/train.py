@@ -39,12 +39,6 @@ make_networks = sac_networks.make_sac_networks
 ActorUpdateSource = Literal["planner_online", "critic_replay"]
 
 
-def _inv_softplus(x: float) -> float:
-    if x > 20.0:
-        return x
-    return float(jnp.log(jnp.expm1(jnp.asarray(x, dtype=jnp.float32))))
-
-
 @struct.dataclass
 class TrainingState:
     policy_optimizer_state: optax.OptState
@@ -56,8 +50,6 @@ class TrainingState:
     gradient_steps: jnp.ndarray
     env_steps: jnp.ndarray
     normalizer_params: running_statistics.RunningStatisticsState
-    dual_optimizer_state: optax.OptState
-    dual_params: Params
 
 
 def _init_training_state(
@@ -66,16 +58,12 @@ def _init_training_state(
     sac_network,
     policy_optimizer: optax.GradientTransformation,
     qr_optimizer: optax.GradientTransformation,
-    dual_optimizer: optax.GradientTransformation,
-    dual_alpha_init: float,
 ) -> TrainingState:
-    key_policy, key_qr, _ = jax.random.split(key, 3)
+    key_policy, key_qr = jax.random.split(key)
     policy_params = sac_network.policy_network.init(key_policy)
     policy_optimizer_state = policy_optimizer.init(policy_params)
     qr_params = sac_network.qr_network.init(key_qr)
     qr_optimizer_state = qr_optimizer.init(qr_params)
-    dual_params = {"log_alpha": jnp.asarray(_inv_softplus(dual_alpha_init))}
-    dual_optimizer_state = dual_optimizer.init(dual_params)
     if isinstance(obs_size, Mapping):
         obs_shape = {
             k: specs.Array(v, jnp.dtype("float32")) for k, v in obs_size.items()
@@ -93,8 +81,6 @@ def _init_training_state(
         gradient_steps=jnp.zeros(()),
         env_steps=jnp.zeros(()),
         normalizer_params=normalizer_params,
-        dual_optimizer_state=dual_optimizer_state,
-        dual_params=dual_params,
     )
 
 
@@ -307,7 +293,6 @@ def train(
     mpo_num_action_samples: int = 16,
     mpo_kl_regularization: float = 1.0,
     mpo_kl_epsilon: float = 0.0,
-    mpo_dual_learning_rate: Optional[float] = None,
     n_critics: int = 2,
     n_heads: int = 1,
     use_bro: bool = True,
@@ -400,10 +385,6 @@ def train(
 
     policy_optimizer = optax.adam(learning_rate=learning_rate)
     qr_optimizer = optax.adam(learning_rate=critic_learning_rate)
-    dual_learning_rate = (
-        learning_rate if mpo_dual_learning_rate is None else mpo_dual_learning_rate
-    )
-    dual_optimizer = optax.adam(learning_rate=dual_learning_rate)
 
     if isinstance(obs_size, Mapping):
         dummy_obs = {k: jnp.zeros(v) for k, v in obs_size.items()}
@@ -426,8 +407,6 @@ def train(
         sac_network,
         policy_optimizer,
         qr_optimizer,
-        dual_optimizer,
-        dual_alpha_init=max(mpo_kl_regularization, 1e-8),
     )
 
     if restore_checkpoint_path is not None:
@@ -474,27 +453,6 @@ def train(
                     params[5], training_state.qr_optimizer_state
                 ),
             )
-        if len(params) >= 9:
-            maybe_dual_params = params[7]
-            maybe_dual_optimizer_state = params[8]
-            if (
-                isinstance(maybe_dual_params, Mapping)
-                and "log_alpha" in maybe_dual_params
-            ):
-                training_state = training_state.replace(  # type: ignore
-                    dual_params=maybe_dual_params,
-                    dual_optimizer_state=restore_state(
-                        maybe_dual_optimizer_state, training_state.dual_optimizer_state
-                    ),
-                )
-            elif (
-                isinstance(maybe_dual_params, Mapping)
-                and "log_alpha_mean" in maybe_dual_params
-            ):
-                training_state = training_state.replace(  # type: ignore
-                    dual_params={"log_alpha": maybe_dual_params["log_alpha_mean"]},
-                    dual_optimizer_state=training_state.dual_optimizer_state,
-                )
 
     env_keys = jax.random.split(rng, num_envs)
     reset_fn = jax.jit(env.reset)
@@ -550,7 +508,7 @@ def train(
     rng, rb_key = jax.random.split(rng)
     buffer_state = replay_buffer.init(rb_key)
 
-    critic_loss_fn, actor_loss_fn, dual_loss_fn = awac_losses.make_losses(
+    critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
         sac_network,
         reward_scaling=reward_scaling,
         discounting=discounting,
@@ -567,9 +525,6 @@ def train(
     )
     actor_update = gradients.gradient_update_fn(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
-    )
-    dual_update = gradients.gradient_update_fn(
-        dual_loss_fn, dual_optimizer, pmap_axis_name=None, has_aux=True
     )
 
     def _collect_experience(
@@ -723,7 +678,6 @@ def train(
                 ) = actor_update(
                     policy_params,
                     training_state.target_policy_params,
-                    training_state.dual_params,
                     training_state.normalizer_params,
                     qr_params,
                     minibatch,
@@ -763,7 +717,6 @@ def train(
             ) = actor_update(
                 training_state.policy_params,
                 training_state.target_policy_params,
-                training_state.dual_params,
                 training_state.normalizer_params,
                 qr_params,
                 actor_transitions,
@@ -772,12 +725,6 @@ def train(
                 params=training_state.policy_params,
             )
 
-        (dual_value, dual_aux), new_dual_params, new_dual_optimizer_state = dual_update(
-            training_state.dual_params,
-            aux["kl_target_current_mean"],
-            optimizer_state=training_state.dual_optimizer_state,
-            params=training_state.dual_params,
-        )
         should_update_actor = count % num_critic_updates_per_actor_update == 0
         update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
         policy_params = jax.tree_map(
@@ -787,14 +734,6 @@ def train(
             update_if_needed,
             new_policy_optimizer_state,
             training_state.policy_optimizer_state,
-        )
-        dual_params = jax.tree_map(
-            update_if_needed, new_dual_params, training_state.dual_params
-        )
-        dual_optimizer_state = jax.tree_map(
-            update_if_needed,
-            new_dual_optimizer_state,
-            training_state.dual_optimizer_state,
         )
         new_target_policy_params = polyak(
             training_state.target_policy_params, policy_params
@@ -806,21 +745,16 @@ def train(
             qr_optimizer_state=qr_optimizer_state,
             qr_params=qr_params,
             target_qr_params=new_target_qr_params,
-            dual_optimizer_state=dual_optimizer_state,
-            dual_params=dual_params,
             gradient_steps=training_state.gradient_steps + 1,
         )
         actor_aux = {f"actor/{k}": v for k, v in aux.items()}
-        dual_aux = {f"dual/{k}": v for k, v in dual_aux.items()}
         critic_aux = {f"critic/{k}": v for k, v in critic_aux.items()}
         metrics = {
             "critic_loss": critic_loss,
             "actor_loss": actor_loss,
-            "dual_loss": dual_value,
             "planner/avg_rollout_return": planner_avg_rollout_return,
             **critic_aux,
             **actor_aux,
-            **dual_aux,
         }
         return (
             new_training_state,
@@ -1085,8 +1019,6 @@ def train(
                 training_state.policy_optimizer_state,
                 training_state.qr_optimizer_state,
                 training_state.target_policy_params,
-                training_state.dual_params,
-                training_state.dual_optimizer_state,
             )
             dummy_ckpt_config = config_dict.ConfigDict()
             checkpoint.save(checkpoint_logdir, current_step, params, dummy_ckpt_config)
@@ -1109,8 +1041,6 @@ def train(
         training_state.policy_optimizer_state,
         training_state.qr_optimizer_state,
         training_state.target_policy_params,
-        training_state.dual_params,
-        training_state.dual_optimizer_state,
     )
     logging.info("total steps: %s", total_steps)
     return make_policy, params, metrics

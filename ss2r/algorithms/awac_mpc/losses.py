@@ -95,10 +95,6 @@ def _gaussian_kl_target_current(
     return jnp.sum(kl_vec, axis=-1)
 
 
-def _positive_dual(raw: jax.Array) -> jax.Array:
-    return jax.nn.softplus(raw) + 1e-8
-
-
 def make_losses(
     sac_network: SafeSACNetworks,
     *,
@@ -180,7 +176,6 @@ def make_losses(
     def actor_loss(
         policy_params: Params,
         target_policy_params: Params,
-        dual_params: Params,
         normalizer_params: Any,
         q_params: Params,
         transitions: Transition,
@@ -231,7 +226,9 @@ def make_losses(
         )(raw_actions_nba)
         # [N, B] -> [B, N]
         sampled_log_probs_current = jnp.swapaxes(sampled_log_probs_current, 0, 1)
-        nll_loss = jnp.mean(-jnp.sum(mpo_weights * sampled_log_probs_current, axis=-1))
+
+        nll_loss_per_state = -jnp.sum(mpo_weights * sampled_log_probs_current, axis=-1)
+        nll_loss = jnp.mean(nll_loss_per_state)
 
         target_mean, target_logstd = _dist_params_to_mean_logstd(
             target_dist_params, parametric_action_distribution
@@ -247,9 +244,7 @@ def make_losses(
         )
         kl_mean = jnp.mean(kl_per_state)
         kl_excess = jnp.maximum(kl_mean - mpo_kl_epsilon, 0.0)
-
-        alpha = _positive_dual(dual_params["log_alpha"])
-        kl_penalty = jax.lax.stop_gradient(alpha) * kl_excess
+        kl_penalty = mpo_kl_regularization * kl_excess
 
         loss = nll_loss + kl_penalty
         weight_entropy = -jnp.mean(
@@ -258,7 +253,6 @@ def make_losses(
         aux = {
             "eta": eta,
             "nll_loss": nll_loss,
-            "alpha": alpha,
             "kl_target_current_mean": kl_mean,
             "kl_excess": kl_excess,
             "kl_penalty": kl_penalty,
@@ -271,19 +265,4 @@ def make_losses(
         }
         return loss, aux
 
-    def dual_loss(
-        dual_params: Params,
-        kl_target_current_mean: jax.Array,
-    ) -> tuple[jax.Array, dict[str, jax.Array]]:
-        alpha = _positive_dual(dual_params["log_alpha"])
-        loss = alpha * (mpo_kl_epsilon - jax.lax.stop_gradient(kl_target_current_mean))
-        aux = {
-            "dual_loss": loss,
-            "alpha": alpha,
-            "kl_target": jnp.asarray(
-                mpo_kl_epsilon, dtype=kl_target_current_mean.dtype
-            ),
-        }
-        return loss, aux
-
-    return critic_loss, actor_loss, dual_loss
+    return critic_loss, actor_loss
