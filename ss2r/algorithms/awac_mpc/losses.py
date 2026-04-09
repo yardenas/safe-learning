@@ -65,36 +65,6 @@ def _sample_raw_actions(
     return raw_actions_nba, actions_nba
 
 
-def _dist_params_to_mean_logstd(
-    dist_params: jax.Array,
-    parametric_action_distribution,
-) -> tuple[jax.Array, jax.Array]:
-    """Extract pre-squash Gaussian mean/log-std using Brax's distribution path."""
-    dist = parametric_action_distribution.create_dist(dist_params)
-    mean = dist.loc
-    logstd = jnp.log(dist.scale)
-    return mean, logstd
-
-
-def _gaussian_kl_target_current(
-    target_mean: jax.Array,
-    target_logstd: jax.Array,
-    current_mean: jax.Array,
-    current_logstd: jax.Array,
-) -> jax.Array:
-    """KL(N_target || N_current), summed over action dimensions."""
-    target_var = jnp.exp(2.0 * target_logstd)
-    current_var = jnp.exp(2.0 * current_logstd)
-    kl_vec = (
-        (target_var + jnp.square(target_mean - current_mean))
-        / (2.0 * current_var + 1e-8)
-        + current_logstd
-        - target_logstd
-        - 0.5
-    )
-    return jnp.sum(kl_vec, axis=-1)
-
-
 def make_losses(
     sac_network: SafeSACNetworks,
     *,
@@ -104,8 +74,6 @@ def make_losses(
     mpo_eta_epsilon: float,
     mpo_eta_opt_maxiter: int,
     mpo_num_action_samples: int,
-    mpo_kl_regularization: float,
-    mpo_kl_epsilon: float,
     use_bro: bool,
 ):
     if mpo_eta_init <= 0.0:
@@ -120,12 +88,6 @@ def make_losses(
         raise ValueError(
             f"mpo_num_action_samples must be >= 1, got {mpo_num_action_samples}."
         )
-    if mpo_kl_regularization < 0.0:
-        raise ValueError(
-            f"mpo_kl_regularization must be >= 0, got {mpo_kl_regularization}."
-        )
-    if mpo_kl_epsilon < 0.0:
-        raise ValueError(f"mpo_kl_epsilon must be >= 0, got {mpo_kl_epsilon}.")
 
     policy_network = sac_network.policy_network
     qr_network = sac_network.qr_network
@@ -230,32 +192,13 @@ def make_losses(
         nll_loss_per_state = -jnp.sum(mpo_weights * sampled_log_probs_current, axis=-1)
         nll_loss = jnp.mean(nll_loss_per_state)
 
-        target_mean, target_logstd = _dist_params_to_mean_logstd(
-            target_dist_params, parametric_action_distribution
-        )
-        current_mean, current_logstd = _dist_params_to_mean_logstd(
-            current_dist_params, parametric_action_distribution
-        )
-        kl_per_state = _gaussian_kl_target_current(
-            target_mean=target_mean,
-            target_logstd=target_logstd,
-            current_mean=current_mean,
-            current_logstd=current_logstd,
-        )
-        kl_mean = jnp.mean(kl_per_state)
-        kl_excess = jnp.maximum(kl_mean - mpo_kl_epsilon, 0.0)
-        kl_penalty = mpo_kl_regularization * kl_excess
-
-        loss = nll_loss + kl_penalty
+        loss = nll_loss
         weight_entropy = -jnp.mean(
             jnp.sum(mpo_weights * jnp.log(mpo_weights + 1e-8), axis=-1)
         )
         aux = {
             "eta": eta,
             "nll_loss": nll_loss,
-            "kl_target_current_mean": kl_mean,
-            "kl_excess": kl_excess,
-            "kl_penalty": kl_penalty,
             "weight_entropy": weight_entropy,
             "weight_min": jnp.min(mpo_weights),
             "weight_max": jnp.max(mpo_weights),

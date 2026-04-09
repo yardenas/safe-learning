@@ -282,6 +282,7 @@ def train(
     normalize_observations: bool = False,
     reward_scaling: float = 1.0,
     tau: float = 0.005,
+    policy_target_tau: float = 0.005,
     min_replay_size: int = 0,
     max_replay_size: Optional[int] = None,
     prefill_steps: int = 0,
@@ -294,8 +295,6 @@ def train(
     mpo_eta_epsilon: float = 0.1,
     mpo_eta_opt_maxiter: int = 10,
     mpo_num_action_samples: int = 16,
-    mpo_kl_regularization: float = 1.0,
-    mpo_kl_epsilon: float = 0.0,
     n_critics: int = 2,
     n_heads: int = 1,
     use_bro: bool = True,
@@ -327,6 +326,10 @@ def train(
         raise ValueError("prefill_steps must be >= 0.")
     if critic_pretrain_ratio < 0:
         raise ValueError("critic_pretrain_ratio must be >= 0.")
+    if not 0.0 <= policy_target_tau <= 1.0:
+        raise ValueError(
+            f"policy_target_tau must be in [0, 1], got {policy_target_tau}."
+        )
     if mpo_eta <= 0.0:
         raise ValueError(f"mpo_eta must be > 0, got {mpo_eta}.")
     if mpo_eta_epsilon <= 0.0:
@@ -339,12 +342,6 @@ def train(
         raise ValueError(
             "mpo_num_action_samples must be >= 1, " f"got {mpo_num_action_samples}."
         )
-    if mpo_kl_regularization < 0.0:
-        raise ValueError(
-            "mpo_kl_regularization must be >= 0, " f"got {mpo_kl_regularization}."
-        )
-    if mpo_kl_epsilon < 0.0:
-        raise ValueError(f"mpo_kl_epsilon must be >= 0, got {mpo_kl_epsilon}.")
     if max_replay_size is None:
         max_replay_size = num_timesteps
     if planner_mode and controller_name != "tree":
@@ -511,8 +508,6 @@ def train(
         mpo_eta_epsilon=mpo_eta_epsilon,
         mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         mpo_num_action_samples=mpo_num_action_samples,
-        mpo_kl_regularization=mpo_kl_regularization,
-        mpo_kl_epsilon=mpo_kl_epsilon,
         use_bro=use_bro,
     )
     critic_update = gradients.gradient_update_fn(
@@ -619,10 +614,10 @@ def train(
             params=training_state.qr_params,
         )
 
-        polyak = lambda target, new: jax.tree.map(
-            lambda x, y: x * (1 - tau) + y * tau, target, new
+        polyak = lambda target, new, coeff: jax.tree.map(
+            lambda x, y: x * (1 - coeff) + y * coeff, target, new
         )
-        new_target_qr_params = polyak(training_state.target_qr_params, qr_params)
+        new_target_qr_params = polyak(training_state.target_qr_params, qr_params, tau)
         sampled_for_planner = sampled
 
         planner_avg_rollout_return = jnp.asarray(0.0, dtype=jnp.float32)
@@ -731,7 +726,9 @@ def train(
             training_state.policy_optimizer_state,
         )
         new_target_policy_params = polyak(
-            training_state.target_policy_params, policy_params
+            training_state.target_policy_params,
+            policy_params,
+            policy_target_tau,
         )
         new_training_state = training_state.replace(  # type: ignore
             policy_optimizer_state=policy_optimizer_state,
