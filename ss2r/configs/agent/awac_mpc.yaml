@@ -14,16 +14,10 @@ num_critic_updates_per_actor_update: 1
 deterministic_eval: true
 
 rollout_length: 1
-mpo_eta_init: 10.0
+mpo_eta: 1.0
 mpo_eta_epsilon: 0.1
 mpo_eta_opt_maxiter: 10
-mpo_num_action_samples: 20
-mpo_dual_mean_init: 10.0
-mpo_dual_std_init: 100.0
-mpo_dual_learning_rate: 1e-2
-mpo_delta_M_mean: 1e-2
-mpo_delta_M_std: 1e-5
-mpo_kl_per_dim: true
+mpo_num_action_samples: 16
 policy_target_tau: 0.005
 actor_update_source: planner_online
 

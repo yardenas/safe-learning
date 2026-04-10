@@ -50,9 +50,6 @@ class TrainingState:
     qr_optimizer_state: optax.OptState
     qr_params: Params
     target_qr_params: Params
-    mpo_dual_optimizer_state: optax.OptState
-    mpo_dual_params: awac_losses.MPODualParams
-    mpo_soft_eta: jnp.ndarray
     gradient_steps: jnp.ndarray
     env_steps: jnp.ndarray
     normalizer_params: running_statistics.RunningStatisticsState
@@ -64,16 +61,12 @@ def _init_training_state(
     sac_network,
     policy_optimizer: optax.GradientTransformation,
     qr_optimizer: optax.GradientTransformation,
-    dual_optimizer: optax.GradientTransformation,
-    mpo_dual_params: awac_losses.MPODualParams,
-    mpo_soft_eta: jax.Array,
 ) -> TrainingState:
     key_policy, key_qr = jax.random.split(key)
     policy_params = sac_network.policy_network.init(key_policy)
     policy_optimizer_state = policy_optimizer.init(policy_params)
     qr_params = sac_network.qr_network.init(key_qr)
     qr_optimizer_state = qr_optimizer.init(qr_params)
-    mpo_dual_optimizer_state = dual_optimizer.init(mpo_dual_params)
     if isinstance(obs_size, Mapping):
         obs_shape = {
             k: specs.Array(v, jnp.dtype("float32")) for k, v in obs_size.items()
@@ -88,9 +81,6 @@ def _init_training_state(
         qr_optimizer_state=qr_optimizer_state,
         qr_params=qr_params,
         target_qr_params=qr_params,
-        mpo_dual_optimizer_state=mpo_dual_optimizer_state,
-        mpo_dual_params=mpo_dual_params,
-        mpo_soft_eta=mpo_soft_eta,
         gradient_steps=jnp.zeros(()),
         env_steps=jnp.zeros(()),
         normalizer_params=normalizer_params,
@@ -301,17 +291,10 @@ def train(
     num_critic_updates_per_actor_update: int = 1,
     deterministic_eval: bool = False,
     rollout_length: int = 1,
-    mpo_eta_init: float = 10.0,
-    mpo_eta: Optional[float] = None,
+    mpo_eta: float = 1.0,
     mpo_eta_epsilon: float = 0.1,
     mpo_eta_opt_maxiter: int = 10,
-    mpo_num_action_samples: int = 20,
-    mpo_dual_mean_init: float = 10.0,
-    mpo_dual_std_init: float = 100.0,
-    mpo_dual_learning_rate: float = 1e-2,
-    mpo_delta_M_mean: float = 1e-2,
-    mpo_delta_M_std: float = 1e-5,
-    mpo_kl_per_dim: bool = True,
+    mpo_num_action_samples: int = 16,
     n_critics: int = 2,
     n_heads: int = 1,
     use_bro: bool = True,
@@ -329,8 +312,6 @@ def train(
     policy_obs_key: str = "state",
     value_obs_key: str = "state",
 ):
-    if mpo_eta is not None:
-        mpo_eta_init = mpo_eta
     valid_actor_sources = {"planner_online", "critic_replay"}
     if actor_update_source not in valid_actor_sources:
         raise ValueError(
@@ -349,8 +330,8 @@ def train(
         raise ValueError(
             f"policy_target_tau must be in [0, 1], got {policy_target_tau}."
         )
-    if mpo_eta_init <= 0.0:
-        raise ValueError(f"mpo_eta_init must be > 0, got {mpo_eta_init}.")
+    if mpo_eta <= 0.0:
+        raise ValueError(f"mpo_eta must be > 0, got {mpo_eta}.")
     if mpo_eta_epsilon <= 0.0:
         raise ValueError(f"mpo_eta_epsilon must be > 0, got {mpo_eta_epsilon}.")
     if mpo_eta_opt_maxiter < 1:
@@ -361,18 +342,6 @@ def train(
         raise ValueError(
             "mpo_num_action_samples must be >= 1, " f"got {mpo_num_action_samples}."
         )
-    if mpo_dual_mean_init <= 0.0:
-        raise ValueError(f"mpo_dual_mean_init must be > 0, got {mpo_dual_mean_init}.")
-    if mpo_dual_std_init <= 0.0:
-        raise ValueError(f"mpo_dual_std_init must be > 0, got {mpo_dual_std_init}.")
-    if mpo_dual_learning_rate <= 0.0:
-        raise ValueError(
-            "mpo_dual_learning_rate must be > 0, " f"got {mpo_dual_learning_rate}."
-        )
-    if mpo_delta_M_mean <= 0.0:
-        raise ValueError(f"mpo_delta_M_mean must be > 0, got {mpo_delta_M_mean}.")
-    if mpo_delta_M_std <= 0.0:
-        raise ValueError(f"mpo_delta_M_std must be > 0, got {mpo_delta_M_std}.")
     if max_replay_size is None:
         max_replay_size = num_timesteps
     if planner_mode and controller_name != "tree":
@@ -416,14 +385,6 @@ def train(
 
     policy_optimizer = optax.adam(learning_rate=learning_rate)
     qr_optimizer = optax.adam(learning_rate=critic_learning_rate)
-    dual_optimizer = optax.adam(learning_rate=mpo_dual_learning_rate)
-    mpo_soft_eta, mpo_dual_params = awac_losses.init_mpo_params(
-        action_size=action_size,
-        mpo_eta_init=mpo_eta_init,
-        mpo_dual_mean_init=mpo_dual_mean_init,
-        mpo_dual_std_init=mpo_dual_std_init,
-        mpo_kl_per_dim=mpo_kl_per_dim,
-    )
 
     if isinstance(obs_size, Mapping):
         dummy_obs = {k: jnp.zeros(v) for k, v in obs_size.items()}
@@ -446,39 +407,11 @@ def train(
         sac_network,
         policy_optimizer,
         qr_optimizer,
-        dual_optimizer,
-        mpo_dual_params,
-        mpo_soft_eta,
     )
 
     if restore_checkpoint_path is not None:
         params = checkpoint.load(restore_checkpoint_path)
-        if (
-            len(params) >= 10
-            and hasattr(params[7], "shape")
-            and getattr(params[7], "ndim", None) == 0
-        ):
-            training_state = training_state.replace(  # type: ignore
-                normalizer_params=params[0],
-                policy_params=params[1],
-                target_policy_params=params[6],
-                qr_params=params[2],
-                target_qr_params=params[3],
-                policy_optimizer_state=restore_state(
-                    params[4], training_state.policy_optimizer_state
-                ),
-                qr_optimizer_state=restore_state(
-                    params[5], training_state.qr_optimizer_state
-                ),
-                mpo_soft_eta=params[7],
-                mpo_dual_params=restore_state(
-                    params[8], training_state.mpo_dual_params
-                ),
-                mpo_dual_optimizer_state=restore_state(
-                    params[9], training_state.mpo_dual_optimizer_state
-                ),
-            )
-        elif len(params) >= 10:
+        if len(params) >= 10:
             training_state = training_state.replace(  # type: ignore
                 normalizer_params=params[0],
                 policy_params=params[1],
@@ -567,16 +500,14 @@ def train(
     rng, rb_key = jax.random.split(rng)
     buffer_state = replay_buffer.init(rb_key)
 
-    critic_loss_fn, actor_loss_fn, dual_loss_fn = awac_losses.make_losses(
+    critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
         sac_network,
         reward_scaling=reward_scaling,
         discounting=discounting,
+        mpo_eta_init=mpo_eta,
         mpo_eta_epsilon=mpo_eta_epsilon,
         mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         mpo_num_action_samples=mpo_num_action_samples,
-        mpo_delta_M_mean=mpo_delta_M_mean,
-        mpo_delta_M_std=mpo_delta_M_std,
-        mpo_kl_per_dim=mpo_kl_per_dim,
         use_bro=use_bro,
     )
     critic_update = gradients.gradient_update_fn(
@@ -584,9 +515,6 @@ def train(
     )
     actor_update = gradients.gradient_update_fn(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
-    )
-    dual_update = gradients.gradient_update_fn(
-        dual_loss_fn, dual_optimizer, pmap_axis_name=None
     )
 
     def _collect_experience(
@@ -731,14 +659,7 @@ def train(
             )
 
             def _actor_step(carry, minibatch):
-                (
-                    policy_params,
-                    policy_optimizer_state,
-                    mpo_dual_params,
-                    mpo_dual_optimizer_state,
-                    mpo_soft_eta,
-                    k,
-                ) = carry
+                policy_params, policy_optimizer_state, k = carry
                 k, step_key = jax.random.split(k)
                 (
                     (actor_loss_i, aux_i),
@@ -748,27 +669,15 @@ def train(
                     policy_params,
                     training_state.target_policy_params,
                     training_state.normalizer_params,
-                    new_target_qr_params,
-                    mpo_dual_params,
-                    mpo_soft_eta,
+                    qr_params,
                     minibatch,
                     step_key,
                     optimizer_state=policy_optimizer_state,
                     params=policy_params,
                 )
-                _, new_mpo_dual_params_i, new_mpo_dual_optimizer_state_i = dual_update(
-                    mpo_dual_params,
-                    aux_i["kl_mean_constraint"],
-                    aux_i["kl_std_constraint"],
-                    optimizer_state=mpo_dual_optimizer_state,
-                    params=mpo_dual_params,
-                )
                 return (
                     new_policy_params_i,
                     new_policy_optimizer_state_i,
-                    new_mpo_dual_params_i,
-                    new_mpo_dual_optimizer_state_i,
-                    aux_i["soft_eta_next"],
                     k,
                 ), (
                     actor_loss_i,
@@ -776,23 +685,13 @@ def train(
                 )
 
             (
-                (
-                    new_policy_params,
-                    new_policy_optimizer_state,
-                    new_mpo_dual_params,
-                    new_mpo_dual_optimizer_state,
-                    new_mpo_soft_eta,
-                    _,
-                ),
+                (new_policy_params, new_policy_optimizer_state, _),
                 (actor_losses, actor_auxes),
             ) = jax.lax.scan(
                 _actor_step,
                 (
                     training_state.policy_params,
                     training_state.policy_optimizer_state,
-                    training_state.mpo_dual_params,
-                    training_state.mpo_dual_optimizer_state,
-                    training_state.mpo_soft_eta,
                     key_grad,
                 ),
                 shuffled_actor_data,
@@ -809,22 +708,12 @@ def train(
                 training_state.policy_params,
                 training_state.target_policy_params,
                 training_state.normalizer_params,
-                new_target_qr_params,
-                training_state.mpo_dual_params,
-                training_state.mpo_soft_eta,
+                qr_params,
                 actor_transitions,
                 key_actor,
                 optimizer_state=training_state.policy_optimizer_state,
                 params=training_state.policy_params,
             )
-            _, new_mpo_dual_params, new_mpo_dual_optimizer_state = dual_update(
-                training_state.mpo_dual_params,
-                aux["kl_mean_constraint"],
-                aux["kl_std_constraint"],
-                optimizer_state=training_state.mpo_dual_optimizer_state,
-                params=training_state.mpo_dual_params,
-            )
-            new_mpo_soft_eta = aux["soft_eta_next"]
 
         should_update_actor = count % num_critic_updates_per_actor_update == 0
         update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
@@ -836,15 +725,6 @@ def train(
             new_policy_optimizer_state,
             training_state.policy_optimizer_state,
         )
-        mpo_dual_params = jax.tree.map(
-            update_if_needed, new_mpo_dual_params, training_state.mpo_dual_params
-        )
-        mpo_dual_optimizer_state = jax.tree.map(
-            update_if_needed,
-            new_mpo_dual_optimizer_state,
-            training_state.mpo_dual_optimizer_state,
-        )
-        mpo_soft_eta = update_if_needed(new_mpo_soft_eta, training_state.mpo_soft_eta)
         new_target_policy_params = polyak(
             training_state.target_policy_params,
             policy_params,
@@ -857,20 +737,9 @@ def train(
             qr_optimizer_state=qr_optimizer_state,
             qr_params=qr_params,
             target_qr_params=new_target_qr_params,
-            mpo_dual_optimizer_state=mpo_dual_optimizer_state,
-            mpo_dual_params=mpo_dual_params,
-            mpo_soft_eta=mpo_soft_eta,
             gradient_steps=training_state.gradient_steps + 1,
         )
-        actor_aux = {
-            f"actor/{k}": v
-            for k, v in aux.items()
-            if k not in {"kl_mean_constraint", "kl_std_constraint", "soft_eta_next"}
-        }
-        dual_mean, dual_std = awac_losses.dual_values(mpo_dual_params)
-        actor_aux["actor/eta"] = awac_losses.eta_value(mpo_soft_eta)
-        actor_aux["actor/dual_mean"] = jnp.mean(dual_mean)
-        actor_aux["actor/dual_std"] = jnp.mean(dual_std)
+        actor_aux = {f"actor/{k}": v for k, v in aux.items()}
         critic_aux = {f"critic/{k}": v for k, v in critic_aux.items()}
         metrics = {
             "critic_loss": critic_loss,
@@ -1142,9 +1011,6 @@ def train(
                 training_state.policy_optimizer_state,
                 training_state.qr_optimizer_state,
                 training_state.target_policy_params,
-                training_state.mpo_soft_eta,
-                training_state.mpo_dual_params,
-                training_state.mpo_dual_optimizer_state,
             )
             dummy_ckpt_config = config_dict.ConfigDict()
             checkpoint.save(checkpoint_logdir, current_step, params, dummy_ckpt_config)
@@ -1167,9 +1033,6 @@ def train(
         training_state.policy_optimizer_state,
         training_state.qr_optimizer_state,
         training_state.target_policy_params,
-        training_state.mpo_soft_eta,
-        training_state.mpo_dual_params,
-        training_state.mpo_dual_optimizer_state,
     )
     logging.info("total steps: %s", total_steps)
     return make_policy, params, metrics
