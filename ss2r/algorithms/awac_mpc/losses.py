@@ -201,23 +201,19 @@ def make_losses(
         #     neginf=mpo_log_prob_min,
         #     posinf=0.0,
         # )
-        clipped_log_probs_current = jnp.maximum(
-            sampled_log_probs_current,
-            mpo_log_prob_min,
-        )
+        # clipped_log_probs_current = jnp.maximum(
+        #     sampled_log_probs_current,
+        #     mpo_log_prob_min,
+        # )
 
-        nll_loss_per_state = -jnp.sum(mpo_weights * clipped_log_probs_current, axis=-1)
+        nll_loss_per_state = -jnp.sum(mpo_weights * sampled_log_probs_current, axis=-1)
         nll_loss = jnp.mean(nll_loss_per_state)
 
         loss = nll_loss
-        weight_entropy = -jnp.mean(
-            jnp.sum(mpo_weights * jnp.log(mpo_weights + 1e-8), axis=-1)
-        )
         aux = {
             "eta": eta,
             "nll_loss": nll_loss,
             "nll_loss_max": jnp.max(nll_loss_per_state),
-            "weight_entropy": weight_entropy,
             "weight_min": jnp.min(mpo_weights),
             "weight_max": jnp.max(mpo_weights),
             "weight_mean": jnp.mean(mpo_weights),
