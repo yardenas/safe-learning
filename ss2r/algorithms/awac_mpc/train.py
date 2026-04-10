@@ -293,11 +293,15 @@ def train(
     rollout_length: int = 1,
     mpo_eta: float = 1.0,
     mpo_eta_epsilon: float = 0.1,
+    mpo_eta_min: float = 1e-3,
     mpo_eta_opt_maxiter: int = 10,
     mpo_num_action_samples: int = 16,
+    mpo_log_prob_min: float = -100.0,
     n_critics: int = 2,
     n_heads: int = 1,
     use_bro: bool = True,
+    actor_grad_clip_norm: float = 1.0,
+    critic_grad_clip_norm: float = 1.0,
     actor_update_source: ActorUpdateSource = "planner_online",
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     checkpoint_logdir: Optional[str] = None,
@@ -334,6 +338,8 @@ def train(
         raise ValueError(f"mpo_eta must be > 0, got {mpo_eta}.")
     if mpo_eta_epsilon <= 0.0:
         raise ValueError(f"mpo_eta_epsilon must be > 0, got {mpo_eta_epsilon}.")
+    if mpo_eta_min <= 0.0:
+        raise ValueError(f"mpo_eta_min must be > 0, got {mpo_eta_min}.")
     if mpo_eta_opt_maxiter < 1:
         raise ValueError(
             "mpo_eta_opt_maxiter must be >= 1, " f"got {mpo_eta_opt_maxiter}."
@@ -341,6 +347,16 @@ def train(
     if mpo_num_action_samples < 1:
         raise ValueError(
             "mpo_num_action_samples must be >= 1, " f"got {mpo_num_action_samples}."
+        )
+    if mpo_log_prob_min > 0.0:
+        raise ValueError(f"mpo_log_prob_min must be <= 0, got {mpo_log_prob_min}.")
+    if actor_grad_clip_norm <= 0.0:
+        raise ValueError(
+            f"actor_grad_clip_norm must be > 0, got {actor_grad_clip_norm}."
+        )
+    if critic_grad_clip_norm <= 0.0:
+        raise ValueError(
+            f"critic_grad_clip_norm must be > 0, got {critic_grad_clip_norm}."
         )
     if max_replay_size is None:
         max_replay_size = num_timesteps
@@ -383,8 +399,12 @@ def train(
     )
     make_policy = make_inference_fn(sac_network)
 
-    policy_optimizer = optax.adam(learning_rate=learning_rate)
-    qr_optimizer = optax.adam(learning_rate=critic_learning_rate)
+    make_optimizer = lambda lr, grad_clip_norm: optax.chain(
+        optax.clip_by_global_norm(grad_clip_norm),
+        optax.adam(learning_rate=lr),
+    )
+    policy_optimizer = make_optimizer(learning_rate, actor_grad_clip_norm)
+    qr_optimizer = make_optimizer(critic_learning_rate, critic_grad_clip_norm)
 
     if isinstance(obs_size, Mapping):
         dummy_obs = {k: jnp.zeros(v) for k, v in obs_size.items()}
@@ -506,8 +526,10 @@ def train(
         discounting=discounting,
         mpo_eta_init=mpo_eta,
         mpo_eta_epsilon=mpo_eta_epsilon,
+        mpo_eta_min=mpo_eta_min,
         mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         mpo_num_action_samples=mpo_num_action_samples,
+        mpo_log_prob_min=mpo_log_prob_min,
         use_bro=use_bro,
     )
     critic_update = gradients.gradient_update_fn(

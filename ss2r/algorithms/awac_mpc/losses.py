@@ -72,14 +72,18 @@ def make_losses(
     discounting: float,
     mpo_eta_init: float,
     mpo_eta_epsilon: float,
+    mpo_eta_min: float,
     mpo_eta_opt_maxiter: int,
     mpo_num_action_samples: int,
+    mpo_log_prob_min: float,
     use_bro: bool,
 ):
     if mpo_eta_init <= 0.0:
         raise ValueError(f"mpo_eta_init must be > 0, got {mpo_eta_init}.")
     if mpo_eta_epsilon <= 0.0:
         raise ValueError(f"mpo_eta_epsilon must be > 0, got {mpo_eta_epsilon}.")
+    if mpo_eta_min <= 0.0:
+        raise ValueError(f"mpo_eta_min must be > 0, got {mpo_eta_min}.")
     if mpo_eta_opt_maxiter < 1:
         raise ValueError(
             f"mpo_eta_opt_maxiter must be >= 1, got {mpo_eta_opt_maxiter}."
@@ -88,6 +92,8 @@ def make_losses(
         raise ValueError(
             f"mpo_num_action_samples must be >= 1, got {mpo_num_action_samples}."
         )
+    if mpo_log_prob_min > 0.0:
+        raise ValueError(f"mpo_log_prob_min must be <= 0, got {mpo_log_prob_min}.")
 
     policy_network = sac_network.policy_network
     qr_network = sac_network.qr_network
@@ -143,11 +149,13 @@ def make_losses(
         transitions: Transition,
         key: PRNGKey,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-        target_dist_params = policy_network.apply(
-            normalizer_params, target_policy_params, transitions.observation
+        del target_policy_params
+        proposal_dist_params = policy_network.apply(
+            normalizer_params, policy_params, transitions.observation
         )
+        proposal_dist_params = jax.lax.stop_gradient(proposal_dist_params)
         raw_actions_nba, actions_nba = _sample_raw_actions(
-            target_dist_params,
+            proposal_dist_params,
             key,
             mpo_num_action_samples,
             parametric_action_distribution,
@@ -173,6 +181,7 @@ def make_losses(
             mpo_eta_init=mpo_eta_init,
             mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         )
+        eta = jnp.maximum(eta, mpo_eta_min)
         mpo_scores = sampled_q_values / eta
         mpo_scores = mpo_scores - jnp.max(mpo_scores, axis=-1, keepdims=True)
         mpo_weights = jax.nn.softmax(mpo_scores, axis=-1)
@@ -188,8 +197,18 @@ def make_losses(
         )(raw_actions_nba)
         # [N, B] -> [B, N]
         sampled_log_probs_current = jnp.swapaxes(sampled_log_probs_current, 0, 1)
+        finite_log_probs_current = jnp.nan_to_num(
+            sampled_log_probs_current,
+            nan=mpo_log_prob_min,
+            neginf=mpo_log_prob_min,
+            posinf=0.0,
+        )
+        clipped_log_probs_current = jnp.maximum(
+            finite_log_probs_current,
+            mpo_log_prob_min,
+        )
 
-        nll_loss_per_state = -jnp.sum(mpo_weights * sampled_log_probs_current, axis=-1)
+        nll_loss_per_state = -jnp.sum(mpo_weights * clipped_log_probs_current, axis=-1)
         nll_loss = jnp.mean(nll_loss_per_state)
 
         loss = nll_loss
@@ -199,10 +218,17 @@ def make_losses(
         aux = {
             "eta": eta,
             "nll_loss": nll_loss,
+            "nll_loss_max": jnp.max(nll_loss_per_state),
             "weight_entropy": weight_entropy,
             "weight_min": jnp.min(mpo_weights),
             "weight_max": jnp.max(mpo_weights),
             "weight_mean": jnp.mean(mpo_weights),
+            "log_prob_min": jnp.min(finite_log_probs_current),
+            "log_prob_mean": jnp.mean(finite_log_probs_current),
+            "log_prob_max": jnp.max(finite_log_probs_current),
+            "log_prob_clip_fraction": jnp.mean(
+                finite_log_probs_current <= mpo_log_prob_min
+            ),
             "q_sample_mean": jnp.mean(sampled_q_values),
             "q_sample_std": jnp.std(sampled_q_values),
         }
