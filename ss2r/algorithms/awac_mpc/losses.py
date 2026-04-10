@@ -149,13 +149,11 @@ def make_losses(
         transitions: Transition,
         key: PRNGKey,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-        del target_policy_params
-        proposal_dist_params = policy_network.apply(
-            normalizer_params, policy_params, transitions.observation
+        target_dist_params = policy_network.apply(
+            normalizer_params, target_policy_params, transitions.observation
         )
-        proposal_dist_params = jax.lax.stop_gradient(proposal_dist_params)
         raw_actions_nba, actions_nba = _sample_raw_actions(
-            proposal_dist_params,
+            target_dist_params,
             key,
             mpo_num_action_samples,
             parametric_action_distribution,
@@ -197,14 +195,14 @@ def make_losses(
         )(raw_actions_nba)
         # [N, B] -> [B, N]
         sampled_log_probs_current = jnp.swapaxes(sampled_log_probs_current, 0, 1)
-        finite_log_probs_current = jnp.nan_to_num(
-            sampled_log_probs_current,
-            nan=mpo_log_prob_min,
-            neginf=mpo_log_prob_min,
-            posinf=0.0,
-        )
+        # finite_log_probs_current = jnp.nan_to_num(
+        #     sampled_log_probs_current,
+        #     nan=mpo_log_prob_min,
+        #     neginf=mpo_log_prob_min,
+        #     posinf=0.0,
+        # )
         clipped_log_probs_current = jnp.maximum(
-            finite_log_probs_current,
+            sampled_log_probs_current,
             mpo_log_prob_min,
         )
 
@@ -223,12 +221,6 @@ def make_losses(
             "weight_min": jnp.min(mpo_weights),
             "weight_max": jnp.max(mpo_weights),
             "weight_mean": jnp.mean(mpo_weights),
-            "log_prob_min": jnp.min(finite_log_probs_current),
-            "log_prob_mean": jnp.mean(finite_log_probs_current),
-            "log_prob_max": jnp.max(finite_log_probs_current),
-            "log_prob_clip_fraction": jnp.mean(
-                finite_log_probs_current <= mpo_log_prob_min
-            ),
             "q_sample_mean": jnp.mean(sampled_q_values),
             "q_sample_std": jnp.std(sampled_q_values),
         }
