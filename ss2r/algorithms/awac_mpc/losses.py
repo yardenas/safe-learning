@@ -195,18 +195,18 @@ def make_losses(
         )(raw_actions_nba)
         # [N, B] -> [B, N]
         sampled_log_probs_current = jnp.swapaxes(sampled_log_probs_current, 0, 1)
-        # finite_log_probs_current = jnp.nan_to_num(
-        #     sampled_log_probs_current,
-        #     nan=mpo_log_prob_min,
-        #     neginf=mpo_log_prob_min,
-        #     posinf=0.0,
-        # )
-        # clipped_log_probs_current = jnp.maximum(
-        #     sampled_log_probs_current,
-        #     mpo_log_prob_min,
-        # )
+        finite_log_probs_current = jnp.nan_to_num(
+            sampled_log_probs_current,
+            nan=mpo_log_prob_min,
+            neginf=mpo_log_prob_min,
+            posinf=0.0,
+        )
+        clipped_log_probs_current = jnp.maximum(
+            finite_log_probs_current,
+            mpo_log_prob_min,
+        )
 
-        nll_loss_per_state = -jnp.sum(mpo_weights * sampled_log_probs_current, axis=-1)
+        nll_loss_per_state = -jnp.sum(mpo_weights * clipped_log_probs_current, axis=-1)
         nll_loss = jnp.mean(nll_loss_per_state)
 
         loss = nll_loss
