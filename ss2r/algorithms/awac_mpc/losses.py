@@ -179,7 +179,7 @@ def make_losses(
             mpo_eta_init=mpo_eta_init,
             mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         )
-        eta = jnp.maximum(eta, mpo_eta_min)
+        # eta = jnp.maximum(eta, mpo_eta_min)
         mpo_scores = sampled_q_values / eta
         mpo_scores = mpo_scores - jnp.max(mpo_scores, axis=-1, keepdims=True)
         mpo_weights = jax.nn.softmax(mpo_scores, axis=-1)
