@@ -290,6 +290,7 @@ def train(
     grad_updates_per_step: int = 1,
     num_critic_updates_per_actor_update: int = 1,
     deterministic_eval: bool = False,
+    reset_on_eval: bool = True,
     rollout_length: int = 1,
     mpo_eta: float = 1.0,
     mpo_eta_epsilon: float = 0.1,
@@ -1022,6 +1023,9 @@ def train(
             buffer_state,
             epoch_key,
         )
+        if reset_on_eval:
+            reset_keys = jax.random.split(epoch_key, num_envs)
+            env_state = reset_fn(reset_keys)
         current_step = int(training_state.env_steps)
 
         if checkpoint_logdir:

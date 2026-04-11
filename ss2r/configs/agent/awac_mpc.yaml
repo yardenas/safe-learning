@@ -12,6 +12,7 @@ max_replay_size: 1000000
 grad_updates_per_step: 512
 num_critic_updates_per_actor_update: 1
 deterministic_eval: true
+reset_on_eval: true
 
 rollout_length: 1
 mpo_eta: 1.0
