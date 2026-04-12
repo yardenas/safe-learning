@@ -13,5 +13,3 @@ training:
   eval_domain_randomization: false
   num_eval_episodes: 1
 
-agent:
-  actor_update_source: critic_replay

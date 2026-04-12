@@ -12,9 +12,6 @@ training:
   safe: false
 
 agent:
-  # Disable online planner-supervised actor updates; train actor from replay critic.
-  actor_update_source: critic_replay
-
   batch_size: 512
   policy_hidden_layer_sizes: [256, 256, 256]
   value_hidden_layer_sizes: [512, 512]  # two block of BroNet
@@ -26,4 +23,3 @@ agent:
   discounting: 0.95
   reward_scaling: 125
   n_critics: 2
-  n_heads: 1

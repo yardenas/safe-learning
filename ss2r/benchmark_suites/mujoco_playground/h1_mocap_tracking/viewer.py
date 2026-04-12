@@ -25,7 +25,12 @@ from mujoco import MjData, mjx
 from orbax import checkpoint as ocp
 
 import ss2r.algorithms.sac.networks as sac_networks
-from ss2r.algorithms.mpc.tree_mpc import TreeMPC, TreeMPCParams, make_task
+from ss2r.algorithms.mpc.tree_mpc import (
+    TreeMPC,
+    TreeMPCModelParams,
+    TreeMPCParams,
+    make_task,
+)
 from ss2r.benchmark_suites.mujoco_playground.h1_mocap_tracking.h1_mocap_env import (
     H1MocapTracking,
 )
@@ -307,6 +312,30 @@ def _build_sac_policy_action_fn(
     *,
     deterministic: bool,
 ) -> Callable[[Any, jax.Array], jax.Array]:
+    sac_network, model_params = _build_sac_network_and_model_params(
+        env=env,
+        checkpoint_path=checkpoint_path,
+        run_config=run_config,
+    )
+    inference_fn = sac_networks.make_inference_fn(sac_network)(
+        (model_params.normalizer_params, model_params.policy_params),
+        deterministic=deterministic,
+    )
+
+    @jax.jit
+    def _policy_action(obs: Any, key: jax.Array) -> jax.Array:
+        batched_obs = jax.tree_map(lambda x: jp.expand_dims(x, axis=0), obs)
+        action, _ = inference_fn(batched_obs, key)
+        return action[0]
+
+    return _policy_action
+
+
+def _build_sac_network_and_model_params(
+    env: H1MocapTracking,
+    checkpoint_path: str,
+    run_config: Mapping[str, Any],
+) -> tuple[Any, TreeMPCModelParams]:
     sac_cfg = _extract_sac_run_config(run_config)
     try:
         activation_fn = getattr(jax.nn, sac_cfg.activation)
@@ -339,19 +368,11 @@ def _build_sac_policy_action_fn(
         sac_network=sac_network,
         run_config=run_config,
     )
-    normalizer_params, policy_params = params[0], params[1]
-    inference_fn = sac_networks.make_inference_fn(sac_network)(
-        (normalizer_params, policy_params),
-        deterministic=deterministic,
+    return sac_network, TreeMPCModelParams(  # type: ignore
+        normalizer_params=params[0],
+        policy_params=params[1],
+        value_params=None,
     )
-
-    @jax.jit
-    def _policy_action(obs: Any, key: jax.Array) -> jax.Array:
-        batched_obs = jax.tree_map(lambda x: jp.expand_dims(x, axis=0), obs)
-        action, _ = inference_fn(batched_obs, key)
-        return action[0]
-
-    return _policy_action
 
 
 def _build_restore_item_from_metadata(checkpoint_path: str) -> Any:
@@ -433,6 +454,7 @@ def _restore_sac_checkpoint(
 
 def _build_tree_mpc(
     planner_env: H1MocapTracking,
+    awac_network: Any,
     seed: int,
     *,
     num_samples: int,
@@ -440,22 +462,20 @@ def _build_tree_mpc(
     zoh_steps: int,
     gamma: float,
     temperature: float,
-    action_noise_std: float,
     iterations: int,
 ) -> tuple[TreeMPC, TreeMPCParams]:
     task = make_task(planner_env)
     planner = TreeMPC(
         task=task,
+        awac_network=awac_network,
         num_samples=num_samples,
         horizon=horizon,
         zoh_steps=zoh_steps,
         gamma=gamma,
         temperature=temperature,
-        action_noise_std=action_noise_std,
         iterations=iterations,
         gae_lambda=0.0,
-        use_policy=False,
-        use_critic=False,
+        use_value=False,
     )
     params = planner.init_params(seed=seed)
     return planner, params
@@ -652,8 +672,7 @@ def run_viewer(
     tree_zoh_steps: int = 1,
     tree_gamma: float = 0.99,
     tree_temperature: float = 0.2,
-    tree_action_noise_std: float = 0.3,
-    tree_iterations: int = 2,
+    tree_iterations: int = 1,
     tree_planner_sim_dt: float = 0.02,
 ) -> None:
     """Launch an interactive viewer for H1MocapTracking.
@@ -681,10 +700,11 @@ def run_viewer(
     run_config: dict[str, Any] | None = None
     checkpoint_path: str | None = None
     effective_config_overrides = dict(config_overrides or {})
-    if action_mode == "policy":
+    if action_mode in {"policy", "tree_mpc"}:
         if not wandb_run_id:
             raise ValueError(
-                "action_mode='policy' requires --wandb-run-id (or wandb_run_id)."
+                "action_mode in {'policy', 'tree_mpc'} requires --wandb-run-id "
+                "(or wandb_run_id)."
             )
         checkpoint_path, run_config = _download_wandb_checkpoint_and_config(
             wandb_run_id,
@@ -735,6 +755,7 @@ def run_viewer(
     planner = None
     planner_params = None
     planner_optimize = None
+    planner_model_params = None
     planner_env = None
     policy_action_fn = None
 
@@ -749,16 +770,27 @@ def run_viewer(
         )
 
     if action_mode == "tree_mpc":
-        planner_env = H1MocapTracking()
+        assert checkpoint_path is not None
+        assert run_config is not None
+        planner_env = H1MocapTracking(
+            config_overrides=effective_config_overrides
+            if effective_config_overrides
+            else None
+        )
+        planner_network, planner_model_params = _build_sac_network_and_model_params(
+            env=planner_env,
+            checkpoint_path=checkpoint_path,
+            run_config=run_config,
+        )
         planner, planner_params = _build_tree_mpc(
             planner_env=planner_env,
+            awac_network=planner_network,
             seed=seed,
             num_samples=tree_num_samples,
             horizon=tree_horizon,
             zoh_steps=tree_zoh_steps,
             gamma=tree_gamma,
             temperature=tree_temperature,
-            action_noise_std=tree_action_noise_std,
             iterations=tree_iterations,
         )
         warmstart_actions = _reference_action_sequence(
@@ -768,8 +800,12 @@ def run_viewer(
             control_dt=planner.dt,
             zoh_steps=planner.zoh_steps,
         )
-        planner_params = planner_params.replace(actions=warmstart_actions)
-        planner_optimize = jax.jit(planner.optimize)
+        planner_params = planner_params.replace(
+            actions=planner.raw_action_sequence_from_actions(warmstart_actions)
+        )
+        planner_optimize = jax.jit(
+            lambda s, p: planner.optimize(s, p, planner_model_params)
+        )
 
     def _on_key(keycode: int) -> None:
         # GLFW space key code is 32.
@@ -817,7 +853,11 @@ def run_viewer(
                         control_dt=planner.dt,
                         zoh_steps=planner.zoh_steps,
                     )
-                    planner_params = planner_params.replace(actions=warmstart_actions)
+                    planner_params = planner_params.replace(
+                        actions=planner.raw_action_sequence_from_actions(
+                            warmstart_actions
+                        )
+                    )
 
             if not ui_state["paused"]:
                 if action_mode == "replay":
@@ -838,10 +878,8 @@ def run_viewer(
                         assert planner is not None
                         assert planner_params is not None
                         assert planner_optimize is not None
-                        planner_params, _ = planner_optimize(
-                            state, planner_params, None
-                        )
-                        action = planner_params.actions[0]
+                        planner_params, _ = planner_optimize(state, planner_params)
+                        action = planner.action_sequence(planner_params.actions)[0]
                     else:
                         action = _reference_action(env, state)
 
@@ -886,7 +924,11 @@ def run_viewer(
                         control_dt=planner.dt,
                         zoh_steps=planner.zoh_steps,
                     )
-                    planner_params = planner_params.replace(actions=warmstart_actions)
+                    planner_params = planner_params.replace(
+                        actions=planner.raw_action_sequence_from_actions(
+                            warmstart_actions
+                        )
+                    )
 
             _update_hud_labels(
                 viewer=viewer,
@@ -938,7 +980,7 @@ def main() -> None:
         "--wandb-run-id",
         type=str,
         default=None,
-        help="W&B run id used for checkpoint and config lookup (policy mode only).",
+        help="W&B run id used for checkpoint and config lookup (policy/tree_mpc modes).",
     )
     parser.add_argument(
         "--wandb-entity",
@@ -997,8 +1039,7 @@ def main() -> None:
     parser.add_argument("--tree-zoh-steps", type=int, default=1)
     parser.add_argument("--tree-gamma", type=float, default=0.99)
     parser.add_argument("--tree-temperature", type=float, default=0.8)
-    parser.add_argument("--tree-action-noise-std", type=float, default=0.3)
-    parser.add_argument("--tree-iterations", type=int, default=2)
+    parser.add_argument("--tree-iterations", type=int, default=1)
     parser.add_argument("--tree-planner-sim-dt", type=float, default=0.02)
     parser.add_argument(
         "--no-reset-on-done",
@@ -1041,7 +1082,6 @@ def main() -> None:
         tree_zoh_steps=args.tree_zoh_steps,
         tree_gamma=args.tree_gamma,
         tree_temperature=args.tree_temperature,
-        tree_action_noise_std=args.tree_action_noise_std,
         tree_iterations=args.tree_iterations,
         tree_planner_sim_dt=args.tree_planner_sim_dt,
     )

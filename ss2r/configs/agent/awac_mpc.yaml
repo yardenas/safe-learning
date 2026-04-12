@@ -15,32 +15,27 @@ deterministic_eval: true
 reset_on_eval: true
 
 rollout_length: 1
+planner_rollout_length: 1
 mpo_eta: 1.0
 mpo_eta_epsilon: 0.1
 mpo_eta_min: 1e-3
 mpo_eta_opt_maxiter: 10
-mpo_num_action_samples: 16
 mpo_log_prob_min: -100.0
 policy_target_tau: 0.001
 actor_grad_clip_norm: 1.0
 critic_grad_clip_norm: 1.0
-actor_update_source: planner_online
 
 policy_hidden_layer_sizes: [128, 128]
 value_hidden_layer_sizes: [512, 512]
 activation: swish
 use_bro: true
 n_critics: 2
-n_heads: 1
 
-controller_name: tree
 controller_kwargs:
   num_samples: 128
   horizon: 25
   zoh_steps: 5
-  use_policy: true
-  use_critic: true
-  action_noise_std: 0.3
+  use_value: true
   gae_lambda: 1.0
   temperature: 0.8
-  iterations: 2
+  iterations: 1

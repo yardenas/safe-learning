@@ -14,4 +14,3 @@ training:
 
 agent:
   activation: swish
-  actor_update_source: critic_replay

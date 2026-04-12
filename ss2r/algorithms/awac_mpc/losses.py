@@ -1,22 +1,22 @@
-"""MPO actor losses and TD critic losses for tree-MPC rollouts."""
+"""Value-based MPO actor losses and TD critic losses for TreeMPC rollouts."""
 
 from typing import Any, TypeAlias
 
 import jax
 import jax.numpy as jnp
 from brax.training import types
-from brax.training.types import Params, PRNGKey
+from brax.training.types import Params
 from jax.scipy import optimize as jax_optimize
 
-from ss2r.algorithms.sac.networks import SafeSACNetworks
+from ss2r.algorithms.awac_mpc.networks import AWACMPCNetworks
 
 Transition: TypeAlias = types.Transition
 
 
-def _reduce_q(q_values: jax.Array, use_bro: bool) -> jax.Array:
+def _reduce_value(value_estimates: jax.Array, use_bro: bool) -> jax.Array:
     if use_bro:
-        return jnp.mean(q_values, axis=-1)
-    return jnp.min(q_values, axis=-1)
+        return jnp.mean(value_estimates, axis=-1)
+    return jnp.min(value_estimates, axis=-1)
 
 
 def _logmeanexp(x: jax.Array, axis: int = -1) -> jax.Array:
@@ -26,18 +26,18 @@ def _logmeanexp(x: jax.Array, axis: int = -1) -> jax.Array:
 
 
 def _solve_eta_dual(
-    q_values: jax.Array,
+    advantages: jax.Array,
     mpo_eta_epsilon: float,
     mpo_eta_init: float,
     mpo_eta_opt_maxiter: int,
 ) -> jax.Array:
-    q_values = jax.lax.stop_gradient(q_values)
+    advantages = jax.lax.stop_gradient(advantages)
     x0 = jnp.asarray([jnp.log(mpo_eta_init)], dtype=jnp.float32)
 
     def eta_dual(log_eta_vec: jax.Array) -> jax.Array:
         eta = jnp.exp(log_eta_vec[0]) + 1e-8
-        scaled_q = q_values / eta
-        lme = _logmeanexp(scaled_q, axis=-1)
+        scaled_advantages = advantages / eta
+        lme = _logmeanexp(scaled_advantages, axis=-1)
         return eta * (mpo_eta_epsilon + jnp.mean(lme))
 
     result = jax_optimize.minimize(
@@ -49,24 +49,8 @@ def _solve_eta_dual(
     return jnp.exp(result.x[0]) + 1e-8
 
 
-def _sample_raw_actions(
-    dist_params: jax.Array,
-    key: PRNGKey,
-    num_action_samples: int,
-    parametric_action_distribution,
-) -> tuple[jax.Array, jax.Array]:
-    sample_keys = jax.random.split(key, num_action_samples)
-    raw_actions_nba = jax.vmap(
-        lambda k: parametric_action_distribution.sample_no_postprocessing(
-            dist_params, k
-        )
-    )(sample_keys)
-    actions_nba = jax.vmap(parametric_action_distribution.postprocess)(raw_actions_nba)
-    return raw_actions_nba, actions_nba
-
-
 def make_losses(
-    sac_network: SafeSACNetworks,
+    awac_network: AWACMPCNetworks,
     *,
     reward_scaling: float,
     discounting: float,
@@ -74,7 +58,6 @@ def make_losses(
     mpo_eta_epsilon: float,
     mpo_eta_min: float,
     mpo_eta_opt_maxiter: int,
-    mpo_num_action_samples: int,
     mpo_log_prob_min: float,
     use_bro: bool,
 ):
@@ -88,113 +71,84 @@ def make_losses(
         raise ValueError(
             f"mpo_eta_opt_maxiter must be >= 1, got {mpo_eta_opt_maxiter}."
         )
-    if mpo_num_action_samples < 1:
-        raise ValueError(
-            f"mpo_num_action_samples must be >= 1, got {mpo_num_action_samples}."
-        )
     if mpo_log_prob_min > 0.0:
         raise ValueError(f"mpo_log_prob_min must be <= 0, got {mpo_log_prob_min}.")
 
-    policy_network = sac_network.policy_network
-    qr_network = sac_network.qr_network
-    parametric_action_distribution = sac_network.parametric_action_distribution
+    policy_network = awac_network.policy_network
+    value_network = awac_network.value_network
+    parametric_action_distribution = awac_network.parametric_action_distribution
 
     def critic_loss(
-        q_params: Params,
-        policy_params: Params,
+        value_params: Params,
         normalizer_params: Any,
-        target_q_params: Params,
+        target_value_params: Params,
         transitions: Transition,
-        key: PRNGKey,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-        action = transitions.action
-        q_old_action = qr_network.apply(
-            normalizer_params, q_params, transitions.observation, action
-        )
-        key, next_key = jax.random.split(key)
-        next_dist_params = policy_network.apply(
-            normalizer_params, policy_params, transitions.next_observation
-        )
-        next_action = parametric_action_distribution.sample(next_dist_params, next_key)
-        next_q = qr_network.apply(
+        value_old = value_network.apply(
             normalizer_params,
-            target_q_params,
+            value_params,
+            transitions.observation,
+        )
+        next_value = value_network.apply(
+            normalizer_params,
+            target_value_params,
             transitions.next_observation,
-            next_action,
         )
-        next_v = _reduce_q(next_q, use_bro)
-        target_q = transitions.reward * reward_scaling + transitions.discount * (
-            discounting * next_v
+        target_value = transitions.reward * reward_scaling + transitions.discount * (
+            discounting * _reduce_value(next_value, use_bro)
         )
-        q_error = q_old_action - jnp.expand_dims(target_q, -1)
+        value_error = value_old - jnp.expand_dims(target_value, -1)
         truncation = transitions.extras["state_extras"]["truncation"]
-        q_error *= jnp.expand_dims(1 - truncation, -1)
-        loss = 0.5 * jnp.mean(jnp.square(q_error))
+        value_error *= jnp.expand_dims(1 - truncation, -1)
+        loss = 0.5 * jnp.mean(jnp.square(value_error))
         aux = {
-            "q_data_mean": jnp.mean(q_old_action),
-            "q_data_std": jnp.std(q_old_action),
-            "q_target_mean": jnp.mean(target_q),
-            "q_target_std": jnp.std(target_q),
-            "td_error_mean": jnp.mean(q_error),
-            "td_error_abs_mean": jnp.mean(jnp.abs(q_error)),
-            "td_error_abs_max": jnp.max(jnp.abs(q_error)),
+            "value_data_mean": jnp.mean(value_old),
+            "value_data_std": jnp.std(value_old),
+            "value_target_mean": jnp.mean(target_value),
+            "value_target_std": jnp.std(target_value),
+            "td_error_mean": jnp.mean(value_error),
+            "td_error_abs_mean": jnp.mean(jnp.abs(value_error)),
+            "td_error_abs_max": jnp.max(jnp.abs(value_error)),
         }
         return loss, aux
 
     def actor_loss(
         policy_params: Params,
-        target_policy_params: Params,
         normalizer_params: Any,
-        q_params: Params,
         transitions: Transition,
-        key: PRNGKey,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-        target_dist_params = policy_network.apply(
-            normalizer_params, target_policy_params, transitions.observation
-        )
-        raw_actions_nba, actions_nba = _sample_raw_actions(
-            target_dist_params,
-            key,
-            mpo_num_action_samples,
-            parametric_action_distribution,
-        )
-
-        sampled_q_values = jax.vmap(
-            lambda sampled_actions_ba: _reduce_q(
-                qr_network.apply(
-                    normalizer_params,
-                    q_params,
-                    transitions.observation,
-                    sampled_actions_ba,
-                ),
-                use_bro,
-            )
-        )(actions_nba)
-        # [N, B] -> [B, N]
-        sampled_q_values = jnp.swapaxes(sampled_q_values, 0, 1)
+        policy_extras = transitions.extras["policy_extras"]
+        candidate_raw_actions = policy_extras["candidate_raw_actions"]
+        candidate_advantages = policy_extras["candidate_advantages"]
 
         eta = _solve_eta_dual(
-            sampled_q_values,
+            candidate_advantages,
             mpo_eta_epsilon=mpo_eta_epsilon,
             mpo_eta_init=mpo_eta_init,
             mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         )
-        # eta = jnp.maximum(eta, mpo_eta_min)
-        mpo_scores = sampled_q_values / eta
+        eta = jnp.maximum(eta, mpo_eta_min)
+        mpo_scores = candidate_advantages / eta
         mpo_scores = mpo_scores - jnp.max(mpo_scores, axis=-1, keepdims=True)
         mpo_weights = jax.nn.softmax(mpo_scores, axis=-1)
         mpo_weights = jax.lax.stop_gradient(mpo_weights)
 
         current_dist_params = policy_network.apply(
-            normalizer_params, policy_params, transitions.observation
+            normalizer_params,
+            policy_params,
+            transitions.observation,
         )
-        sampled_log_probs_current = jax.vmap(
-            lambda raw_actions_ba: parametric_action_distribution.log_prob(
-                current_dist_params, raw_actions_ba
-            )
-        )(raw_actions_nba)
-        # [N, B] -> [B, N]
-        sampled_log_probs_current = jnp.swapaxes(sampled_log_probs_current, 0, 1)
+
+        def _log_prob_for_state(dist_params_b, raw_actions_na):
+            return jax.vmap(
+                lambda raw_action: parametric_action_distribution.log_prob(
+                    dist_params_b, raw_action
+                )
+            )(raw_actions_na)
+
+        sampled_log_probs_current = jax.vmap(_log_prob_for_state)(
+            current_dist_params, candidate_raw_actions
+        )
         finite_log_probs_current = jnp.nan_to_num(
             sampled_log_probs_current,
             nan=mpo_log_prob_min,
@@ -208,8 +162,6 @@ def make_losses(
 
         nll_loss_per_state = -jnp.sum(mpo_weights * clipped_log_probs_current, axis=-1)
         nll_loss = jnp.mean(nll_loss_per_state)
-
-        loss = nll_loss
         aux = {
             "eta": eta,
             "nll_loss": nll_loss,
@@ -217,9 +169,9 @@ def make_losses(
             "weight_min": jnp.min(mpo_weights),
             "weight_max": jnp.max(mpo_weights),
             "weight_mean": jnp.mean(mpo_weights),
-            "q_sample_mean": jnp.mean(sampled_q_values),
-            "q_sample_std": jnp.std(sampled_q_values),
+            "advantage_sample_mean": jnp.mean(candidate_advantages),
+            "advantage_sample_std": jnp.std(candidate_advantages),
         }
-        return loss, aux
+        return nll_loss, aux
 
     return critic_loss, actor_loss

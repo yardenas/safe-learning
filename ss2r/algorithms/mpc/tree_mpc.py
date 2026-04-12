@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import jax
 import jax.nn as jnn
@@ -6,6 +6,7 @@ import jax.numpy as jnp
 from flax import struct
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
+
 
 @struct.dataclass
 class Trajectory:
@@ -65,52 +66,104 @@ class TreeMPCParams:
 class TreeMPCModelParams:
     normalizer_params: Any
     policy_params: Any
-    qr_params: Any
-
-
-def _squash_to_bounds(u: jax.Array, low: jax.Array, high: jax.Array) -> jax.Array:
-    z = jnp.tanh(u)
-    return low + 0.5 * (z + 1.0) * (high - low)
+    value_params: Any
 
 
 def _broadcast_tree(tree: Any, batch: int) -> Any:
     return jax.tree.map(lambda x: jnp.broadcast_to(x, (batch,) + x.shape), tree)
 
 
+def _compute_discounted_returns(
+    rewards: jax.Array,
+    discounts: jax.Array,
+    truncations: jax.Array,
+    *,
+    gamma: float,
+    reward_scaling: float,
+) -> jax.Array:
+    bootstrap_discount = gamma * discounts * (1.0 - truncations)
+
+    def _return_step(carry, x):
+        reward_t, discount_t = x
+        ret_t = reward_scaling * reward_t + discount_t * carry
+        return ret_t, ret_t
+
+    _, returns_rev = jax.lax.scan(
+        _return_step,
+        jnp.zeros_like(rewards[:, -1]),
+        (
+            jnp.flip(rewards, axis=1).T,
+            jnp.flip(bootstrap_discount, axis=1).T,
+        ),
+    )
+    return jnp.flip(returns_rev.T, axis=1)
+
+
+def _compute_generalized_advantages(
+    rewards: jax.Array,
+    discounts: jax.Array,
+    truncations: jax.Array,
+    values: jax.Array,
+    next_values: jax.Array,
+    *,
+    gamma: float,
+    gae_lambda: float,
+    reward_scaling: float,
+) -> tuple[jax.Array, jax.Array]:
+    bootstrap_discount = gamma * discounts * (1.0 - truncations)
+    deltas = reward_scaling * rewards + bootstrap_discount * next_values - values
+    rev_ts = jnp.arange(rewards.shape[1] - 1, -1, -1)
+
+    def _gae_step(carry: jax.Array, t: jax.Array):
+        delta_t = jax.lax.dynamic_index_in_dim(deltas, t, axis=1, keepdims=False)
+        discount_t = jax.lax.dynamic_index_in_dim(
+            bootstrap_discount, t, axis=1, keepdims=False
+        )
+        advantage_t = delta_t + discount_t * gae_lambda * carry
+        return advantage_t, advantage_t
+
+    _, advantages_rev = jax.lax.scan(
+        _gae_step,
+        jnp.zeros((rewards.shape[0],), dtype=jnp.float32),
+        rev_ts,
+    )
+    advantages = jnp.flip(advantages_rev, axis=0).T
+    returns = values[:, 0] + advantages[:, 0]
+    return advantages, returns
+
+
 @struct.dataclass
 class _TreeRollout:
-    traj_data: mjx.Data
+    traj_data: Any
+    raw_action_sequences: jax.Array
     traj_actions: jax.Array
     traj_rewards: jax.Array
-    all_traj_obs: Any
-    all_traj_next_obs: Any
     all_traj_actions: jax.Array
     all_traj_rewards: jax.Array
-    all_traj_discount: jax.Array
-    all_traj_truncation: jax.Array
-    all_traj_advantages: jax.Array
+    candidate_raw_actions: jax.Array
+    candidate_actions: jax.Array
+    candidate_advantages: jax.Array
     returns: jax.Array
 
 
 class TreeMPC:
-    """Tree-structured MPPI planner with optional policy prior."""
+    """Tree-structured MPC planner that samples candidate actions from a policy."""
 
     def __init__(
         self,
         task: MujocoPlaygroundTask,
+        awac_network: Any,
         *,
         num_samples: int,
-        horizon: Optional[int] = None,
+        horizon: int,
         gae_lambda: float = 0.0,
-        use_policy: bool = False,
-        use_critic: bool = False,
+        use_value: bool = False,
         n_critics: int = 2,
-        n_heads: int = 1,
         use_bro: bool = True,
         zoh_steps: int = 1,
         gamma: float = 0.99,
+        reward_scaling: float = 1.0,
         temperature: float = 1.0,
-        action_noise_std: float = 0.3,
         iterations: int = 1,
     ) -> None:
         self.task = task
@@ -126,106 +179,98 @@ class TreeMPC:
             raise ValueError("TreeMPC requires horizon to be divisible by zoh_steps.")
         self.ctrl_steps = self.horizon // self.zoh_steps
         self.gamma = float(gamma)
+        self.reward_scaling = float(reward_scaling)
         self.temperature = float(temperature)
-        self.action_noise_std = action_noise_std
         self.iterations = int(iterations)
         if self.iterations < 1:
             raise ValueError("TreeMPC requires iterations >= 1.")
-        self.uses_env_step = True
         self.gae_lambda = float(gae_lambda)
-        self.use_policy = bool(use_policy)
-        self.use_critic = bool(use_critic)
+        self.use_value = bool(use_value)
         self._n_critics = int(n_critics)
-        self._n_heads = int(n_heads)
         self.use_bro = bool(use_bro)
-        if self._n_critics < 1 or self._n_heads < 1:
-            raise ValueError("TreeMPC requires n_critics >= 1 and n_heads >= 1.")
-        self._sac_network = None
-
-    def bind_sac_network(self, sac_network: Any) -> None:
-        self._sac_network = sac_network
-
-    def _has_policy(self, model_params: TreeMPCModelParams | None = None) -> bool:
-        return (
-            self._sac_network is not None
-            and model_params is not None
-            and model_params.policy_params is not None
-        )
-
-    def _has_critic(self, model_params: TreeMPCModelParams | None = None) -> bool:
-        return (
-            self._sac_network is not None
-            and model_params is not None
-            and model_params.qr_params is not None
-        )
+        if self._n_critics < 1:
+            raise ValueError("TreeMPC requires n_critics >= 1.")
+        if awac_network is None:
+            raise ValueError("TreeMPC requires a policy/value network at init.")
+        self._awac_network = awac_network
 
     def _validate_model_params(self, model_params: TreeMPCModelParams | None) -> None:
-        if self.use_policy and not self._has_policy(model_params):
+        if model_params is None or model_params.policy_params is None:
+            raise ValueError("TreeMPC requires model_params with policy_params.")
+        if self.use_value and model_params.value_params is None:
             raise ValueError(
-                "TreeMPC with use_policy=True requires a bound SAC network and "
-                "model_params with policy_params."
-            )
-        if self.use_critic and not self._has_critic(model_params):
-            raise ValueError(
-                "TreeMPC with use_critic=True requires a bound SAC network and "
-                "model_params with qr_params."
+                "TreeMPC with use_value=True requires a bound value network and "
+                "model_params with value_params."
             )
 
-    def _sample_policy_actions(
+    def _raw_to_action(self, raw_action: jax.Array) -> jax.Array:
+        action = self._awac_network.parametric_action_distribution.postprocess(
+            raw_action
+        )
+        return jnp.clip(action, self.task.u_min, self.task.u_max)
+
+    def action_sequence(self, raw_actions: jax.Array) -> jax.Array:
+        flat_actions = raw_actions.reshape((-1, raw_actions.shape[-1]))
+        actions = jax.vmap(self._raw_to_action)(flat_actions)
+        return actions.reshape(raw_actions.shape)
+
+    def raw_action_sequence_from_actions(self, actions: jax.Array) -> jax.Array:
+        clipped_actions = jnp.clip(actions, self.task.u_min, self.task.u_max)
+        normalized = (
+            2.0
+            * (clipped_actions - self.task.u_min)
+            / (self.task.u_max - self.task.u_min)
+            - 1.0
+        )
+        normalized = jnp.clip(normalized, -0.999999, 0.999999)
+        return jnp.arctanh(normalized)
+
+    def _sample_policy_raw_actions(
         self,
         obs: Any,
         key: jax.Array,
         model_params: TreeMPCModelParams | None = None,
     ) -> jax.Array:
-        if self._sac_network is None or model_params is None:
-            raise ValueError(
-                "_sample_policy_actions requires a bound SAC network and model_params."
-            )
+        if model_params is None:
+            raise ValueError("_sample_policy_raw_actions requires model_params.")
         policy_params = model_params.policy_params
         if policy_params is None:
             raise ValueError(
-                "_sample_policy_actions requires model_params.policy_params."
+                "_sample_policy_raw_actions requires model_params.policy_params."
             )
-        dist_params = self._sac_network.policy_network.apply(
+        dist_params = self._awac_network.policy_network.apply(
             model_params.normalizer_params,
             policy_params,
             obs,
         )
-        dist = self._sac_network.parametric_action_distribution
-        return dist.sample(dist_params, key)
+        dist = self._awac_network.parametric_action_distribution
+        return dist.sample_no_postprocessing(dist_params, key)
 
-    def _critic_value(
+    def _value(
         self,
         obs: Any,
-        action: jax.Array,
         model_params: TreeMPCModelParams | None = None,
     ) -> jax.Array:
-        if self._sac_network is None or model_params is None:
-            raise ValueError(
-                "_critic_value requires a bound SAC network and model_params."
-            )
-        qr_params = model_params.qr_params
-        if qr_params is None:
-            raise ValueError("_critic_value requires model_params.qr_params.")
-        q_values = self._sac_network.qr_network.apply(
+        if model_params is None:
+            raise ValueError("_value requires model_params.")
+        value_params = model_params.value_params
+        if value_params is None:
+            raise ValueError("_value requires model_params.value_params.")
+        values = self._awac_network.value_network.apply(
             model_params.normalizer_params,
-            qr_params,
+            value_params,
             obs,
-            action,
         )
-        if q_values.ndim == 1:
-            q_values = q_values[:, None]
-        expected_width = self._n_critics * self._n_heads
-        if q_values.shape[-1] != expected_width:
+        if values.ndim == 1:
+            values = values[:, None]
+        if values.shape[-1] != self._n_critics:
             raise ValueError(
-                "Unexpected critic output width for TreeMPC. "
-                f"got={q_values.shape[-1]}, expected={expected_width} "
-                "(n_critics * n_heads)."
+                "Unexpected value output width for TreeMPC. "
+                f"got={values.shape[-1]}, expected={self._n_critics}."
             )
-        q_values = q_values.reshape((q_values.shape[0], expected_width))
         if self.use_bro:
-            return jnp.mean(q_values, axis=-1)
-        return jnp.min(q_values, axis=-1)
+            return jnp.mean(values, axis=-1)
+        return jnp.min(values, axis=-1)
 
     def _rollout_zoh(
         self,
@@ -274,11 +319,8 @@ class TreeMPC:
         self,
         key: jax.Array,
         state: mjx_env.State,
-        params: TreeMPCParams,
         model_params: TreeMPCModelParams | None = None,
-        *,
-        sample_from_policy: bool,
-    ) -> tuple[_TreeRollout, jax.Array]:
+    ) -> _TreeRollout:
         num_particles = self.num_samples
         decision_steps = self.ctrl_steps
         horizon_steps = self.horizon
@@ -288,25 +330,13 @@ class TreeMPC:
 
         def _scan_fn(carry, t):
             states, k = carry
-            if sample_from_policy:
-                k, k_policy = jax.random.split(k)
-                policy_keys = jax.random.split(k_policy, num_particles)
-                decision_actions = jax.vmap(
-                    lambda o, pk: self._sample_policy_actions(o, pk, model_params)
-                )(states.obs, policy_keys)
-                decision_actions = jnp.clip(
-                    decision_actions, self.task.u_min, self.task.u_max
-                )
-            else:
-                k, k_noise = jax.random.split(k)
-                mu = jnp.broadcast_to(params.actions[t], (num_particles, act_dim))
-                noise = (
-                    jax.random.normal(k_noise, (num_particles, act_dim))
-                    * self.action_noise_std
-                )
-                decision_actions = _squash_to_bounds(
-                    mu + noise, self.task.u_min, self.task.u_max
-                )
+            del t
+            k, k_policy = jax.random.split(k)
+            policy_keys = jax.random.split(k_policy, num_particles)
+            raw_decision_actions = jax.vmap(
+                lambda o, pk: self._sample_policy_raw_actions(o, pk, model_params)
+            )(states.obs, policy_keys)
+            decision_actions = self.action_sequence(raw_decision_actions)
 
             (
                 next_states,
@@ -324,6 +354,7 @@ class TreeMPC:
             decision_rewards = jnp.sum(rewards_steps, axis=1)
 
             return (next_states, k), (
+                raw_decision_actions,
                 decision_actions,
                 decision_rewards,
                 next_states.data,
@@ -336,8 +367,9 @@ class TreeMPC:
             )
 
         (
-            (final_states, _),
+            (_, _),
             (
+                decision_raw_actions,
                 decision_actions,
                 decision_rewards,
                 traj_data_steps,
@@ -349,8 +381,8 @@ class TreeMPC:
                 truncation_steps,
             ),
         ) = jax.lax.scan(_scan_fn, (states0, key), jnp.arange(decision_steps))
-        del final_states
 
+        decision_raw_actions = jnp.swapaxes(decision_raw_actions, 0, 1)
         decision_actions = jnp.swapaxes(decision_actions, 0, 1)
         traj_rewards = jnp.swapaxes(decision_rewards, 0, 1)
         traj_data_steps = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), traj_data_steps)
@@ -374,97 +406,58 @@ class TreeMPC:
             states0.data,
         )
 
-        bootstrap_discount = (
-            self.gamma * all_traj_discount * (1.0 - all_traj_truncation)
-        )
-
-        if self.use_critic and self._has_critic(model_params):
-
-            def _slice_tree(tree: Any, t: jax.Array) -> Any:
-                return jax.tree.map(
-                    lambda x: jax.lax.dynamic_index_in_dim(
-                        x, t, axis=1, keepdims=False
-                    ),
-                    tree,
-                )
-
-            rev_ts = jnp.arange(horizon_steps - 1, -1, -1)
-
-            def _gae_step(carry: jax.Array, t: jax.Array):
-                obs_t = _slice_tree(all_traj_obs, t)
-                next_obs_t = _slice_tree(all_traj_next_obs, t)
-                action_t = jax.lax.dynamic_index_in_dim(
-                    all_traj_actions, t, axis=1, keepdims=False
-                )
-                next_t = jnp.minimum(t + 1, horizon_steps - 1)
-                next_action_t = jax.lax.dynamic_index_in_dim(
-                    all_traj_actions, next_t, axis=1, keepdims=False
-                )
-                reward_t = jax.lax.dynamic_index_in_dim(
-                    all_traj_rewards, t, axis=1, keepdims=False
-                )
-                discount_t = jax.lax.dynamic_index_in_dim(
-                    bootstrap_discount, t, axis=1, keepdims=False
-                )
-
-                q_t = self._critic_value(obs_t, action_t, model_params)
-                q_next_t = self._critic_value(next_obs_t, next_action_t, model_params)
-                delta_t = reward_t + discount_t * q_next_t - q_t
-                adv_t = delta_t + discount_t * self.gae_lambda * carry
-                return adv_t, adv_t
-
-            _, advantages_rev = jax.lax.scan(
-                _gae_step,
-                jnp.zeros((num_particles,), dtype=jnp.float32),
-                rev_ts,
-            )
-            all_traj_advantages = jnp.flip(advantages_rev, axis=0).T
-
-            obs0 = _slice_tree(all_traj_obs, jnp.asarray(0, dtype=jnp.int32))
-            action0 = jax.lax.dynamic_index_in_dim(
-                all_traj_actions, 0, axis=1, keepdims=False
-            )
-            q0 = self._critic_value(obs0, action0, model_params)
-            returns = q0 + all_traj_advantages[:, 0]
-        else:
-
-            def _return_step(carry, x):
-                reward_t, discount_t = x
-                ret_t = reward_t + discount_t * carry
-                return ret_t, ret_t
-
-            _, returns_rev = jax.lax.scan(
-                _return_step,
-                jnp.zeros_like(all_traj_rewards[:, -1]),
-                (
-                    jnp.flip(all_traj_rewards, axis=1).T,
-                    jnp.flip(bootstrap_discount, axis=1).T,
+        if self.use_value:
+            split_idx = num_particles * horizon_steps
+            flat_value_obs = jax.tree.map(
+                lambda obs, next_obs: jnp.concatenate(
+                    [
+                        obs.reshape((split_idx,) + obs.shape[2:]),
+                        next_obs[:, -1, ...],
+                    ],
+                    axis=0,
                 ),
+                all_traj_obs,
+                all_traj_next_obs,
             )
-            return_to_go = jnp.flip(returns_rev.T, axis=1)
-            all_traj_advantages = return_to_go
-            returns = return_to_go[:, 0]
+            value_sequence = self._value(flat_value_obs, model_params)
+            values = value_sequence[:split_idx].reshape((num_particles, horizon_steps))
+            next_values = jnp.concatenate(
+                [values[:, 1:], value_sequence[split_idx:, None]],
+                axis=1,
+            )
+            all_traj_advantages, returns = _compute_generalized_advantages(
+                all_traj_rewards,
+                all_traj_discount,
+                all_traj_truncation,
+                values,
+                next_values,
+                gamma=self.gamma,
+                gae_lambda=self.gae_lambda,
+                reward_scaling=self.reward_scaling,
+            )
+        else:
+            discounted_returns = _compute_discounted_returns(
+                all_traj_rewards,
+                all_traj_discount,
+                all_traj_truncation,
+                gamma=self.gamma,
+                reward_scaling=self.reward_scaling,
+            )
+            all_traj_advantages = discounted_returns
+            returns = discounted_returns[:, 0]
 
-        weights = jnn.softmax(returns / self.temperature, axis=0)
-        mean_actions = jnp.sum(weights[:, None, None] * decision_actions, axis=0)
         winner_idx = jnp.argmax(returns)
-        winner_rollout = _TreeRollout(  # type: ignore
+        return _TreeRollout(  # type: ignore
             traj_data=jax.tree.map(lambda x: x[winner_idx], traj_data),
+            raw_action_sequences=decision_raw_actions,
             traj_actions=decision_actions[winner_idx],
             traj_rewards=traj_rewards[winner_idx],
-            all_traj_obs=jax.tree.map(lambda x: x[winner_idx], all_traj_obs),
-            all_traj_next_obs=jax.tree.map(lambda x: x[winner_idx], all_traj_next_obs),
             all_traj_actions=all_traj_actions[winner_idx],
             all_traj_rewards=all_traj_rewards[winner_idx],
-            all_traj_discount=all_traj_discount[winner_idx],
-            all_traj_truncation=all_traj_truncation[winner_idx],
-            all_traj_advantages=all_traj_advantages[winner_idx],
-            returns=returns[winner_idx],
-        )
-
-        return (
-            winner_rollout,
-            mean_actions,
+            candidate_raw_actions=decision_raw_actions[:, 0, :],
+            candidate_actions=decision_actions[:, 0, :],
+            candidate_advantages=all_traj_advantages[:, 0],
+            returns=returns,
         )
 
     def _mppi_iterate(
@@ -473,47 +466,57 @@ class TreeMPC:
         params: TreeMPCParams,
         model_params: TreeMPCModelParams | None,
     ) -> tuple[TreeMPCParams, _TreeRollout]:
-        rng = params.rng
-        policy_prior_rollouts = None
+        act_dim = self.task.u_min.shape[-1]
 
-        if self.use_policy and self._has_policy(model_params):
-            rng, prior_rng = jax.random.split(rng)
-            policy_prior_rollouts, policy_prior_actions = self._mppi_expand(
-                prior_rng,
-                state,
-                params,
-                model_params,
-                sample_from_policy=True,
-            )
-            params = params.replace(actions=policy_prior_actions, rng=rng)  # type: ignore
-
-            remaining_iterations = self.iterations - 1
-            if remaining_iterations <= 0:
-                assert policy_prior_rollouts is not None
-                return params, policy_prior_rollouts
-        else:
-            remaining_iterations = self.iterations
-
-        def _mppi_iter_step(carry, _):
-            params, rng = carry
+        def _mppi_iter_step(rng, _):
             rng, mppi_rng = jax.random.split(rng)
-            rollouts, mean_actions = self._mppi_expand(
+            rollouts = self._mppi_expand(
                 mppi_rng,
                 state,
-                params,
                 model_params,
-                sample_from_policy=False,
             )
-            params = params.replace(actions=mean_actions, rng=rng)
-            return (params, rng), rollouts
+            return rng, rollouts
 
-        (params, _), rollouts = jax.lax.scan(
+        # FIXME: iterations currently only repeats independent policy-sampled
+        # candidate batches; there is no refinement state passed between passes.
+        rng, rollouts = jax.lax.scan(
             _mppi_iter_step,
-            (params, params.rng),
-            jnp.arange(remaining_iterations),
+            params.rng,
+            jnp.arange(self.iterations),
         )
-        rollouts = jax.tree.map(lambda x: x[-1], rollouts)
-        return params, rollouts
+
+        flat_returns = rollouts.returns.reshape((self.iterations * self.num_samples,))
+        flat_raw_action_sequences = rollouts.raw_action_sequences.reshape(
+            (self.iterations * self.num_samples, self.ctrl_steps, act_dim)
+        )
+        weights = jnn.softmax(flat_returns / self.temperature, axis=0)
+        mean_raw_actions = jnp.sum(
+            weights[:, None, None] * flat_raw_action_sequences,
+            axis=0,
+        )
+
+        best_iteration_idx = jnp.argmax(jnp.max(rollouts.returns, axis=1))
+        best_rollout = jax.tree.map(
+            lambda x: jax.lax.dynamic_index_in_dim(
+                x, best_iteration_idx, axis=0, keepdims=False
+            ),
+            rollouts,
+        )
+        best_rollout = best_rollout.replace(
+            raw_action_sequences=flat_raw_action_sequences,
+            candidate_raw_actions=rollouts.candidate_raw_actions.reshape(
+                (self.iterations * self.num_samples, act_dim)
+            ),
+            candidate_actions=rollouts.candidate_actions.reshape(
+                (self.iterations * self.num_samples, act_dim)
+            ),
+            candidate_advantages=rollouts.candidate_advantages.reshape(
+                (self.iterations * self.num_samples,)
+            ),
+            returns=flat_returns,
+        )
+        params = params.replace(actions=mean_raw_actions, rng=rng)  # type: ignore
+        return params, best_rollout
 
     def optimize(
         self,
@@ -539,7 +542,7 @@ class TreeMPC:
             trace_sites=trace_sites,
         )
 
-    def optimize_with_winner(
+    def optimize_with_candidates(
         self,
         state: mjx_env.State,
         params: TreeMPCParams,

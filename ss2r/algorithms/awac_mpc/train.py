@@ -1,7 +1,7 @@
 """MPO-style training with optional TreeMPC actor supervision."""
 
 import time
-from typing import Any, Callable, Literal, Mapping, Optional, Tuple
+from typing import Any, Callable, Mapping, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +16,7 @@ from brax.training.types import Params, PRNGKey
 from flax import struct
 from ml_collections import config_dict
 
+import ss2r.algorithms.awac_mpc.networks as awac_networks
 import ss2r.algorithms.sac.networks as sac_networks
 from ss2r.algorithms.awac_mpc import losses as awac_losses
 from ss2r.algorithms.mpc.tree_mpc import (
@@ -36,10 +37,7 @@ from ss2r.rl.evaluation import ConstraintsEvaluator, Evaluator
 from ss2r.rl.utils import quantize_images, remove_pixels, restore_state
 
 make_inference_fn = sac_networks.make_inference_fn
-make_networks = sac_networks.make_sac_networks
-
-
-ActorUpdateSource = Literal["planner_online", "critic_replay"]
+make_networks = awac_networks.make_awac_networks
 
 
 @struct.dataclass
@@ -47,9 +45,9 @@ class TrainingState:
     policy_optimizer_state: optax.OptState
     policy_params: Params
     target_policy_params: Params
-    qr_optimizer_state: optax.OptState
-    qr_params: Params
-    target_qr_params: Params
+    value_optimizer_state: optax.OptState
+    value_params: Params
+    target_value_params: Params
     gradient_steps: jnp.ndarray
     env_steps: jnp.ndarray
     normalizer_params: running_statistics.RunningStatisticsState
@@ -58,15 +56,15 @@ class TrainingState:
 def _init_training_state(
     key: PRNGKey,
     obs_size: int,
-    sac_network,
+    awac_network,
     policy_optimizer: optax.GradientTransformation,
-    qr_optimizer: optax.GradientTransformation,
+    value_optimizer: optax.GradientTransformation,
 ) -> TrainingState:
-    key_policy, key_qr = jax.random.split(key)
-    policy_params = sac_network.policy_network.init(key_policy)
+    key_policy, key_value = jax.random.split(key)
+    policy_params = awac_network.policy_network.init(key_policy)
     policy_optimizer_state = policy_optimizer.init(policy_params)
-    qr_params = sac_network.qr_network.init(key_qr)
-    qr_optimizer_state = qr_optimizer.init(qr_params)
+    value_params = awac_network.value_network.init(key_value)
+    value_optimizer_state = value_optimizer.init(value_params)
     if isinstance(obs_size, Mapping):
         obs_shape = {
             k: specs.Array(v, jnp.dtype("float32")) for k, v in obs_size.items()
@@ -78,9 +76,9 @@ def _init_training_state(
         policy_optimizer_state=policy_optimizer_state,
         policy_params=policy_params,
         target_policy_params=policy_params,
-        qr_optimizer_state=qr_optimizer_state,
-        qr_params=qr_params,
-        target_qr_params=qr_params,
+        value_optimizer_state=value_optimizer_state,
+        value_params=value_params,
+        target_value_params=value_params,
         gradient_steps=jnp.zeros(()),
         env_steps=jnp.zeros(()),
         normalizer_params=normalizer_params,
@@ -140,7 +138,7 @@ def _planner_model_params(training_state: TrainingState) -> TreeMPCModelParams:
     return TreeMPCModelParams(  # type: ignore
         normalizer_params=training_state.normalizer_params,
         policy_params=training_state.policy_params,
-        qr_params=training_state.qr_params,
+        value_params=training_state.value_params,
     )
 
 
@@ -183,6 +181,40 @@ def _to_storage_transition(
     )
 
 
+def _flatten_leading_dims(tree: Any, leading_dims: int = 2) -> Any:
+    def _flatten_leaf(x):
+        if not hasattr(x, "shape") or x.ndim < leading_dims:
+            return x
+        flattened_dim = 1
+        for dim in x.shape[:leading_dims]:
+            flattened_dim *= dim
+        new_shape = (flattened_dim,) + x.shape[leading_dims:]
+        return x.reshape(new_shape)
+
+    return jax.tree.map(_flatten_leaf, tree)
+
+
+def _shuffle_and_batch_actor_transitions(
+    actor_transitions: Transition,
+    batch_size: int,
+    key: PRNGKey,
+) -> Transition:
+    total_actor_samples = actor_transitions.reward.shape[0]
+    if total_actor_samples % batch_size != 0:
+        raise ValueError(
+            "planner_online actor transitions must be divisible by batch_size. "
+            f"got={total_actor_samples}, batch_size={batch_size}"
+        )
+    permutation = jax.random.permutation(key, total_actor_samples)
+    num_actor_minibatches = total_actor_samples // batch_size
+
+    def _shuffle_and_reshape(x: jnp.ndarray):
+        x = x[permutation]
+        return x.reshape((num_actor_minibatches, batch_size) + x.shape[1:])
+
+    return jax.tree.map(_shuffle_and_reshape, actor_transitions)
+
+
 class _PlannerActionRepeatWrapper(Wrapper):
     """Minimal wrapper that repeats each planner env step."""
 
@@ -211,6 +243,7 @@ def _planner_supervised_batch(
     transitions: Transition,
     controller,
     planner_params_template: TreeMPCParams,
+    planner_rollout_length: int,
     key: PRNGKey,
     planner_model_params: TreeMPCModelParams | None = None,
 ) -> tuple[Transition, jax.Array]:
@@ -219,49 +252,59 @@ def _planner_supervised_batch(
         raise ValueError(
             "Planner-supervised mode requires planner_state in replay data."
         )
-    if not hasattr(controller, "optimize_with_winner"):
+    if not hasattr(controller, "optimize_with_candidates"):
         raise ValueError(
-            "Planner-supervised mode requires controller.optimize_with_winner."
+            "Planner-supervised mode requires controller.optimize_with_candidates."
         )
     batch_size = transitions.reward.shape[0]
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
-    _, rollouts = jax.vmap(
-        lambda s, p: controller.optimize_with_winner(s, p, planner_model_params)
-    )(planner_states, planner_params)
 
-    # [B, T, ...] -> [B*T, ...]
-    total_steps = (
-        rollouts.all_traj_actions.shape[0] * rollouts.all_traj_actions.shape[1]
+    def _single_rollout(
+        planner_state: Any,
+        planner_params_i: TreeMPCParams,
+    ) -> tuple[Transition, jax.Array]:
+        def _scan_fn(carry, _):
+            state, params = carry
+            next_params, rollout = controller.optimize_with_candidates(
+                state,
+                params,
+                planner_model_params,
+            )
+            chosen_action = controller.action_sequence(next_params.actions)[0]
+            next_state = controller.task.env.step(state, chosen_action)
+            extras = _build_extras(next_state.info, next_state.done)
+            extras["policy_extras"] = {
+                "candidate_raw_actions": rollout.candidate_raw_actions,
+                "candidate_actions": rollout.candidate_actions,
+                "candidate_advantages": rollout.candidate_advantages,
+            }
+            transition = Transition(
+                observation=state.obs,
+                action=chosen_action,
+                reward=next_state.reward,
+                discount=jnp.asarray(1.0 - next_state.done, dtype=jnp.float32),
+                next_observation=next_state.obs,
+                extras=extras,
+            )
+            return (next_state, next_params), (
+                transition,
+                jnp.mean(rollout.returns),
+            )
+
+        (_, _), (planner_transitions, planner_returns) = jax.lax.scan(
+            _scan_fn,
+            (planner_state, planner_params_i),
+            (),
+            length=planner_rollout_length,
+        )
+        return planner_transitions, planner_returns
+
+    rollout_transitions, rollout_returns = jax.vmap(_single_rollout)(
+        planner_states,
+        planner_params,
     )
-
-    def _flatten_rollout(x):
-        if not hasattr(x, "shape"):
-            return x
-        if x.ndim < 2:
-            raise ValueError("Expected planner rollout tensors with shape [B, T, ...].")
-        return x.reshape((total_steps,) + x.shape[2:])
-
-    obs = jax.tree.map(_flatten_rollout, rollouts.all_traj_obs)
-    next_obs = jax.tree.map(_flatten_rollout, rollouts.all_traj_next_obs)
-    actions = _flatten_rollout(rollouts.all_traj_actions)
-    rewards = _flatten_rollout(rollouts.all_traj_rewards)
-    discount = _flatten_rollout(rollouts.all_traj_discount)
-    truncation = _flatten_rollout(rollouts.all_traj_truncation)
-    advantages = _flatten_rollout(rollouts.all_traj_advantages)
-
-    avg_rollout_return = jnp.mean(rollouts.returns)
-
-    return Transition(
-        observation=obs,
-        action=actions,
-        reward=rewards,
-        discount=discount,
-        next_observation=next_obs,
-        extras={
-            "state_extras": {"truncation": truncation},
-            "policy_extras": {"advantage": advantages},
-        },
-    ), avg_rollout_return
+    avg_rollout_return = jnp.mean(rollout_returns)
+    return _flatten_leading_dims(rollout_transitions), avg_rollout_return
 
 
 def train(
@@ -292,24 +335,21 @@ def train(
     deterministic_eval: bool = False,
     reset_on_eval: bool = True,
     rollout_length: int = 1,
+    planner_rollout_length: int = 1,
     mpo_eta: float = 1.0,
     mpo_eta_epsilon: float = 0.1,
     mpo_eta_min: float = 1e-3,
     mpo_eta_opt_maxiter: int = 10,
-    mpo_num_action_samples: int = 16,
     mpo_log_prob_min: float = -100.0,
     n_critics: int = 2,
-    n_heads: int = 1,
     use_bro: bool = True,
     actor_grad_clip_norm: float = 1.0,
     critic_grad_clip_norm: float = 1.0,
-    actor_update_source: ActorUpdateSource = "planner_online",
     progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     checkpoint_logdir: Optional[str] = None,
     restore_checkpoint_path: Optional[str] = None,
     eval_env: Optional[envs.Env] = None,
     planner_environment: Optional[envs.Env] = None,
-    controller_name: str = "tree",
     controller_kwargs: Optional[dict[str, Any]] = None,
     policy_hidden_layer_sizes: Tuple[int, ...] = (256, 256),
     value_hidden_layer_sizes: Tuple[int, ...] = (256, 256),
@@ -317,16 +357,6 @@ def train(
     policy_obs_key: str = "state",
     value_obs_key: str = "state",
 ):
-    valid_actor_sources = {"planner_online", "critic_replay"}
-    if actor_update_source not in valid_actor_sources:
-        raise ValueError(
-            f"Unknown actor_update_source: {actor_update_source}, expected one of {valid_actor_sources}."
-        )
-    planner_mode = actor_update_source == "planner_online"
-    if not planner_mode and min_replay_size >= num_timesteps:
-        raise ValueError(
-            "No training will happen because min_replay_size >= num_timesteps"
-        )
     if prefill_steps < 0:
         raise ValueError("prefill_steps must be >= 0.")
     if critic_pretrain_ratio < 0:
@@ -345,12 +375,12 @@ def train(
         raise ValueError(
             "mpo_eta_opt_maxiter must be >= 1, " f"got {mpo_eta_opt_maxiter}."
         )
-    if mpo_num_action_samples < 1:
-        raise ValueError(
-            "mpo_num_action_samples must be >= 1, " f"got {mpo_num_action_samples}."
-        )
     if mpo_log_prob_min > 0.0:
         raise ValueError(f"mpo_log_prob_min must be <= 0, got {mpo_log_prob_min}.")
+    if planner_rollout_length < 1:
+        raise ValueError(
+            f"planner_rollout_length must be >= 1, got {planner_rollout_length}."
+        )
     if actor_grad_clip_norm <= 0.0:
         raise ValueError(
             f"actor_grad_clip_norm must be > 0, got {actor_grad_clip_norm}."
@@ -361,12 +391,8 @@ def train(
         )
     if max_replay_size is None:
         max_replay_size = num_timesteps
-    if planner_mode and controller_name != "tree":
-        raise ValueError(
-            "Planner-supervised modes only support controller_name='tree'."
-        )
-    if planner_mode and planner_environment is None:
-        raise ValueError("planner_environment is required for planner_online mode.")
+    if planner_environment is None:
+        raise ValueError("planner_environment is required for AWAC-MPC.")
 
     env = environment
     if wrap_env_fn is not None:
@@ -385,7 +411,7 @@ def train(
     if normalize_observations:
         normalize_fn = running_statistics.normalize
 
-    sac_network = make_networks(
+    awac_network = make_networks(
         observation_size=obs_size,
         action_size=action_size,
         preprocess_observations_fn=normalize_fn,
@@ -393,19 +419,18 @@ def train(
         value_hidden_layer_sizes=value_hidden_layer_sizes,
         activation=activation,
         n_critics=n_critics,
-        n_heads=n_heads,
         use_bro=use_bro,
         policy_obs_key=policy_obs_key,
         value_obs_key=value_obs_key,
     )
-    make_policy = make_inference_fn(sac_network)
+    make_policy = make_inference_fn(awac_network)
 
     make_optimizer = lambda lr, grad_clip_norm: optax.chain(
         optax.clip_by_global_norm(grad_clip_norm),
         optax.adam(learning_rate=lr),
     )
     policy_optimizer = make_optimizer(learning_rate, actor_grad_clip_norm)
-    qr_optimizer = make_optimizer(critic_learning_rate, critic_grad_clip_norm)
+    value_optimizer = make_optimizer(critic_learning_rate, critic_grad_clip_norm)
 
     if isinstance(obs_size, Mapping):
         dummy_obs = {k: jnp.zeros(v) for k, v in obs_size.items()}
@@ -425,9 +450,9 @@ def train(
     training_state = _init_training_state(
         init_key,
         obs_size,
-        sac_network,
+        awac_network,
         policy_optimizer,
-        qr_optimizer,
+        value_optimizer,
     )
 
     if restore_checkpoint_path is not None:
@@ -437,13 +462,13 @@ def train(
                 normalizer_params=params[0],
                 policy_params=params[1],
                 target_policy_params=params[1],
-                qr_params=params[3],
-                target_qr_params=params[3],
+                value_params=params[3],
+                target_value_params=params[3],
                 policy_optimizer_state=restore_state(
                     params[6], training_state.policy_optimizer_state
                 ),
-                qr_optimizer_state=restore_state(
-                    params[8], training_state.qr_optimizer_state
+                value_optimizer_state=restore_state(
+                    params[8], training_state.value_optimizer_state
                 ),
             )
         elif len(params) >= 7:
@@ -451,13 +476,13 @@ def train(
                 normalizer_params=params[0],
                 policy_params=params[1],
                 target_policy_params=params[6],
-                qr_params=params[2],
-                target_qr_params=params[3],
+                value_params=params[2],
+                target_value_params=params[3],
                 policy_optimizer_state=restore_state(
                     params[4], training_state.policy_optimizer_state
                 ),
-                qr_optimizer_state=restore_state(
-                    params[5], training_state.qr_optimizer_state
+                value_optimizer_state=restore_state(
+                    params[5], training_state.value_optimizer_state
                 ),
             )
         else:
@@ -465,13 +490,13 @@ def train(
                 normalizer_params=params[0],
                 policy_params=params[1],
                 target_policy_params=params[1],
-                qr_params=params[2],
-                target_qr_params=params[3],
+                value_params=params[2],
+                target_value_params=params[3],
                 policy_optimizer_state=restore_state(
                     params[4], training_state.policy_optimizer_state
                 ),
-                qr_optimizer_state=restore_state(
-                    params[5], training_state.qr_optimizer_state
+                value_optimizer_state=restore_state(
+                    params[5], training_state.value_optimizer_state
                 ),
             )
 
@@ -484,29 +509,26 @@ def train(
             "Use a vectorized/wrapped env with batch dimension."
         )
 
-    planner_params_template = None
-    controller = None
-    if planner_mode:
-        assert planner_environment is not None
-        planner_env = _PlannerActionRepeatWrapper(planner_environment, action_repeat)
-        controller_kwargs = dict(controller_kwargs or {})
-        controller_kwargs["n_critics"] = int(n_critics)
-        controller_kwargs["n_heads"] = int(n_heads)
-        controller_kwargs["use_bro"] = bool(use_bro)
-        controller_kwargs["gamma"] = discounting
-        task = make_task(planner_env)  # type: ignore[arg-type]
-        controller = TreeMPC(task=task, **controller_kwargs)
-        controller.bind_sac_network(sac_network)
-        planner_params_template = _init_planner_params(controller, seed, None)
-
-    dummy_planner_state = None
-    if planner_mode:
-        dummy_planner_state = jax.tree.map(
-            lambda x: x[0]
-            if hasattr(x, "shape") and x.shape and x.shape[0] == num_envs
-            else x,
-            env_state,
+    planner_env = _PlannerActionRepeatWrapper(planner_environment, action_repeat)
+    controller_kwargs = dict(controller_kwargs or {})
+    controller_kwargs["n_critics"] = int(n_critics)
+    controller_kwargs["use_bro"] = bool(use_bro)
+    controller_kwargs["gamma"] = discounting
+    controller_kwargs["reward_scaling"] = reward_scaling
+    if not controller_kwargs.get("use_value", False):
+        raise ValueError(
+            "Value-based AWAC-MPC requires controller_kwargs.use_value=True."
         )
+    task = make_task(planner_env)  # type: ignore[arg-type]
+    controller = TreeMPC(task=task, awac_network=awac_network, **controller_kwargs)
+    planner_params_template = _init_planner_params(controller, seed, None)
+
+    dummy_planner_state = jax.tree.map(
+        lambda x: x[0]
+        if hasattr(x, "shape") and x.shape and x.shape[0] == num_envs
+        else x,
+        env_state,
+    )
 
     replay_dummy_transition = _to_storage_transition(
         base_dummy_transition,
@@ -522,19 +544,18 @@ def train(
     buffer_state = replay_buffer.init(rb_key)
 
     critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
-        sac_network,
+        awac_network,
         reward_scaling=reward_scaling,
         discounting=discounting,
         mpo_eta_init=mpo_eta,
         mpo_eta_epsilon=mpo_eta_epsilon,
         mpo_eta_min=mpo_eta_min,
         mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
-        mpo_num_action_samples=mpo_num_action_samples,
         mpo_log_prob_min=mpo_log_prob_min,
         use_bro=use_bro,
     )
     critic_update = gradients.gradient_update_fn(
-        critic_loss_fn, qr_optimizer, pmap_axis_name=None, has_aux=True
+        critic_loss_fn, value_optimizer, pmap_axis_name=None, has_aux=True
     )
     actor_update = gradients.gradient_update_fn(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
@@ -559,8 +580,7 @@ def train(
             action, _ = policy(state.obs, action_key)
             next_state = env_local.step(state, action)
             extras = _build_extras(next_state.info, next_state.done)
-            if planner_mode:
-                extras["policy_extras"]["planner_state"] = state
+            extras["policy_extras"]["planner_state"] = state
             transition = Transition(
                 observation=state.obs,
                 action=action,
@@ -575,14 +595,12 @@ def train(
             step_fn, (env_state, key), (), length=rollout_length
         )
 
-        planner_states = None
-        if planner_mode:
-            raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
-            transitions = _strip_policy_extras(transitions)
-            time_len, batch_dim = raw_planner_states.reward.shape[:2]
-            planner_states = _flatten_time_batch_tree(
-                raw_planner_states, time_len, batch_dim
-            )
+        raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
+        transitions = _strip_policy_extras(transitions)
+        time_len, batch_dim = raw_planner_states.reward.shape[:2]
+        planner_states = _flatten_time_batch_tree(
+            raw_planner_states, time_len, batch_dim
+        )
 
         transitions = _flatten_transition_batch(transitions)
         normalizer_params = running_statistics.update(
@@ -621,129 +639,84 @@ def train(
         unused_t,
     ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
         training_state, buffer_state, key, count = carry
-        key, key_critic, key_actor, key_planner = jax.random.split(key, 4)
+        key, key_perm, key_planner = jax.random.split(key, 3)
 
         buffer_state, sampled = replay_buffer.sample(buffer_state)
 
         critic_transitions = _strip_policy_extras(sampled)
-        (critic_loss, critic_aux), qr_params, qr_optimizer_state = critic_update(
-            training_state.qr_params,
-            training_state.policy_params,
+        (critic_loss, critic_aux), value_params, value_optimizer_state = critic_update(
+            training_state.value_params,
             training_state.normalizer_params,
-            training_state.target_qr_params,
+            training_state.target_value_params,
             critic_transitions,
-            key_critic,
-            optimizer_state=training_state.qr_optimizer_state,
-            params=training_state.qr_params,
+            optimizer_state=training_state.value_optimizer_state,
+            params=training_state.value_params,
         )
 
         polyak = lambda target, new, coeff: jax.tree.map(
             lambda x, y: x * (1 - coeff) + y * coeff, target, new
         )
-        new_target_qr_params = polyak(training_state.target_qr_params, qr_params, tau)
-        sampled_for_planner = sampled
+        new_target_value_params = polyak(
+            training_state.target_value_params, value_params, tau
+        )
+        sampled = float32(sampled)
+        actor_transitions, planner_avg_rollout_return = _planner_supervised_batch(
+            sampled,
+            controller,
+            planner_params_template,
+            planner_rollout_length,
+            key_planner,
+            _planner_model_params(training_state.replace(value_params=value_params)),
+        )
+        shuffled_actor_data = _shuffle_and_batch_actor_transitions(
+            actor_transitions,
+            batch_size,
+            key_perm,
+        )
+        num_actor_minibatches = shuffled_actor_data.reward.shape[0]
 
-        planner_avg_rollout_return = jnp.asarray(0.0, dtype=jnp.float32)
-
-        if actor_update_source == "planner_online":
-            assert (
-                planner_mode
-                and controller is not None
-                and planner_params_template is not None
-            )
-            actor_transitions, planner_avg_rollout_return = _planner_supervised_batch(
-                sampled_for_planner,
-                controller,
-                planner_params_template,
-                key_planner,
-                _planner_model_params(training_state),
-            )
-            actor_transitions = float32(actor_transitions)
-        else:
-            actor_transitions = critic_transitions
-
-        if actor_update_source == "planner_online":
-            total_actor_samples = actor_transitions.reward.shape[0]
-            if total_actor_samples % batch_size != 0:
-                raise ValueError(
-                    "planner_online/all_planner_actions expects actor transitions "
-                    f"divisible by batch_size. got={total_actor_samples}, batch_size={batch_size}"
-                )
-            key_actor, key_perm, key_grad = jax.random.split(key_actor, 3)
-            num_actor_minibatches = total_actor_samples // batch_size
-
-            def _convert_actor_data(x: jnp.ndarray):
-                x = jax.random.permutation(key_perm, x)
-                x = jnp.reshape(x, (num_actor_minibatches, -1) + x.shape[1:])
-                return x
-
-            shuffled_actor_data = jax.tree_util.tree_map(
-                _convert_actor_data, actor_transitions
-            )
-
-            def _actor_step(carry, minibatch):
-                policy_params, policy_optimizer_state, k = carry
-                k, step_key = jax.random.split(k)
-                (
-                    (actor_loss_i, aux_i),
-                    new_policy_params_i,
-                    new_policy_optimizer_state_i,
-                ) = actor_update(
-                    policy_params,
-                    training_state.target_policy_params,
-                    training_state.normalizer_params,
-                    qr_params,
-                    minibatch,
-                    step_key,
-                    optimizer_state=policy_optimizer_state,
-                    params=policy_params,
-                )
-                return (
-                    new_policy_params_i,
-                    new_policy_optimizer_state_i,
-                    k,
-                ), (
-                    actor_loss_i,
-                    aux_i,
-                )
-
+        def _actor_step(carry, minibatch):
+            policy_params, policy_optimizer_state = carry
             (
-                (new_policy_params, new_policy_optimizer_state, _),
-                (actor_losses, actor_auxes),
-            ) = jax.lax.scan(
-                _actor_step,
-                (
-                    training_state.policy_params,
-                    training_state.policy_optimizer_state,
-                    key_grad,
-                ),
-                shuffled_actor_data,
-                length=num_actor_minibatches,
-            )
-            actor_loss = jnp.mean(actor_losses)
-            aux = jax.tree.map(jnp.mean, actor_auxes)
-        else:
-            (
-                (actor_loss, aux),
-                new_policy_params,
-                new_policy_optimizer_state,
+                (actor_loss_i, aux_i),
+                new_policy_params_i,
+                new_policy_optimizer_state_i,
             ) = actor_update(
-                training_state.policy_params,
-                training_state.target_policy_params,
+                policy_params,
                 training_state.normalizer_params,
-                qr_params,
-                actor_transitions,
-                key_actor,
-                optimizer_state=training_state.policy_optimizer_state,
-                params=training_state.policy_params,
+                minibatch,
+                optimizer_state=policy_optimizer_state,
+                params=policy_params,
             )
+            return (
+                new_policy_params_i,
+                new_policy_optimizer_state_i,
+            ), (
+                actor_loss_i,
+                aux_i,
+            )
+
+        (
+            (new_policy_params, new_policy_optimizer_state),
+            (actor_losses, actor_auxes),
+        ) = jax.lax.scan(
+            _actor_step,
+            (
+                training_state.policy_params,
+                training_state.policy_optimizer_state,
+            ),
+            shuffled_actor_data,
+            length=num_actor_minibatches,
+        )
+        actor_loss = jnp.mean(actor_losses)
+        aux = jax.tree.map(jnp.mean, actor_auxes)
 
         should_update_actor = count % num_critic_updates_per_actor_update == 0
         update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
-        policy_params = jax.tree_map(
+        policy_params = jax.tree.map(
             update_if_needed, new_policy_params, training_state.policy_params
         )
-        policy_optimizer_state = jax.tree_map(
+        policy_optimizer_state = jax.tree.map(
             update_if_needed,
             new_policy_optimizer_state,
             training_state.policy_optimizer_state,
@@ -757,9 +730,9 @@ def train(
             policy_optimizer_state=policy_optimizer_state,
             policy_params=policy_params,
             target_policy_params=new_target_policy_params,
-            qr_optimizer_state=qr_optimizer_state,
-            qr_params=qr_params,
-            target_qr_params=new_target_qr_params,
+            value_optimizer_state=value_optimizer_state,
+            value_params=value_params,
+            target_value_params=new_target_value_params,
             gradient_steps=training_state.gradient_steps + 1,
         )
         actor_aux = {f"actor/{k}": v for k, v in aux.items()}
@@ -820,45 +793,33 @@ def train(
         budget=float("inf"),
         num_episodes=num_eval_episodes,
     )
-    planner_eval_enabled = (
-        planner_mode and controller is not None and planner_params_template is not None
+
+    def _planner_eval_policy_fn(_):
+        def _planner_eval_policy(state: envs.State, rng: PRNGKey, params):
+            del rng
+            model_params, planner_params = params
+            planner_params_out, _ = jax.vmap(
+                lambda s, p: controller.optimize(s, p, model_params)
+            )(state, planner_params)
+            action = controller.action_sequence(planner_params_out.actions)[:, 0, :]
+            return action, (model_params, planner_params_out), {}
+
+        return _planner_eval_policy
+
+    planner_evaluator = Evaluator(
+        eval_env,
+        _planner_eval_policy_fn,
+        num_eval_envs=num_eval_envs,
+        episode_length=episode_length,
+        action_repeat=action_repeat,
+        key=jax.random.PRNGKey(seed + 2),
     )
-
-    planner_evaluator = None
-    if planner_eval_enabled:
-
-        def _planner_eval_policy_fn(_):
-            def _planner_eval_policy(state: envs.State, rng: PRNGKey, params):
-                assert controller is not None
-                assert planner_params_template is not None
-                del rng
-                model_params, planner_params = params
-                planner_params_out, _ = jax.vmap(
-                    lambda s, p: controller.optimize(s, p, model_params)
-                )(state, planner_params)
-                action = planner_params_out.actions[:, 0, :]
-                return action, (model_params, planner_params_out), {}
-
-            return _planner_eval_policy
-
-        planner_evaluator = Evaluator(
-            eval_env,
-            _planner_eval_policy_fn,
-            num_eval_envs=num_eval_envs,
-            episode_length=episode_length,
-            action_repeat=action_repeat,
-            key=jax.random.PRNGKey(seed + 2),
-        )
 
     def run_planner_evaluation(
         training_state: TrainingState,
         key: PRNGKey,
         prefix: str = "planner",
     ) -> tuple[dict[str, float], PRNGKey]:
-        if not planner_eval_enabled or planner_evaluator is None:
-            return {}, key
-        assert planner_params_template is not None
-
         model_params = _planner_model_params(training_state)
         key, params_key = jax.random.split(key)
         planner_params = _planner_params_for_batch(
@@ -1032,10 +993,10 @@ def train(
             params = (
                 training_state.normalizer_params,
                 training_state.policy_params,
-                training_state.qr_params,
-                training_state.target_qr_params,
+                training_state.value_params,
+                training_state.target_value_params,
                 training_state.policy_optimizer_state,
-                training_state.qr_optimizer_state,
+                training_state.value_optimizer_state,
                 training_state.target_policy_params,
             )
             dummy_ckpt_config = config_dict.ConfigDict()
@@ -1054,10 +1015,10 @@ def train(
     params = (
         training_state.normalizer_params,
         training_state.policy_params,
-        training_state.qr_params,
-        training_state.target_qr_params,
+        training_state.value_params,
+        training_state.target_value_params,
         training_state.policy_optimizer_state,
-        training_state.qr_optimizer_state,
+        training_state.value_optimizer_state,
         training_state.target_policy_params,
     )
     logging.info("total steps: %s", total_steps)
