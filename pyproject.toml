@@ -16,6 +16,7 @@ dependencies = [
     "brax",
     "playground",
     "matplotlib>=3.10.3,<4",
+    "huggingface-hub>=1.10.1",
 ]
 
 [dependency-groups]
@@ -28,7 +29,7 @@ dev = [
     "tueplots>=0.0.17,<0.0.18",
     "ruff>=0.9.6,<0.10",
 ]
-wandb = ["wandb>=0.16.4,<0.17"]
+wandb = ["wandb>=0.16.4"]
 hydra-submitit = ["hydra-submitit-launcher>=1.2.0,<2"]
 onnx = [
     "tf2onnx>=1.16.1,<2",
