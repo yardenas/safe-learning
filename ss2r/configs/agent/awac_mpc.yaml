@@ -35,7 +35,5 @@ controller_kwargs:
   num_samples: 128
   horizon: 25
   zoh_steps: 5
-  use_value: true
-  gae_lambda: 1.0
   temperature: 0.8
   iterations: 1

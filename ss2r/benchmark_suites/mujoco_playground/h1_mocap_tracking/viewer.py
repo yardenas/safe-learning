@@ -371,7 +371,8 @@ def _build_sac_network_and_model_params(
     return sac_network, TreeMPCModelParams(  # type: ignore
         normalizer_params=params[0],
         policy_params=params[1],
-        value_params=None,
+        target_policy_params=params[1],
+        qr_params=params[3],
     )
 
 
@@ -454,7 +455,7 @@ def _restore_sac_checkpoint(
 
 def _build_tree_mpc(
     planner_env: H1MocapTracking,
-    awac_network: Any,
+    sac_network: Any,
     seed: int,
     *,
     num_samples: int,
@@ -467,15 +468,13 @@ def _build_tree_mpc(
     task = make_task(planner_env)
     planner = TreeMPC(
         task=task,
-        awac_network=awac_network,
+        sac_network=sac_network,
         num_samples=num_samples,
         horizon=horizon,
         zoh_steps=zoh_steps,
         gamma=gamma,
         temperature=temperature,
         iterations=iterations,
-        gae_lambda=0.0,
-        use_value=False,
     )
     params = planner.init_params(seed=seed)
     return planner, params
@@ -784,7 +783,7 @@ def run_viewer(
         )
         planner, planner_params = _build_tree_mpc(
             planner_env=planner_env,
-            awac_network=planner_network,
+            sac_network=planner_network,
             seed=seed,
             num_samples=tree_num_samples,
             horizon=tree_horizon,

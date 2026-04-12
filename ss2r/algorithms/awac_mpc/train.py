@@ -16,7 +16,6 @@ from brax.training.types import Params, PRNGKey
 from flax import struct
 from ml_collections import config_dict
 
-import ss2r.algorithms.awac_mpc.networks as awac_networks
 import ss2r.algorithms.sac.networks as sac_networks
 from ss2r.algorithms.awac_mpc import losses as awac_losses
 from ss2r.algorithms.mpc.tree_mpc import (
@@ -37,7 +36,7 @@ from ss2r.rl.evaluation import ConstraintsEvaluator, Evaluator
 from ss2r.rl.utils import quantize_images, remove_pixels, restore_state
 
 make_inference_fn = sac_networks.make_inference_fn
-make_networks = awac_networks.make_awac_networks
+make_networks = sac_networks.make_sac_networks
 
 
 @struct.dataclass
@@ -45,9 +44,9 @@ class TrainingState:
     policy_optimizer_state: optax.OptState
     policy_params: Params
     target_policy_params: Params
-    value_optimizer_state: optax.OptState
-    value_params: Params
-    target_value_params: Params
+    qr_optimizer_state: optax.OptState
+    qr_params: Params
+    target_qr_params: Params
     gradient_steps: jnp.ndarray
     env_steps: jnp.ndarray
     normalizer_params: running_statistics.RunningStatisticsState
@@ -56,15 +55,15 @@ class TrainingState:
 def _init_training_state(
     key: PRNGKey,
     obs_size: int,
-    awac_network,
+    sac_network,
     policy_optimizer: optax.GradientTransformation,
-    value_optimizer: optax.GradientTransformation,
+    qr_optimizer: optax.GradientTransformation,
 ) -> TrainingState:
-    key_policy, key_value = jax.random.split(key)
-    policy_params = awac_network.policy_network.init(key_policy)
+    key_policy, key_qr = jax.random.split(key)
+    policy_params = sac_network.policy_network.init(key_policy)
     policy_optimizer_state = policy_optimizer.init(policy_params)
-    value_params = awac_network.value_network.init(key_value)
-    value_optimizer_state = value_optimizer.init(value_params)
+    qr_params = sac_network.qr_network.init(key_qr)
+    qr_optimizer_state = qr_optimizer.init(qr_params)
     if isinstance(obs_size, Mapping):
         obs_shape = {
             k: specs.Array(v, jnp.dtype("float32")) for k, v in obs_size.items()
@@ -76,9 +75,9 @@ def _init_training_state(
         policy_optimizer_state=policy_optimizer_state,
         policy_params=policy_params,
         target_policy_params=policy_params,
-        value_optimizer_state=value_optimizer_state,
-        value_params=value_params,
-        target_value_params=value_params,
+        qr_optimizer_state=qr_optimizer_state,
+        qr_params=qr_params,
+        target_qr_params=qr_params,
         gradient_steps=jnp.zeros(()),
         env_steps=jnp.zeros(()),
         normalizer_params=normalizer_params,
@@ -138,7 +137,8 @@ def _planner_model_params(training_state: TrainingState) -> TreeMPCModelParams:
     return TreeMPCModelParams(  # type: ignore
         normalizer_params=training_state.normalizer_params,
         policy_params=training_state.policy_params,
-        value_params=training_state.value_params,
+        target_policy_params=training_state.target_policy_params,
+        qr_params=training_state.qr_params,
     )
 
 
@@ -275,8 +275,7 @@ def _planner_supervised_batch(
             extras = _build_extras(next_state.info, next_state.done)
             extras["policy_extras"] = {
                 "candidate_raw_actions": rollout.candidate_raw_actions,
-                "candidate_actions": rollout.candidate_actions,
-                "candidate_advantages": rollout.candidate_advantages,
+                "candidate_q_values": rollout.candidate_q_values,
             }
             transition = Transition(
                 observation=state.obs,
@@ -328,8 +327,6 @@ def train(
     policy_target_tau: float = 0.005,
     min_replay_size: int = 0,
     max_replay_size: Optional[int] = None,
-    prefill_steps: int = 0,
-    critic_pretrain_ratio: float = 0.0,
     grad_updates_per_step: int = 1,
     num_critic_updates_per_actor_update: int = 1,
     deterministic_eval: bool = False,
@@ -357,10 +354,6 @@ def train(
     policy_obs_key: str = "state",
     value_obs_key: str = "state",
 ):
-    if prefill_steps < 0:
-        raise ValueError("prefill_steps must be >= 0.")
-    if critic_pretrain_ratio < 0:
-        raise ValueError("critic_pretrain_ratio must be >= 0.")
     if not 0.0 <= policy_target_tau <= 1.0:
         raise ValueError(
             f"policy_target_tau must be in [0, 1], got {policy_target_tau}."
@@ -411,7 +404,7 @@ def train(
     if normalize_observations:
         normalize_fn = running_statistics.normalize
 
-    awac_network = make_networks(
+    sac_network = make_networks(
         observation_size=obs_size,
         action_size=action_size,
         preprocess_observations_fn=normalize_fn,
@@ -422,15 +415,16 @@ def train(
         use_bro=use_bro,
         policy_obs_key=policy_obs_key,
         value_obs_key=value_obs_key,
+        safe=False,
     )
-    make_policy = make_inference_fn(awac_network)
+    make_policy = make_inference_fn(sac_network)
 
     make_optimizer = lambda lr, grad_clip_norm: optax.chain(
         optax.clip_by_global_norm(grad_clip_norm),
         optax.adam(learning_rate=lr),
     )
     policy_optimizer = make_optimizer(learning_rate, actor_grad_clip_norm)
-    value_optimizer = make_optimizer(critic_learning_rate, critic_grad_clip_norm)
+    qr_optimizer = make_optimizer(critic_learning_rate, critic_grad_clip_norm)
 
     if isinstance(obs_size, Mapping):
         dummy_obs = {k: jnp.zeros(v) for k, v in obs_size.items()}
@@ -450,9 +444,9 @@ def train(
     training_state = _init_training_state(
         init_key,
         obs_size,
-        awac_network,
+        sac_network,
         policy_optimizer,
-        value_optimizer,
+        qr_optimizer,
     )
 
     if restore_checkpoint_path is not None:
@@ -462,13 +456,13 @@ def train(
                 normalizer_params=params[0],
                 policy_params=params[1],
                 target_policy_params=params[1],
-                value_params=params[3],
-                target_value_params=params[3],
+                qr_params=params[3],
+                target_qr_params=params[3],
                 policy_optimizer_state=restore_state(
                     params[6], training_state.policy_optimizer_state
                 ),
-                value_optimizer_state=restore_state(
-                    params[8], training_state.value_optimizer_state
+                qr_optimizer_state=restore_state(
+                    params[8], training_state.qr_optimizer_state
                 ),
             )
         elif len(params) >= 7:
@@ -476,13 +470,13 @@ def train(
                 normalizer_params=params[0],
                 policy_params=params[1],
                 target_policy_params=params[6],
-                value_params=params[2],
-                target_value_params=params[3],
+                qr_params=params[2],
+                target_qr_params=params[3],
                 policy_optimizer_state=restore_state(
                     params[4], training_state.policy_optimizer_state
                 ),
-                value_optimizer_state=restore_state(
-                    params[5], training_state.value_optimizer_state
+                qr_optimizer_state=restore_state(
+                    params[5], training_state.qr_optimizer_state
                 ),
             )
         else:
@@ -490,13 +484,13 @@ def train(
                 normalizer_params=params[0],
                 policy_params=params[1],
                 target_policy_params=params[1],
-                value_params=params[2],
-                target_value_params=params[3],
+                qr_params=params[2],
+                target_qr_params=params[3],
                 policy_optimizer_state=restore_state(
                     params[4], training_state.policy_optimizer_state
                 ),
-                value_optimizer_state=restore_state(
-                    params[5], training_state.value_optimizer_state
+                qr_optimizer_state=restore_state(
+                    params[5], training_state.qr_optimizer_state
                 ),
             )
 
@@ -515,12 +509,8 @@ def train(
     controller_kwargs["use_bro"] = bool(use_bro)
     controller_kwargs["gamma"] = discounting
     controller_kwargs["reward_scaling"] = reward_scaling
-    if not controller_kwargs.get("use_value", False):
-        raise ValueError(
-            "Value-based AWAC-MPC requires controller_kwargs.use_value=True."
-        )
     task = make_task(planner_env)  # type: ignore[arg-type]
-    controller = TreeMPC(task=task, awac_network=awac_network, **controller_kwargs)
+    controller = TreeMPC(task=task, sac_network=sac_network, **controller_kwargs)
     planner_params_template = _init_planner_params(controller, seed, None)
 
     dummy_planner_state = jax.tree.map(
@@ -544,7 +534,7 @@ def train(
     buffer_state = replay_buffer.init(rb_key)
 
     critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
-        awac_network,
+        sac_network,
         reward_scaling=reward_scaling,
         discounting=discounting,
         mpo_eta_init=mpo_eta,
@@ -555,7 +545,7 @@ def train(
         use_bro=use_bro,
     )
     critic_update = gradients.gradient_update_fn(
-        critic_loss_fn, value_optimizer, pmap_axis_name=None, has_aux=True
+        critic_loss_fn, qr_optimizer, pmap_axis_name=None, has_aux=True
     )
     actor_update = gradients.gradient_update_fn(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
@@ -639,26 +629,26 @@ def train(
         unused_t,
     ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
         training_state, buffer_state, key, count = carry
-        key, key_perm, key_planner = jax.random.split(key, 3)
+        key, key_critic, key_perm, key_planner = jax.random.split(key, 4)
 
         buffer_state, sampled = replay_buffer.sample(buffer_state)
 
         critic_transitions = _strip_policy_extras(sampled)
-        (critic_loss, critic_aux), value_params, value_optimizer_state = critic_update(
-            training_state.value_params,
+        (critic_loss, critic_aux), qr_params, qr_optimizer_state = critic_update(
+            training_state.qr_params,
+            training_state.policy_params,
             training_state.normalizer_params,
-            training_state.target_value_params,
+            training_state.target_qr_params,
             critic_transitions,
-            optimizer_state=training_state.value_optimizer_state,
-            params=training_state.value_params,
+            key_critic,
+            optimizer_state=training_state.qr_optimizer_state,
+            params=training_state.qr_params,
         )
 
         polyak = lambda target, new, coeff: jax.tree.map(
             lambda x, y: x * (1 - coeff) + y * coeff, target, new
         )
-        new_target_value_params = polyak(
-            training_state.target_value_params, value_params, tau
-        )
+        new_target_qr_params = polyak(training_state.target_qr_params, qr_params, tau)
         sampled = float32(sampled)
         actor_transitions, planner_avg_rollout_return = _planner_supervised_batch(
             sampled,
@@ -666,7 +656,7 @@ def train(
             planner_params_template,
             planner_rollout_length,
             key_planner,
-            _planner_model_params(training_state.replace(value_params=value_params)),
+            _planner_model_params(training_state.replace(qr_params=qr_params)),
         )
         shuffled_actor_data = _shuffle_and_batch_actor_transitions(
             actor_transitions,
@@ -730,9 +720,9 @@ def train(
             policy_optimizer_state=policy_optimizer_state,
             policy_params=policy_params,
             target_policy_params=new_target_policy_params,
-            value_optimizer_state=value_optimizer_state,
-            value_params=value_params,
-            target_value_params=new_target_value_params,
+            qr_optimizer_state=qr_optimizer_state,
+            qr_params=qr_params,
+            target_qr_params=new_target_qr_params,
             gradient_steps=training_state.gradient_steps + 1,
         )
         actor_aux = {f"actor/{k}": v for k, v in aux.items()}
@@ -993,10 +983,10 @@ def train(
             params = (
                 training_state.normalizer_params,
                 training_state.policy_params,
-                training_state.value_params,
-                training_state.target_value_params,
+                training_state.qr_params,
+                training_state.target_qr_params,
                 training_state.policy_optimizer_state,
-                training_state.value_optimizer_state,
+                training_state.qr_optimizer_state,
                 training_state.target_policy_params,
             )
             dummy_ckpt_config = config_dict.ConfigDict()
@@ -1015,10 +1005,10 @@ def train(
     params = (
         training_state.normalizer_params,
         training_state.policy_params,
-        training_state.value_params,
-        training_state.target_value_params,
+        training_state.qr_params,
+        training_state.target_qr_params,
         training_state.policy_optimizer_state,
-        training_state.value_optimizer_state,
+        training_state.qr_optimizer_state,
         training_state.target_policy_params,
     )
     logging.info("total steps: %s", total_steps)
