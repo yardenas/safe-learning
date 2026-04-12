@@ -21,14 +21,14 @@ mpo_eta_min: 1e-3
 mpo_eta_opt_maxiter: 10
 mpo_num_action_samples: 16
 mpo_log_prob_min: -100.0
-policy_target_tau: 0.005
+policy_target_tau: 0.001
 actor_grad_clip_norm: 1.0
 critic_grad_clip_norm: 1.0
 actor_update_source: planner_online
 
 policy_hidden_layer_sizes: [128, 128]
 value_hidden_layer_sizes: [512, 512]
-activation: relu
+activation: swish
 use_bro: true
 n_critics: 2
 n_heads: 1
