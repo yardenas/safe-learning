@@ -14,3 +14,4 @@ training:
 
 agent:
   activation: swish
+  max_replay_size: 1000000

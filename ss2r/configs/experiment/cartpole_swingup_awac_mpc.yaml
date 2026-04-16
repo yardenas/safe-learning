@@ -12,4 +12,5 @@ training:
   train_domain_randomization: false
   eval_domain_randomization: false
   num_eval_episodes: 1
+  max_replay_size: 1000000
 
