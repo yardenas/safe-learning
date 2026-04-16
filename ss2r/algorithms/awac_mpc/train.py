@@ -505,7 +505,6 @@ def train(
 
     planner_env = _PlannerActionRepeatWrapper(planner_environment, action_repeat)
     controller_kwargs = dict(controller_kwargs or {})
-    controller_kwargs["n_critics"] = int(n_critics)
     controller_kwargs["use_bro"] = bool(use_bro)
     controller_kwargs["gamma"] = discounting
     controller_kwargs["reward_scaling"] = reward_scaling

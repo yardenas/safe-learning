@@ -108,7 +108,7 @@ class _TreeRollout:
 
 
 class TreeMPC:
-    """Tree-structured MPC planner that scores candidates with model-expanded Q."""
+    """Tree-structured MPC planner that scores candidates with rollout or direct Q."""
 
     def __init__(
         self,
@@ -117,13 +117,14 @@ class TreeMPC:
         *,
         num_samples: int,
         horizon: int,
-        n_critics: int = 2,
         use_bro: bool = True,
         zoh_steps: int = 1,
         gamma: float = 0.99,
         reward_scaling: float = 1.0,
         temperature: float = 1.0,
         iterations: int = 1,
+        rollout_actions: bool = True,
+        terminal_action_samples: int = 1,
     ) -> None:
         self.task = task
         self.dt = float(self.task.dt)
@@ -141,15 +142,68 @@ class TreeMPC:
         self.reward_scaling = float(reward_scaling)
         self.temperature = float(temperature)
         self.iterations = int(iterations)
+        self.rollout_actions = bool(rollout_actions)
+        self.terminal_action_samples = int(terminal_action_samples)
         if self.iterations < 1:
             raise ValueError("TreeMPC requires iterations >= 1.")
-        self._n_critics = int(n_critics)
+        if self.terminal_action_samples < 1:
+            raise ValueError("TreeMPC requires terminal_action_samples >= 1.")
         self.use_bro = bool(use_bro)
-        if self._n_critics < 1:
-            raise ValueError("TreeMPC requires n_critics >= 1.")
         if sac_network is None:
             raise ValueError("TreeMPC requires a policy/Q network at init.")
         self._sac_network = sac_network
+
+    def _direct_q_expand(
+        self,
+        key: jax.Array,
+        state: mjx_env.State,
+        model_params: TreeMPCModelParams,
+    ) -> _TreeRollout:
+        num_particles = self.num_samples
+        act_dim = self.task.u_min.shape[-1]
+
+        policy_keys = jax.random.split(key, num_particles)
+        raw_root_actions = jax.vmap(
+            lambda policy_key: self._sample_policy_raw_actions(
+                state.obs,
+                policy_key,
+                model_params.target_policy_params,
+                model_params.normalizer_params,
+            )
+        )(policy_keys)
+        root_actions = self.action_sequence(raw_root_actions)
+        q_values = jax.vmap(lambda action: self._q(state.obs, action, model_params))(
+            root_actions
+        )
+
+        raw_action_sequences = jnp.broadcast_to(
+            raw_root_actions[:, None, :],
+            (num_particles, self.ctrl_steps, act_dim),
+        )
+        decision_actions = jnp.broadcast_to(
+            root_actions[:, None, :],
+            (num_particles, self.ctrl_steps, act_dim),
+        )
+        repeated_actions = jnp.broadcast_to(
+            root_actions[:, None, :],
+            (num_particles, self.horizon, act_dim),
+        )
+        repeated_state_data = _broadcast_tree(state.data, self.ctrl_steps + 1)
+        zero_step_rewards = jnp.zeros((self.ctrl_steps,), dtype=jnp.float32)
+        zero_traj_rewards = jnp.zeros((self.horizon,), dtype=jnp.float32)
+
+        winner_idx = jnp.argmax(q_values)
+        return _TreeRollout(  # type: ignore
+            traj_data=repeated_state_data,
+            raw_action_sequences=raw_action_sequences,
+            traj_actions=decision_actions[winner_idx],
+            traj_rewards=zero_step_rewards,
+            all_traj_actions=repeated_actions[winner_idx],
+            all_traj_rewards=zero_traj_rewards,
+            candidate_raw_actions=raw_root_actions,
+            candidate_q_values=q_values,
+            returns=q_values,
+        )
 
     def _validate_model_params(self, model_params: TreeMPCModelParams | None) -> None:
         if model_params is None:
@@ -224,6 +278,28 @@ class TreeMPC:
         )
         return _reduce_q(q_values, self.use_bro)
 
+    def _estimate_target_q(
+        self,
+        obs: Any,
+        key: jax.Array,
+        model_params: TreeMPCModelParams,
+    ) -> jax.Array:
+        batch_size = jax.tree_util.tree_leaves(obs)[0].shape[0]
+        sample_shape = (batch_size, self.terminal_action_samples)
+        keys = jax.random.split(key, batch_size * self.terminal_action_samples)
+        keys = keys.reshape(sample_shape + keys.shape[1:])
+
+        q_samples = jax.vmap(
+            lambda obs_i, keys_i: jax.vmap(
+                lambda key_i: self._q(
+                    obs_i,
+                    self._sample_target_policy_action(obs_i, key_i, model_params),
+                    model_params,
+                )
+            )(keys_i)
+        )(obs, keys)
+        return jnp.mean(q_samples, axis=1)
+
     def _rollout_zoh(
         self,
         state: mjx_env.State,
@@ -293,6 +369,9 @@ class TreeMPC:
         state: mjx_env.State,
         model_params: TreeMPCModelParams,
     ) -> _TreeRollout:
+        if not self.rollout_actions:
+            return self._direct_q_expand(key, state, model_params)
+
         num_particles = self.num_samples
         horizon_steps = self.horizon
         act_dim = self.task.u_min.shape[-1]
@@ -381,11 +460,7 @@ class TreeMPC:
         )
 
         terminal_obs = jax.tree.map(lambda x: x[:, -1, ...], all_traj_next_obs)
-        terminal_keys = jax.random.split(terminal_rng, num_particles)
-        terminal_actions = jax.vmap(
-            lambda obs, pk: self._sample_target_policy_action(obs, pk, model_params)
-        )(terminal_obs, terminal_keys)
-        terminal_q = self._q(terminal_obs, terminal_actions, model_params)
+        terminal_q = self._estimate_target_q(terminal_obs, terminal_rng, model_params)
 
         step_discount = self.gamma * all_traj_discount * (1.0 - all_traj_truncation)
         reward_weights = jnp.cumprod(

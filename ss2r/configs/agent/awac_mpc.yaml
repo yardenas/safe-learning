@@ -37,3 +37,5 @@ controller_kwargs:
   zoh_steps: 5
   temperature: 0.8
   iterations: 1
+  rollout_actions: true
+  terminal_action_samples: 1
