@@ -75,8 +75,6 @@ def _broadcast_tree(tree: Any, batch: int) -> Any:
 
 
 def _reduce_q(q_values: jax.Array, use_bro: bool) -> jax.Array:
-    if q_values.ndim == 1:
-        q_values = q_values[:, None]
     if use_bro:
         return jnp.mean(q_values, axis=-1)
     return jnp.min(q_values, axis=-1)
