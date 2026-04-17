@@ -333,6 +333,7 @@ def train(
     reset_on_eval: bool = True,
     rollout_length: int = 1,
     planner_rollout_length: int = 1,
+    store_planner_state_in_replay_buffer: bool = True,
     mpo_eta: float = 1.0,
     mpo_eta_epsilon: float = 0.1,
     mpo_eta_min: float = 1e-3,
@@ -512,12 +513,14 @@ def train(
     controller = TreeMPC(task=task, sac_network=sac_network, **controller_kwargs)
     planner_params_template = _init_planner_params(controller, seed, None)
 
-    dummy_planner_state = jax.tree.map(
-        lambda x: x[0]
-        if hasattr(x, "shape") and x.shape and x.shape[0] == num_envs
-        else x,
-        env_state,
-    )
+    dummy_planner_state = None
+    if store_planner_state_in_replay_buffer:
+        dummy_planner_state = jax.tree.map(
+            lambda x: x[0]
+            if hasattr(x, "shape") and x.shape and x.shape[0] == num_envs
+            else x,
+            env_state,
+        )
 
     replay_dummy_transition = _to_storage_transition(
         base_dummy_transition,
@@ -569,7 +572,8 @@ def train(
             action, _ = policy(state.obs, action_key)
             next_state = env_local.step(state, action)
             extras = _build_extras(next_state.info, next_state.done)
-            extras["policy_extras"]["planner_state"] = state
+            if store_planner_state_in_replay_buffer:
+                extras["policy_extras"]["planner_state"] = state
             transition = Transition(
                 observation=state.obs,
                 action=action,
@@ -584,12 +588,14 @@ def train(
             step_fn, (env_state, key), (), length=rollout_length
         )
 
-        raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
-        transitions = _strip_policy_extras(transitions)
-        time_len, batch_dim = raw_planner_states.reward.shape[:2]
-        planner_states = _flatten_time_batch_tree(
-            raw_planner_states, time_len, batch_dim
-        )
+        planner_states = None
+        if store_planner_state_in_replay_buffer:
+            raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
+            transitions = _strip_policy_extras(transitions)
+            time_len, batch_dim = raw_planner_states.reward.shape[:2]
+            planner_states = _flatten_time_batch_tree(
+                raw_planner_states, time_len, batch_dim
+            )
 
         transitions = _flatten_transition_batch(transitions)
         normalizer_params = running_statistics.update(
@@ -745,6 +751,17 @@ def train(
         buffer_state: ReplayBufferState,
         training_key: PRNGKey,
     ) -> Tuple[TrainingState, ReplayBufferState, Metrics]:
+        if not store_planner_state_in_replay_buffer:
+            zero = jnp.zeros((), dtype=jnp.float32)
+            return (
+                training_state,
+                buffer_state,
+                {
+                    "critic_loss": zero,
+                    "actor_loss": zero,
+                    "planner/avg_rollout_return": zero,
+                },
+            )
         (
             (
                 training_state,
