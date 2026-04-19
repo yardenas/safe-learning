@@ -95,7 +95,8 @@ class ReplayBuffer(Dataset):
         )
 
     def add_transitions(self, transitions: Data) -> None:
-        transitions = _to_numpy_tree(transitions)
+        transitions = jax.device_get(transitions)
+        # transitions = _to_numpy_tree(transitions)
         insert_size = get_size(transitions)
         if insert_size > self.max_size:
             raise ValueError(
