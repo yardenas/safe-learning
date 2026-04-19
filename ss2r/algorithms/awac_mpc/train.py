@@ -252,6 +252,16 @@ class _PlannerActionRepeatWrapper(Wrapper):
         )
         return next_state.replace(reward=jnp.sum(rewards, axis=0))
 
+    def compress_planner_state(self, state: Any) -> Any:
+        if hasattr(self.env, "compress_planner_state"):
+            return self.env.compress_planner_state(state)
+        return state
+
+    def restore_planner_state(self, planner_state: Any) -> Any:
+        if hasattr(self.env, "restore_planner_state"):
+            return self.env.restore_planner_state(planner_state)
+        return planner_state
+
 
 def _planner_supervised_batch(
     transitions: Transition,
@@ -260,6 +270,7 @@ def _planner_supervised_batch(
     planner_rollout_length: int,
     key: PRNGKey,
     planner_model_params: TreeMPCModelParams | None = None,
+    restore_planner_state_fn: Callable[[Any], Any] | None = None,
 ) -> tuple[Transition, jax.Array]:
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
     if planner_states is None:
@@ -270,6 +281,8 @@ def _planner_supervised_batch(
         raise ValueError(
             "Planner-supervised mode requires controller.optimize_with_candidates."
         )
+    if restore_planner_state_fn is not None:
+        planner_states = jax.vmap(restore_planner_state_fn)(planner_states)
     batch_size = transitions.reward.shape[0]
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
 
@@ -518,6 +531,12 @@ def train(
         )
 
     planner_env = _PlannerActionRepeatWrapper(planner_environment, action_repeat)
+    compress_planner_state = getattr(
+        planner_env, "compress_planner_state", lambda state: state
+    )
+    restore_planner_state = getattr(
+        planner_env, "restore_planner_state", lambda state: state
+    )
     controller_kwargs = dict(controller_kwargs or {})
     controller_kwargs["use_bro"] = bool(use_bro)
     controller_kwargs["gamma"] = discounting
@@ -532,6 +551,7 @@ def train(
         else x,
         env_state,
     )
+    dummy_planner_state = compress_planner_state(dummy_planner_state)
 
     replay_dummy_transition = _to_storage_transition(
         base_dummy_transition,
@@ -584,7 +604,7 @@ def train(
             action, _ = policy(state.obs, action_key)
             next_state = env_local.step(state, action)
             extras = _build_extras(next_state.info, next_state.done)
-            extras["policy_extras"]["planner_state"] = state
+            extras["policy_extras"]["planner_state"] = compress_planner_state(state)
             transition = Transition(
                 observation=state.obs,
                 action=action,
@@ -601,7 +621,7 @@ def train(
 
         raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
         transitions = _strip_policy_extras(transitions)
-        time_len, batch_dim = raw_planner_states.reward.shape[:2]
+        time_len, batch_dim = transitions.reward.shape[:2]
         planner_states = _flatten_time_batch_tree(
             raw_planner_states, time_len, batch_dim
         )
@@ -671,6 +691,7 @@ def train(
             planner_rollout_length,
             key_planner,
             _planner_model_params(training_state.replace(qr_params=qr_params)),
+            restore_planner_state_fn=restore_planner_state,
         )
         shuffled_actor_data = _shuffle_and_batch_actor_transitions(
             actor_transitions,

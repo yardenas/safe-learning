@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jp
 import mujoco
 import numpy as np
+from flax import struct
 from ml_collections import config_dict
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
@@ -82,6 +83,12 @@ def _to_plain(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_to_plain(v) for v in value]
     return value
+
+
+@struct.dataclass
+class H1PlannerState:
+    loco_state: Any
+    truncation: jax.Array
 
 
 class H1MocapTracking(mjx_env.MjxEnv):
@@ -160,6 +167,31 @@ class H1MocapTracking(mjx_env.MjxEnv):
     def reset(self, rng: jax.Array) -> mjx_env.State:
         loco_state = self._loco_env.mjx_reset(rng)
         return self._to_playground_state(loco_state, rng=rng)
+
+    def compress_planner_state(self, state: Any) -> Any:
+        loco_state = getattr(state, "info", {}).get("_loco_state")
+        if loco_state is None:
+            return state
+        truncation = state.info.get("truncation", jp.zeros_like(state.done))
+        return H1PlannerState(
+            loco_state=loco_state,
+            truncation=jp.asarray(truncation, dtype=jp.float32),
+        )
+
+    def restore_planner_state(self, planner_state: Any) -> mjx_env.State:
+        if isinstance(planner_state, mjx_env.State):
+            return planner_state
+        if isinstance(planner_state, H1PlannerState):
+            loco_state = planner_state.loco_state
+            truncation = planner_state.truncation
+        else:
+            loco_state = planner_state
+            truncation = jp.zeros_like(loco_state.done, dtype=jp.float32)
+
+        state = self._to_playground_state(loco_state)
+        info = dict(state.info)
+        info["truncation"] = jp.asarray(truncation, dtype=jp.float32)
+        return state.replace(info=info)
 
     def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
         loco_state = state.info.get("_loco_state")
