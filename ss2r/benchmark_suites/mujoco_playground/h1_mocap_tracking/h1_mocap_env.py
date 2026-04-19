@@ -13,6 +13,9 @@ from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
 import ss2r.benchmark_suites.mujoco_playground.h1_mocap_tracking.loco_mujoco.environments  # noqa: F401
+from ss2r.benchmark_suites.mujoco_playground.h1_mocap_tracking.loco_mujoco.core.mujoco_mjx import (
+    MjxState,
+)
 from ss2r.benchmark_suites.mujoco_playground.h1_mocap_tracking.loco_mujoco.task_factories.imitation_factory import (
     ImitationFactory,
 )
@@ -86,8 +89,31 @@ def _to_plain(value: Any) -> Any:
 
 
 @struct.dataclass
+class H1DataSeed:
+    time: jax.Array
+    qpos: jax.Array
+    qvel: jax.Array
+    act: jax.Array
+    qacc_warmstart: jax.Array
+    ctrl: jax.Array
+    qfrc_applied: jax.Array
+    xfrc_applied: jax.Array
+    eq_active: jax.Array
+    mocap_pos: jax.Array
+    mocap_quat: jax.Array
+    act_dot: jax.Array
+    userdata: jax.Array
+
+
+@struct.dataclass
 class H1PlannerState:
-    loco_state: Any
+    data: H1DataSeed
+    observation: jax.Array
+    reward: jax.Array
+    absorbing: jax.Array
+    done: jax.Array
+    additional_carry: Any
+    info: Dict[str, Any]
     truncation: jax.Array
 
 
@@ -168,21 +194,83 @@ class H1MocapTracking(mjx_env.MjxEnv):
         loco_state = self._loco_env.mjx_reset(rng)
         return self._to_playground_state(loco_state, rng=rng)
 
+    def _compress_data_seed(self, data: mjx.Data) -> H1DataSeed:
+        return H1DataSeed(
+            time=data.time,
+            qpos=data.qpos,
+            qvel=data.qvel,
+            act=data.act,
+            qacc_warmstart=data.qacc_warmstart,
+            ctrl=data.ctrl,
+            qfrc_applied=data.qfrc_applied,
+            xfrc_applied=data.xfrc_applied,
+            eq_active=data.eq_active,
+            mocap_pos=data.mocap_pos,
+            mocap_quat=data.mocap_quat,
+            act_dot=data.act_dot,
+            userdata=data.userdata,
+        )
+
+    def _restore_data_seed(self, seed: H1DataSeed) -> mjx.Data:
+        # Rebuild large derived MJX caches from the compact simulation state and
+        # then restore the few stateful fields that `mjx.forward` does not keep.
+        data = mjx_env.init(
+            self._mjx_model,
+            qpos=seed.qpos,
+            qvel=seed.qvel,
+            ctrl=seed.ctrl,
+            act=seed.act,
+            mocap_pos=seed.mocap_pos if self._mjx_model.nmocap else None,
+            mocap_quat=seed.mocap_quat if self._mjx_model.nmocap else None,
+        )
+        return data.replace(
+            time=seed.time,
+            qacc_warmstart=seed.qacc_warmstart,
+            qfrc_applied=seed.qfrc_applied,
+            xfrc_applied=seed.xfrc_applied,
+            eq_active=seed.eq_active,
+            act_dot=seed.act_dot,
+            userdata=seed.userdata,
+        )
+
     def compress_planner_state(self, state: Any) -> Any:
         loco_state = getattr(state, "info", {}).get("_loco_state")
         if loco_state is None:
             return state
         truncation = state.info.get("truncation", jp.zeros_like(state.done))
         return H1PlannerState(
-            loco_state=loco_state,
+            data=self._compress_data_seed(loco_state.data),
+            observation=loco_state.observation,
+            reward=jp.asarray(loco_state.reward),
+            absorbing=jp.asarray(loco_state.absorbing, dtype=bool),
+            done=jp.asarray(loco_state.done, dtype=bool),
+            additional_carry=loco_state.additional_carry,
+            info=dict(loco_state.info),
             truncation=jp.asarray(truncation, dtype=jp.float32),
         )
 
     def restore_planner_state(self, planner_state: Any) -> mjx_env.State:
         if isinstance(planner_state, mjx_env.State):
             return planner_state
-        if isinstance(planner_state, H1PlannerState):
+        if hasattr(planner_state, "loco_state"):
+            # Backward compatibility for planner states stored before compact
+            # `mjx.Data` reconstruction was introduced.
             loco_state = planner_state.loco_state
+            truncation = getattr(
+                planner_state,
+                "truncation",
+                jp.zeros_like(loco_state.done, dtype=jp.float32),
+            )
+        elif isinstance(planner_state, H1PlannerState):
+            loco_state = MjxState(
+                data=self._restore_data_seed(planner_state.data),
+                observation=planner_state.observation,
+                reward=planner_state.reward,
+                absorbing=planner_state.absorbing,
+                done=planner_state.done,
+                additional_carry=planner_state.additional_carry,
+                info=dict(planner_state.info),
+            )
             truncation = planner_state.truncation
         else:
             loco_state = planner_state

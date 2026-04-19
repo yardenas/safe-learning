@@ -54,6 +54,11 @@ class TrainingState:
     normalizer_params: running_statistics.RunningStatisticsState
 
 
+def _copy_pytree(tree: Any) -> Any:
+    """Materializes fresh arrays so donated pytrees do not alias leaves."""
+    return jax.tree_util.tree_map(jnp.copy, tree)
+
+
 def _init_training_state(
     key: PRNGKey,
     obs_size: int,
@@ -76,10 +81,10 @@ def _init_training_state(
     return TrainingState(  # type: ignore
         policy_optimizer_state=policy_optimizer_state,
         policy_params=policy_params,
-        target_policy_params=policy_params,
+        target_policy_params=_copy_pytree(policy_params),
         qr_optimizer_state=qr_optimizer_state,
         qr_params=qr_params,
-        target_qr_params=qr_params,
+        target_qr_params=_copy_pytree(qr_params),
         gradient_steps=jnp.zeros(()),
         env_steps=jnp.zeros(()),
         normalizer_params=normalizer_params,
@@ -482,9 +487,9 @@ def train(
             training_state = training_state.replace(  # type: ignore
                 normalizer_params=params[0],
                 policy_params=params[1],
-                target_policy_params=params[1],
+                target_policy_params=_copy_pytree(params[1]),
                 qr_params=params[3],
-                target_qr_params=params[3],
+                target_qr_params=_copy_pytree(params[3]),
                 policy_optimizer_state=restore_state(
                     params[6], training_state.policy_optimizer_state
                 ),
@@ -496,9 +501,9 @@ def train(
             training_state = training_state.replace(  # type: ignore
                 normalizer_params=params[0],
                 policy_params=params[1],
-                target_policy_params=params[6],
+                target_policy_params=_copy_pytree(params[6]),
                 qr_params=params[2],
-                target_qr_params=params[3],
+                target_qr_params=_copy_pytree(params[3]),
                 policy_optimizer_state=restore_state(
                     params[4], training_state.policy_optimizer_state
                 ),
@@ -510,9 +515,9 @@ def train(
             training_state = training_state.replace(  # type: ignore
                 normalizer_params=params[0],
                 policy_params=params[1],
-                target_policy_params=params[1],
+                target_policy_params=_copy_pytree(params[1]),
                 qr_params=params[2],
-                target_qr_params=params[3],
+                target_qr_params=_copy_pytree(params[3]),
                 policy_optimizer_state=restore_state(
                     params[4], training_state.policy_optimizer_state
                 ),
