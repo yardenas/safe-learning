@@ -9,7 +9,6 @@ import optax
 from absl import logging
 from brax import envs
 from brax.envs.base import Wrapper
-from brax.training import replay_buffers
 from brax.training.acme import running_statistics, specs
 from brax.training.agents.sac import checkpoint
 from brax.training.types import Params, PRNGKey
@@ -18,6 +17,7 @@ from ml_collections import config_dict
 
 import ss2r.algorithms.sac.networks as sac_networks
 from ss2r.algorithms.awac_mpc import losses as awac_losses
+from ss2r.algorithms.awac_mpc.replay_buffer import CpuUniformSamplingQueue
 from ss2r.algorithms.mpc.tree_mpc import (
     TreeMPC,
     TreeMPCModelParams,
@@ -569,15 +569,14 @@ def train(
         base_dummy_transition,
         dummy_planner_state,
     )
-    replay_buffer = replay_buffers.UniformSamplingQueue(
+    replay_buffer = CpuUniformSamplingQueue(
         max_replay_size=max_replay_size,
         dummy_data_sample=replay_dummy_transition,
         sample_batch_size=batch_size,
     )
 
     rng, rb_key = jax.random.split(rng)
-    with jax.default_device(cpu_device):
-        buffer_state = replay_buffer.init(rb_key)
+    buffer_state = replay_buffer.init(rb_key)
 
     critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
         sac_network,
@@ -662,10 +661,7 @@ def train(
             env_state,
             key,
         )
-        buffer_state = replay_buffer.insert(
-            buffer_state,
-            _device_put_tree(transitions, cpu_device),
-        )
+        buffer_state = replay_buffer.insert(buffer_state, transitions)
         return training_state, env_state, buffer_state, key
 
     def _sgd_step(
