@@ -215,6 +215,31 @@ def _shuffle_and_batch_actor_transitions(
     return jax.tree.map(_shuffle_and_reshape, actor_transitions)
 
 
+def _device_put_tree(tree: Any, device: jax.Device) -> Any:
+    return jax.tree.map(
+        lambda x: jax.device_put(x, device) if hasattr(x, "dtype") else x,
+        tree,
+    )
+
+
+def _accumulate_metrics(
+    total_metrics: Metrics | None,
+    metrics: Metrics,
+) -> Metrics:
+    if total_metrics is None:
+        return jax.tree.map(jnp.asarray, metrics)
+    return jax.tree.map(lambda total, value: total + value, total_metrics, metrics)
+
+
+def _average_metrics(
+    total_metrics: Metrics | None,
+    count: int,
+) -> Metrics:
+    if total_metrics is None or count == 0:
+        return {}
+    return jax.tree.map(lambda value: value / count, total_metrics)
+
+
 class _PlannerActionRepeatWrapper(Wrapper):
     """Minimal wrapper that repeats each planner env step."""
 
@@ -366,7 +391,7 @@ def train(
         raise ValueError(f"mpo_eta_min must be > 0, got {mpo_eta_min}.")
     if mpo_eta_opt_maxiter < 1:
         raise ValueError(
-            "mpo_eta_opt_maxiter must be >= 1, " f"got {mpo_eta_opt_maxiter}."
+            f"mpo_eta_opt_maxiter must be >= 1, got {mpo_eta_opt_maxiter}."
         )
     if mpo_log_prob_min > 0.0:
         raise ValueError(f"mpo_log_prob_min must be <= 0, got {mpo_log_prob_min}.")
@@ -390,6 +415,12 @@ def train(
     env = environment
     if wrap_env_fn is not None:
         env = wrap_env_fn(env)
+
+    cpu_device = jax.devices("cpu")[0]
+    compute_device = next(
+        (device for device in jax.devices() if device.platform != "cpu"),
+        cpu_device,
+    )
 
     rng = jax.random.PRNGKey(seed)
     obs_size = env.observation_size
@@ -494,9 +525,12 @@ def train(
                 ),
             )
 
-    env_keys = jax.random.split(rng, num_envs)
+    training_state = _device_put_tree(training_state, compute_device)
+
+    env_keys = _device_put_tree(jax.random.split(rng, num_envs), compute_device)
     reset_fn = jax.jit(env.reset)
     env_state = reset_fn(env_keys)
+    env_state = _device_put_tree(env_state, compute_device)
     if not _is_batched(env_state):
         raise ValueError(
             "AWAC-MPC expects a batched training environment state. "
@@ -530,7 +564,8 @@ def train(
     )
 
     rng, rb_key = jax.random.split(rng)
-    buffer_state = replay_buffer.init(rb_key)
+    with jax.default_device(cpu_device):
+        buffer_state = replay_buffer.init(rb_key)
 
     critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
         sac_network,
@@ -550,14 +585,13 @@ def train(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
     )
 
-    def _collect_experience(
+    env_steps_per_experience_call = rollout_length * action_repeat * num_envs
+
+    def _collect_real_experience(
         training_state: TrainingState,
-        env_local: envs.Env,
         env_state: envs.State,
-        buffer_state: ReplayBufferState,
         key: PRNGKey,
-        count_env_steps: bool,
-    ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
+    ) -> Tuple[TrainingState, envs.State, Transition, PRNGKey]:
         policy = make_policy(
             (training_state.normalizer_params, training_state.policy_params),
             deterministic=False,
@@ -567,7 +601,7 @@ def train(
             state, k = carry
             k, action_key = jax.random.split(k)
             action, _ = policy(state.obs, action_key)
-            next_state = env_local.step(state, action)
+            next_state = env.step(state, action)
             extras = _build_extras(next_state.info, next_state.done)
             extras["policy_extras"]["planner_state"] = state
             transition = Transition(
@@ -597,16 +631,13 @@ def train(
             remove_pixels(transitions.observation),
         )
         transitions = _to_storage_transition(transitions, planner_states)
-
-        buffer_state = replay_buffer.insert(buffer_state, transitions)
-        env_steps = training_state.env_steps
-        if count_env_steps:
-            env_steps = env_steps + rollout_length * action_repeat * num_envs
         training_state = training_state.replace(  # type: ignore
             normalizer_params=normalizer_params,
-            env_steps=env_steps,
+            env_steps=training_state.env_steps + env_steps_per_experience_call,
         )
-        return training_state, env_state, buffer_state, key
+        return training_state, env_state, transitions, key
+
+    collect_real_experience_jitted = jax.jit(_collect_real_experience)
 
     def collect_real_experience(
         training_state: TrainingState,
@@ -614,23 +645,24 @@ def train(
         buffer_state: ReplayBufferState,
         key: PRNGKey,
     ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
-        return _collect_experience(
+        training_state, env_state, transitions, key = collect_real_experience_jitted(
             training_state,
-            env,
             env_state,
-            buffer_state,
             key,
-            True,
         )
+        buffer_state = replay_buffer.insert(
+            buffer_state,
+            _device_put_tree(transitions, cpu_device),
+        )
+        return training_state, env_state, buffer_state, key
 
-    def sgd_step(
-        carry: Tuple[TrainingState, ReplayBufferState, PRNGKey, int],
-        unused_t,
-    ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
-        training_state, buffer_state, key, count = carry
+    def _sgd_step(
+        training_state: TrainingState,
+        sampled: Transition,
+        key: PRNGKey,
+        count: jax.Array,
+    ) -> Tuple[TrainingState, PRNGKey, Metrics]:
         key, key_critic, key_perm, key_planner = jax.random.split(key, 4)
-
-        buffer_state, sampled = replay_buffer.sample(buffer_state)
 
         critic_transitions = _strip_policy_extras(sampled)
         (critic_loss, critic_aux), qr_params, qr_optimizer_state = critic_update(
@@ -733,34 +765,10 @@ def train(
             **critic_aux,
             **actor_aux,
         }
-        return (
-            new_training_state,
-            buffer_state,
-            key,
-            count + 1,
-        ), metrics
+        return new_training_state, key, metrics
 
-    def training_step_jitted(
-        training_state: TrainingState,
-        buffer_state: ReplayBufferState,
-        training_key: PRNGKey,
-    ) -> Tuple[TrainingState, ReplayBufferState, Metrics]:
-        (
-            (
-                training_state,
-                buffer_state,
-                *_,
-            ),
-            metrics,
-        ) = jax.lax.scan(
-            sgd_step,
-            (training_state, buffer_state, training_key, 0),
-            (),
-            length=grad_updates_per_step,
-        )
-        return training_state, buffer_state, metrics
+    sgd_step_jitted = jax.jit(_sgd_step)
 
-    env_steps_per_experience_call = rollout_length * action_repeat * num_envs
     num_prefill_experience_call = -(-min_replay_size // env_steps_per_experience_call)
     num_prefill_env_steps = num_prefill_experience_call * env_steps_per_experience_call
     assert num_timesteps - num_prefill_env_steps >= 0
@@ -845,18 +853,15 @@ def train(
         buffer_state: ReplayBufferState,
         key: PRNGKey,
     ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
-        def f(carry, _):
-            ts, es, bs, k = carry
-            k, new_key = jax.random.split(k)
-            ts, es, bs, _ = collect_real_experience(ts, es, bs, k)
-            return (ts, es, bs, new_key), ()
-
-        return jax.lax.scan(
-            f,
-            (training_state, env_state, buffer_state, key),
-            (),
-            length=num_prefill_experience_call,
-        )[0]
+        for _ in range(num_prefill_experience_call):
+            step_key, key = jax.random.split(key)
+            training_state, env_state, buffer_state, _ = collect_real_experience(
+                training_state,
+                env_state,
+                buffer_state,
+                step_key,
+            )
+        return training_state, env_state, buffer_state, key
 
     t = time.time()
     rng, prefill_key = jax.random.split(rng)
@@ -874,19 +879,22 @@ def train(
         buffer_state: ReplayBufferState,
         key: PRNGKey,
     ) -> Tuple[TrainingState, envs.State, ReplayBufferState, Metrics]:
-        training_state, env_state, buffer_state, key = collect_real_experience(
+        training_state, env_state, buffer_state, training_key = collect_real_experience(
             training_state, env_state, buffer_state, key
         )
+        training_metrics = None
+        for update_idx in range(grad_updates_per_step):
+            buffer_state, sampled = replay_buffer.sample(buffer_state)
+            sampled = _device_put_tree(sampled, compute_device)
+            training_state, training_key, update_metrics = sgd_step_jitted(
+                training_state,
+                sampled,
+                training_key,
+                jnp.asarray(update_idx, dtype=jnp.int32),
+            )
+            training_metrics = _accumulate_metrics(training_metrics, update_metrics)
 
-        (
-            training_state,
-            buffer_state,
-            training_metrics,
-        ) = training_step_jitted(
-            training_state,
-            buffer_state,
-            key,
-        )
+        training_metrics = _average_metrics(training_metrics, grad_updates_per_step)
         training_metrics["buffer_current_size"] = replay_buffer.size(buffer_state)
         return (
             training_state,
@@ -901,27 +909,18 @@ def train(
         buffer_state: ReplayBufferState,
         key: PRNGKey,
     ) -> Tuple[TrainingState, envs.State, ReplayBufferState, Metrics]:
-        def f(carry, _):
-            ts, es, bs, k = carry
-            k, new_key = jax.random.split(k)
-            ts, es, bs, metrics = training_step(ts, es, bs, k)
-            return (ts, es, bs, new_key), metrics
-
-        (
-            (
+        metrics = None
+        for _ in range(num_training_steps_per_epoch):
+            step_key, key = jax.random.split(key)
+            training_state, env_state, buffer_state, step_metrics = training_step(
                 training_state,
                 env_state,
                 buffer_state,
-                key,
-            ),
-            metrics,
-        ) = jax.lax.scan(
-            f,
-            (training_state, env_state, buffer_state, key),
-            (),
-            length=num_training_steps_per_epoch,
-        )
-        metrics = jax.tree_util.tree_map(jnp.mean, metrics)
+                step_key,
+            )
+            metrics = _accumulate_metrics(metrics, step_metrics)
+
+        metrics = _average_metrics(metrics, num_training_steps_per_epoch)
         return training_state, env_state, buffer_state, metrics
 
     def training_epoch_with_timing(
@@ -974,8 +973,11 @@ def train(
             epoch_key,
         )
         if reset_on_eval:
-            reset_keys = jax.random.split(epoch_key, num_envs)
+            reset_keys = _device_put_tree(
+                jax.random.split(epoch_key, num_envs), compute_device
+            )
             env_state = reset_fn(reset_keys)
+            env_state = _device_put_tree(env_state, compute_device)
         current_step = int(training_state.env_steps)
 
         if checkpoint_logdir:
