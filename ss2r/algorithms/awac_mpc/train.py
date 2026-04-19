@@ -845,8 +845,8 @@ def train(
             (training_state.normalizer_params, training_state.policy_params),
             training_metrics={},
         )
-        planner_eval_metrics, rng = run_planner_evaluation(training_state, rng)
-        metrics = {**metrics, **planner_eval_metrics}
+        # planner_eval_metrics, rng = run_planner_evaluation(training_state, rng)
+        # metrics = {**metrics}
         logging.info(metrics)
         progress_fn(0, metrics)
 
