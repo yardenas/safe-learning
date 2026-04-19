@@ -9,7 +9,6 @@ import optax
 from absl import logging
 from brax import envs
 from brax.envs.base import Wrapper
-from brax.training import replay_buffers
 from brax.training.acme import running_statistics, specs
 from brax.training.agents.sac import checkpoint
 from brax.training.types import Params, PRNGKey
@@ -25,6 +24,9 @@ from ss2r.algorithms.mpc.tree_mpc import (
     make_task,
 )
 from ss2r.algorithms.sac import gradients
+from ss2r.algorithms.sac.pytree_uniform_sampling_queue import (
+    PytreeUniformSamplingQueue,
+)
 from ss2r.algorithms.sac.types import (
     Metrics,
     ReplayBufferState,
@@ -535,7 +537,8 @@ def train(
         base_dummy_transition,
         dummy_planner_state,
     )
-    replay_buffer = replay_buffers.UniformSamplingQueue(
+    # Planner state is stored in replay extras, so keep the buffer in pytree form.
+    replay_buffer = PytreeUniformSamplingQueue(
         max_replay_size=max_replay_size,
         dummy_data_sample=replay_dummy_transition,
         sample_batch_size=batch_size,
