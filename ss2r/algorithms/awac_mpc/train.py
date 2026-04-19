@@ -739,10 +739,7 @@ def train(
         }
         return new_training_state, key, metrics
 
-    sgd_step_jitted = jax.jit(_sgd_step)
-
-    num_prefill_experience_call = -(-min_replay_size // env_steps_per_experience_call)
-    num_prefill_env_steps = num_prefill_experience_call * env_steps_per_experience_call
+    num_prefill_env_steps = 0
     assert num_timesteps - num_prefill_env_steps >= 0
     num_evals_after_init = max(num_evals - 1, 1)
     num_training_steps_per_epoch = -(
@@ -825,14 +822,6 @@ def train(
         buffer_state: ReplayBufferState,
         key: PRNGKey,
     ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
-        for _ in range(num_prefill_experience_call):
-            step_key, key = jax.random.split(key)
-            training_state, env_state, buffer_state, _, _ = collect_real_experience(
-                training_state,
-                env_state,
-                buffer_state,
-                step_key,
-            )
         return training_state, env_state, buffer_state, key
 
     t = time.time()
@@ -861,18 +850,8 @@ def train(
             buffer_state,
             key,
         )
-        training_metrics = None
-        for update_idx in range(grad_updates_per_step):
-            training_state, training_key, update_metrics = sgd_step_jitted(
-                training_state,
-                transitions,
-                training_key,
-                jnp.asarray(update_idx, dtype=jnp.int32),
-            )
-            training_metrics = _accumulate_metrics(training_metrics, update_metrics)
-
-        training_metrics = _average_metrics(training_metrics, grad_updates_per_step)
-        training_metrics["buffer_current_size"] = jnp.zeros(())
+        del transitions, training_key
+        training_metrics = {"buffer_current_size": jnp.zeros(())}
         return (
             training_state,
             env_state,
