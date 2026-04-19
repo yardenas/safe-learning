@@ -54,34 +54,30 @@ class PytreeUniformSamplingQueue(ReplayBuffer[PytreeReplayBufferState, Transitio
     def insert_internal(
         self, buffer_state: PytreeReplayBufferState, samples: Transition
     ) -> PytreeReplayBufferState:
-        """Insert samples into buffer at the current insert_position."""
+        """Insert samples using circular writes instead of rolling the buffer."""
 
-        data = buffer_state.data
-        position = buffer_state.insert_position
-        position = buffer_state.insert_position
-        roll = jnp.minimum(0, len(data.reward) - position - len(samples.reward))
-
-        def roll_one_field(field_data):
-            return jnp.roll(field_data, roll, axis=0)
-
-        data = jax.lax.cond(
-            roll,
-            lambda: jax.tree_util.tree_map(roll_one_field, data),
-            lambda: data,
-        )
-        position = position + roll
+        capacity = self._max_replay_size
+        batch_size = samples.reward.shape[0]
+        write_position = buffer_state.insert_position % capacity
+        idx = (jnp.arange(batch_size, dtype=jnp.int32) + write_position) % capacity
 
         def insert_one_field(field_data, field_sample):
-            return jax.lax.dynamic_update_slice_in_dim(
-                field_data, field_sample, position, axis=0
-            )
+            return field_data.at[idx].set(field_sample)
 
-        new_data = jax.tree_util.tree_map(insert_one_field, data, samples)
-        position = (position + len(samples.reward)) % (len(data.reward) + 1)
-        sample_position = jnp.maximum(0, buffer_state.sample_position + roll)
+        new_data = jax.tree_util.tree_map(insert_one_field, buffer_state.data, samples)
+        insert_position = buffer_state.insert_position + batch_size
+        sample_position = jnp.maximum(
+            buffer_state.sample_position,
+            insert_position - capacity,
+        )
+
+        # Keep counters bounded while preserving their difference and wrap order.
+        offset = (sample_position // capacity) * capacity
+        insert_position = insert_position - offset
+        sample_position = sample_position - offset
         return buffer_state.replace(  # type: ignore
             data=new_data,
-            insert_position=position,
+            insert_position=insert_position,
             sample_position=sample_position,
         )
 

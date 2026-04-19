@@ -563,6 +563,14 @@ def train(
         dummy_data_sample=replay_dummy_transition,
         sample_batch_size=batch_size,
     )
+    replay_buffer_insert = jax.jit(
+        replay_buffer.insert_internal,
+        donate_argnums=(0,),
+    )
+    replay_buffer_sample = jax.jit(
+        replay_buffer.sample_internal,
+        donate_argnums=(0,),
+    )
 
     rng, rb_key = jax.random.split(rng)
     buffer_state = replay_buffer.init(rb_key)
@@ -633,7 +641,7 @@ def train(
         )
         transitions = _to_storage_transition(transitions, planner_states)
 
-        buffer_state = replay_buffer.insert(buffer_state, transitions)
+        buffer_state = replay_buffer_insert(buffer_state, transitions)
         env_steps = training_state.env_steps
         if count_env_steps:
             env_steps = env_steps + rollout_length * action_repeat * num_envs
@@ -665,7 +673,7 @@ def train(
         training_state, buffer_state, key, count = carry
         key, key_critic, key_perm, key_planner = jax.random.split(key, 4)
 
-        buffer_state, sampled = replay_buffer.sample(buffer_state)
+        buffer_state, sampled = replay_buffer_sample(buffer_state)
         sampled = _float32_training_transition(sampled)
 
         critic_transitions = _strip_policy_extras(sampled)
