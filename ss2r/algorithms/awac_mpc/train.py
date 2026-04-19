@@ -181,6 +181,18 @@ def _to_storage_transition(
     )
 
 
+def _float32_training_transition(transitions: Transition) -> Transition:
+    """Promotes trainable transition fields without mutating saved planner state."""
+    transition_no_policy = _strip_policy_extras(transitions)
+    transition_no_policy = float32(transition_no_policy)
+    return transition_no_policy._replace(
+        extras={
+            "state_extras": transition_no_policy.extras["state_extras"],
+            "policy_extras": transitions.extras["policy_extras"],
+        }
+    )
+
+
 def _flatten_leading_dims(tree: Any, leading_dims: int = 2) -> Any:
     def _flatten_leaf(x):
         if not hasattr(x, "shape") or x.ndim < leading_dims:
@@ -664,6 +676,7 @@ def train(
     ) -> Tuple[TrainingState, PRNGKey, Metrics]:
         key, key_critic, key_perm, key_planner = jax.random.split(key, 4)
 
+        sampled = _float32_training_transition(sampled)
         critic_transitions = _strip_policy_extras(sampled)
         (critic_loss, critic_aux), qr_params, qr_optimizer_state = critic_update(
             training_state.qr_params,
@@ -680,7 +693,6 @@ def train(
             lambda x, y: x * (1 - coeff) + y * coeff, target, new
         )
         new_target_qr_params = polyak(training_state.target_qr_params, qr_params, tau)
-        sampled = float32(sampled)
         actor_transitions, planner_avg_rollout_return = _planner_supervised_batch(
             sampled,
             controller,
