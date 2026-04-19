@@ -902,6 +902,11 @@ def train(
             length=num_prefill_experience_call,
         )[0]
 
+    prefill_real_replay_buffer = jax.jit(
+        prefill_real_replay_buffer,
+        donate_argnames=("training_state", "env_state", "buffer_state"),
+    )
+
     t = time.time()
     rng, prefill_key = jax.random.split(rng)
     training_state, env_state, buffer_state, _ = prefill_real_replay_buffer(
@@ -967,6 +972,11 @@ def train(
         )
         metrics = jax.tree_util.tree_map(jnp.mean, metrics)
         return training_state, env_state, buffer_state, metrics
+
+    training_epoch = jax.jit(
+        training_epoch,
+        donate_argnames=("training_state", "env_state", "buffer_state"),
+    )
 
     def training_epoch_with_timing(
         training_state: TrainingState,
