@@ -4,9 +4,14 @@ defaults:
   - override /agent: awac_mpc
   - _self_
 
+environment:
+  task_params:
+    loco:
+      dataset_name: dance1_subject3
+
 training:
   num_envs: 8192
-  num_timesteps: 200000000
+  num_timesteps: 100000000
   safe: false
   num_eval_episodes: 1
   train_domain_randomization: false
