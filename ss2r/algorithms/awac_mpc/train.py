@@ -17,6 +17,7 @@ from ml_collections import config_dict
 
 import ss2r.algorithms.sac.networks as sac_networks
 from ss2r.algorithms.awac_mpc import losses as awac_losses
+from ss2r.algorithms.awac_mpc.replay_buffer import CpuUniformSamplingQueue
 from ss2r.algorithms.mpc.tree_mpc import (
     TreeMPC,
     TreeMPCModelParams,
@@ -467,6 +468,20 @@ def train(
     policy_optimizer = make_optimizer(learning_rate, actor_grad_clip_norm)
     qr_optimizer = make_optimizer(critic_learning_rate, critic_grad_clip_norm)
 
+    if isinstance(obs_size, Mapping):
+        dummy_obs = {k: jnp.zeros(v) for k, v in obs_size.items()}
+    else:
+        dummy_obs = jnp.zeros((obs_size,))
+    dummy_action = jnp.zeros((action_size,))
+    base_dummy_transition = Transition(
+        observation=dummy_obs,
+        action=dummy_action,
+        reward=jnp.zeros(()),
+        discount=jnp.zeros(()),
+        next_observation=dummy_obs,
+        extras={"state_extras": {"truncation": jnp.zeros(())}, "policy_extras": {}},
+    )
+
     rng, init_key = jax.random.split(rng)
     training_state = _init_training_state(
         init_key,
@@ -541,7 +556,24 @@ def train(
     task = make_task(planner_env)  # type: ignore[arg-type]
     controller = TreeMPC(task=task, sac_network=sac_network, **controller_kwargs)
     planner_params_template = _init_planner_params(controller, seed, None)
-    buffer_state = None
+
+    dummy_planner_state = jax.tree.map(
+        lambda x: x[0]
+        if hasattr(x, "shape") and x.shape and x.shape[0] == num_envs
+        else x,
+        env_state,
+    )
+    replay_dummy_transition = _to_storage_transition(
+        base_dummy_transition,
+        dummy_planner_state,
+    )
+    replay_buffer = CpuUniformSamplingQueue(
+        max_replay_size=max_replay_size,
+        dummy_data_sample=replay_dummy_transition,
+        sample_batch_size=batch_size,
+    )
+    rng, rb_key = jax.random.split(rng)
+    buffer_state = replay_buffer.init(rb_key)
 
     critic_loss_fn, actor_loss_fn = awac_losses.make_losses(
         sac_network,
@@ -620,13 +652,14 @@ def train(
         env_state: envs.State,
         buffer_state: ReplayBufferState,
         key: PRNGKey,
-    ) -> Tuple[TrainingState, envs.State, ReplayBufferState, Transition, PRNGKey]:
+    ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
         training_state, env_state, transitions, key = collect_real_experience_jitted(
             training_state,
             env_state,
             key,
         )
-        return training_state, env_state, buffer_state, transitions, key
+        buffer_state = replay_buffer.insert(buffer_state, transitions)
+        return training_state, env_state, buffer_state, key
 
     def _sgd_step(
         training_state: TrainingState,
@@ -739,7 +772,8 @@ def train(
         }
         return new_training_state, key, metrics
 
-    num_prefill_env_steps = 0
+    num_prefill_experience_call = -(-min_replay_size // env_steps_per_experience_call)
+    num_prefill_env_steps = num_prefill_experience_call * env_steps_per_experience_call
     assert num_timesteps - num_prefill_env_steps >= 0
     num_evals_after_init = max(num_evals - 1, 1)
     num_training_steps_per_epoch = -(
@@ -822,6 +856,14 @@ def train(
         buffer_state: ReplayBufferState,
         key: PRNGKey,
     ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
+        for _ in range(num_prefill_experience_call):
+            step_key, key = jax.random.split(key)
+            training_state, env_state, buffer_state, _ = collect_real_experience(
+                training_state,
+                env_state,
+                buffer_state,
+                step_key,
+            )
         return training_state, env_state, buffer_state, key
 
     t = time.time()
@@ -830,6 +872,8 @@ def train(
         training_state, env_state, buffer_state, prefill_key
     )
 
+    replay_size = jnp.sum(replay_buffer.size(buffer_state))
+    logging.info("replay size after prefill %s", replay_size)
     training_walltime = time.time() - t
 
     def training_step(
@@ -838,20 +882,13 @@ def train(
         buffer_state: ReplayBufferState,
         key: PRNGKey,
     ) -> Tuple[TrainingState, envs.State, ReplayBufferState, Metrics]:
-        (
-            training_state,
-            env_state,
-            buffer_state,
-            transitions,
-            training_key,
-        ) = collect_real_experience(
+        training_state, env_state, buffer_state, _ = collect_real_experience(
             training_state,
             env_state,
             buffer_state,
             key,
         )
-        del transitions, training_key
-        training_metrics = {"buffer_current_size": jnp.zeros(())}
+        training_metrics = {"buffer_current_size": replay_buffer.size(buffer_state)}
         return (
             training_state,
             env_state,
