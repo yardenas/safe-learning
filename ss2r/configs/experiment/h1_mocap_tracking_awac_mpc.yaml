@@ -5,8 +5,8 @@ defaults:
   - _self_
 
 training:
-  num_envs: 8192
-  num_timesteps: 200000000
+  num_envs: 32
+  num_timesteps: 10000000
   safe: false
   num_eval_episodes: 1
   train_domain_randomization: false
@@ -14,7 +14,7 @@ training:
 
 agent:
   max_replay_size: 1048576
-  grad_updates_per_step: 64
+  grad_updates_per_step: 8
   batch_size: 512
   policy_hidden_layer_sizes: [256, 256, 256]
   value_hidden_layer_sizes: [512, 512]  # two block of BroNet
