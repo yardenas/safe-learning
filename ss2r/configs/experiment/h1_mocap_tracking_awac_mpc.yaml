@@ -18,7 +18,7 @@ training:
   eval_domain_randomization: false
 
 agent:
-  max_replay_size: 50000
+  max_replay_size: 1048576
   grad_updates_per_step: 64
   batch_size: 512
   policy_hidden_layer_sizes: [256, 256, 256]
