@@ -837,7 +837,7 @@ def train(
             del rng
             model_params, planner_params = params
             planner_params_out, _ = jax.vmap(
-                lambda s, p: controller.optimize(s, p, model_params)
+                lambda s, p: controller.optimize_with_candidates(s, p, model_params)
             )(state, planner_params)
             action = controller.action_sequence(planner_params_out.actions)[:, 0, :]
             return action, (model_params, planner_params_out), {}

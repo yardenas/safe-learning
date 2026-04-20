@@ -1,6 +1,5 @@
 from ss2r.algorithms.mpc.tree_mpc import (
     MujocoPlaygroundTask,
-    Trajectory,
     TreeMPC,
     TreeMPCModelParams,
     TreeMPCParams,
@@ -9,7 +8,6 @@ from ss2r.algorithms.mpc.tree_mpc import (
 
 __all__ = [
     "MujocoPlaygroundTask",
-    "Trajectory",
     "TreeMPC",
     "TreeMPCModelParams",
     "TreeMPCParams",
