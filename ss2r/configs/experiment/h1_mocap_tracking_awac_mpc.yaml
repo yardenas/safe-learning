@@ -19,7 +19,7 @@ training:
 
 agent:
   max_replay_size: 1048576
-  grad_updates_per_step: 64 
+  grad_updates_per_step: 16 
   batch_size: 512
   policy_hidden_layer_sizes: [256, 256, 256]
   value_hidden_layer_sizes: [512, 512]  # two block of BroNet
