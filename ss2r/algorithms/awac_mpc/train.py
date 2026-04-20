@@ -385,6 +385,7 @@ def train(
     activation: Callable[[jax.Array], jax.Array] = jax.nn.swish,
     policy_obs_key: str = "state",
     value_obs_key: str = "state",
+    env_reset_every_steps: int = 0,
 ):
     if not 0.0 <= policy_target_tau <= 1.0:
         raise ValueError(
@@ -418,6 +419,10 @@ def train(
         max_replay_size = num_timesteps
     if planner_environment is None:
         raise ValueError("planner_environment is required for AWAC-MPC.")
+    if env_reset_every_steps < 0:
+        raise ValueError(
+            f"env_reset_every_steps must be >= 0, got {env_reset_every_steps}."
+        )
 
     env = environment
     if wrap_env_fn is not None:
@@ -568,14 +573,6 @@ def train(
         dummy_data_sample=replay_dummy_transition,
         sample_batch_size=batch_size,
     )
-    # replay_buffer_insert = jax.jit(
-    #     replay_buffer.insert_internal,
-    #     donate_argnums=(0,),
-    # )
-    # replay_buffer_sample = jax.jit(
-    #     replay_buffer.sample_internal,
-    #     donate_argnums=(0,),
-    # )
 
     rng, rb_key = jax.random.split(rng)
     buffer_state = replay_buffer.init(rb_key)
@@ -610,26 +607,53 @@ def train(
             (training_state.normalizer_params, training_state.policy_params),
             deterministic=False,
         )
+        start_step = jnp.asarray(training_state.env_steps, dtype=jnp.int32) // (
+            action_repeat * num_envs
+        )
 
-        def step_fn(carry, _):
+        def step_fn(carry, step_offset):
             state, k = carry
-            k, action_key = jax.random.split(k)
+            k, action_key, reset_key = jax.random.split(k, 3)
             action, _ = policy(state.obs, action_key)
             next_state = env_local.step(state, action)
+            discount = jnp.asarray(1.0 - next_state.done, dtype=jnp.float32)
+            should_force_reset = False
+            if count_env_steps and env_reset_every_steps > 0:
+                should_force_reset = (
+                    (start_step + step_offset + 1) % env_reset_every_steps
+                ) == 0
+                discount = jnp.where(
+                    should_force_reset,
+                    jnp.zeros_like(discount),
+                    discount,
+                )
             extras = _build_extras(next_state.info, next_state.done)
             extras["policy_extras"]["planner_state"] = compress_planner_state(state)
             transition = Transition(
                 observation=state.obs,
                 action=action,
                 reward=next_state.reward,
-                discount=jnp.asarray(1.0 - next_state.done, dtype=jnp.float32),
+                discount=discount,
                 next_observation=next_state.obs,
                 extras=extras,
             )
-            return (next_state, k), transition
+            if count_env_steps and env_reset_every_steps > 0:
+                reset_keys = jax.random.split(reset_key, num_envs)
+                reset_state = reset_fn(reset_keys)
+                next_carry_state = jax.lax.cond(
+                    should_force_reset,
+                    lambda _: reset_state,
+                    lambda _: next_state,
+                    operand=None,
+                )
+            else:
+                next_carry_state = next_state
+            return (next_carry_state, k), transition
 
         (env_state, key), transitions = jax.lax.scan(
-            step_fn, (env_state, key), (), length=rollout_length
+            step_fn,
+            (env_state, key),
+            jnp.arange(rollout_length, dtype=jnp.int32),
         )
 
         raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
