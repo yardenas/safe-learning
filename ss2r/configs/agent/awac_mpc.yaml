@@ -32,9 +32,9 @@ use_bro: true
 n_critics: 2
 
 controller_kwargs:
-  num_samples: 128
-  horizon: 25
-  zoh_steps: 5
+  num_samples: 16
+  horizon: 1
+  zoh_steps: 1
   temperature: 0.8
   iterations: 1
   rollout_actions: true
