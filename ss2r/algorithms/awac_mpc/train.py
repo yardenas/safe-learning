@@ -363,6 +363,7 @@ def train(
     num_critic_updates_per_actor_update: int = 1,
     deterministic_eval: bool = False,
     reset_on_eval: bool = True,
+    planner_eval: bool = True,
     rollout_length: int = 1,
     planner_rollout_length: int = 1,
     mpo_eta: float = 1.0,
@@ -856,32 +857,38 @@ def train(
         num_episodes=num_eval_episodes,
     )
 
-    def _planner_eval_policy_fn(_):
-        def _planner_eval_policy(state: envs.State, rng: PRNGKey, params):
-            del rng
-            model_params, planner_params = params
-            planner_params_out, _ = jax.vmap(
-                lambda s, p: controller.optimize_with_candidates(s, p, model_params)
-            )(state, planner_params)
-            action = controller.action_sequence(planner_params_out.actions)[:, 0, :]
-            return action, (model_params, planner_params_out), {}
+    planner_evaluator = None
+    if planner_eval:
 
-        return _planner_eval_policy
+        def _planner_eval_policy_fn(_):
+            def _planner_eval_policy(state: envs.State, rng: PRNGKey, params):
+                del rng
+                model_params, planner_params = params
+                planner_params_out, _ = jax.vmap(
+                    lambda s, p: controller.optimize_with_candidates(s, p, model_params)
+                )(state, planner_params)
+                action = controller.action_sequence(planner_params_out.actions)[:, 0, :]
+                return action, (model_params, planner_params_out), {}
 
-    planner_evaluator = Evaluator(
-        eval_env,
-        _planner_eval_policy_fn,
-        num_eval_envs=num_eval_envs,
-        episode_length=episode_length,
-        action_repeat=action_repeat,
-        key=jax.random.PRNGKey(seed + 2),
-    )
+            return _planner_eval_policy
+
+        planner_evaluator = Evaluator(
+            eval_env,
+            _planner_eval_policy_fn,
+            num_eval_envs=num_eval_envs,
+            episode_length=episode_length,
+            action_repeat=action_repeat,
+            key=jax.random.PRNGKey(seed + 2),
+        )
 
     def run_planner_evaluation(
         training_state: TrainingState,
         key: PRNGKey,
         prefix: str = "planner",
     ) -> tuple[dict[str, float], PRNGKey]:
+        if not planner_eval:
+            return {}, key
+        assert planner_evaluator is not None
         model_params = _planner_model_params(training_state)
         key, params_key = jax.random.split(key)
         planner_params = _planner_params_for_batch(

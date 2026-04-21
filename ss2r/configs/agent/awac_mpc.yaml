@@ -13,6 +13,7 @@ grad_updates_per_step: 512
 num_critic_updates_per_actor_update: 1
 deterministic_eval: true
 reset_on_eval: true
+planner_eval: false
 env_reset_every_steps: 0
 
 rollout_length: 1
