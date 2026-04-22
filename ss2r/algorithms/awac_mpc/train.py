@@ -59,6 +59,10 @@ def _copy_pytree(tree: Any) -> Any:
     return jax.tree_util.tree_map(jnp.copy, tree)
 
 
+def _polyak_update(target: Any, new: Any, coeff: float) -> Any:
+    return jax.tree.map(lambda x, y: x * (1 - coeff) + y * coeff, target, new)
+
+
 def _init_training_state(
     key: PRNGKey,
     obs_size: int,
@@ -585,6 +589,39 @@ def train(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
     )
 
+    def actor_update_with_target(
+        policy_params: Params,
+        target_policy_params: Params,
+        normalizer_params: Any,
+        qr_params: Params,
+        transitions: Transition,
+        key: PRNGKey,
+        *,
+        optimizer_state: optax.OptState,
+        params: Params,
+    ):
+        value, new_policy_params, new_policy_optimizer_state = actor_update(
+            policy_params,
+            target_policy_params,
+            normalizer_params,
+            qr_params,
+            transitions,
+            key,
+            optimizer_state=optimizer_state,
+            params=params,
+        )
+        new_target_policy_params = _polyak_update(
+            target_policy_params,
+            new_policy_params,
+            policy_target_tau,
+        )
+        return (
+            value,
+            new_policy_params,
+            new_target_policy_params,
+            new_policy_optimizer_state,
+        )
+
     def _collect_experience(
         training_state: TrainingState,
         env_local: envs.Env,
@@ -711,10 +748,9 @@ def train(
             params=training_state.qr_params,
         )
 
-        polyak = lambda target, new, coeff: jax.tree.map(
-            lambda x, y: x * (1 - coeff) + y * coeff, target, new
+        new_target_qr_params = _polyak_update(
+            training_state.target_qr_params, qr_params, tau
         )
-        new_target_qr_params = polyak(training_state.target_qr_params, qr_params, tau)
         planner_avg_rollout_return = jnp.zeros((), dtype=jnp.float32)
         if use_planner_transitions:
             assert controller is not None
@@ -737,15 +773,16 @@ def train(
         num_actor_minibatches = shuffled_actor_data.reward.shape[0]
 
         def _actor_step(carry, minibatch):
-            policy_params, policy_optimizer_state, key = carry
+            policy_params, target_policy_params, policy_optimizer_state, key = carry
             key, key_loss = jax.random.split(key)
             (
                 (actor_loss_i, aux_i),
                 new_policy_params_i,
+                new_target_policy_params_i,
                 new_policy_optimizer_state_i,
-            ) = actor_update(
+            ) = actor_update_with_target(
                 policy_params,
-                training_state.target_policy_params,
+                target_policy_params,
                 training_state.normalizer_params,
                 qr_params,
                 minibatch,
@@ -755,6 +792,7 @@ def train(
             )
             return (
                 new_policy_params_i,
+                new_target_policy_params_i,
                 new_policy_optimizer_state_i,
                 key,
             ), (
@@ -763,12 +801,18 @@ def train(
             )
 
         (
-            (new_policy_params, new_policy_optimizer_state, _),
+            (
+                new_policy_params,
+                new_target_policy_params,
+                new_policy_optimizer_state,
+                _,
+            ),
             (actor_losses, actor_auxes),
         ) = jax.lax.scan(
             _actor_step,
             (
                 training_state.policy_params,
+                training_state.target_policy_params,
                 training_state.policy_optimizer_state,
                 key_actor,
             ),
@@ -788,15 +832,15 @@ def train(
             new_policy_optimizer_state,
             training_state.policy_optimizer_state,
         )
-        new_target_policy_params = polyak(
+        target_policy_params = jax.tree.map(
+            update_if_needed,
+            new_target_policy_params,
             training_state.target_policy_params,
-            policy_params,
-            policy_target_tau,
         )
         new_training_state = training_state.replace(  # type: ignore
             policy_optimizer_state=policy_optimizer_state,
             policy_params=policy_params,
-            target_policy_params=new_target_policy_params,
+            target_policy_params=target_policy_params,
             qr_optimizer_state=qr_optimizer_state,
             qr_params=qr_params,
             target_qr_params=new_target_qr_params,
