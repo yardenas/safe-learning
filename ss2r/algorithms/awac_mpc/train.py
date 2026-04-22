@@ -354,6 +354,7 @@ def train(
     mpo_eta_opt_maxiter: int = 10,
     mpo_log_prob_min: float = -100.0,
     mpo_num_action_samples: int = 16,
+    use_baseline_value: bool = True,
     n_critics: int = 2,
     use_bro: bool = True,
     actor_grad_clip_norm: float = 1.0,
@@ -567,6 +568,7 @@ def train(
         mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         mpo_log_prob_min=mpo_log_prob_min,
         mpo_num_action_samples=mpo_num_action_samples,
+        use_baseline_value=use_baseline_value,
         use_bro=use_bro,
     )
     critic_update = gradients.gradient_update_fn(

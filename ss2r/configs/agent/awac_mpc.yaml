@@ -23,6 +23,7 @@ mpo_eta_min: 1e-3
 mpo_eta_opt_maxiter: 10
 mpo_log_prob_min: -100.0
 mpo_num_action_samples: 16
+use_baseline_value: true
 policy_target_tau: 0.001
 actor_grad_clip_norm: 1.0
 critic_grad_clip_norm: 1.0

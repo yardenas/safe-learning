@@ -76,6 +76,7 @@ def make_losses(
     mpo_eta_opt_maxiter: int,
     mpo_log_prob_min: float,
     mpo_num_action_samples: int,
+    use_baseline_value: bool,
     use_bro: bool,
 ):
     if mpo_eta_init <= 0.0:
@@ -153,6 +154,8 @@ def make_losses(
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
         policy_extras = transitions.extras["policy_extras"]
         baseline_value = policy_extras.get("baseline_value", None)
+        if not use_baseline_value:
+            baseline_value = None
 
         target_dist_params = policy_network.apply(
             normalizer_params, target_policy_params, transitions.observation
