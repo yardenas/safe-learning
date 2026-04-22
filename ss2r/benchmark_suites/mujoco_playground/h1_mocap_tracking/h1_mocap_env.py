@@ -286,6 +286,13 @@ class H1MocapTracking(mjx_env.MjxEnv):
         if loco_state is None:
             raise ValueError("Missing loco state in state.info['_loco_state']")
         next_loco_state = self._loco_env.mjx_step(loco_state, action)
+        nan_terminated = (
+            jp.isnan(next_loco_state.data.qpos).any()
+            | jp.isnan(next_loco_state.data.qvel).any()
+        )
+        next_loco_state = next_loco_state.replace(
+            done=jp.logical_or(next_loco_state.done, nan_terminated)
+        )
         return self._to_playground_state(next_loco_state, previous_state=state)
 
     @property
