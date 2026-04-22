@@ -276,9 +276,6 @@ def _planner_supervised_batch(
     planner_model_params: TreeMPCModelParams | None = None,
     restore_planner_state_fn: Callable[[Any], Any] | None = None,
 ) -> tuple[Transition, jax.Array]:
-    if not getattr(controller, "rollout_actions", True):
-        return _strip_policy_extras(transitions), jnp.zeros((), dtype=jnp.float32)
-
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
     if planner_states is None:
         raise ValueError(
@@ -355,6 +352,7 @@ def train(
     mpo_log_prob_min: float = -100.0,
     mpo_num_action_samples: int = 16,
     use_baseline_value: bool = True,
+    use_planner_transitions: bool = True,
     n_critics: int = 2,
     use_bro: bool = True,
     actor_grad_clip_norm: float = 1.0,
@@ -398,7 +396,8 @@ def train(
         )
     if max_replay_size is None:
         max_replay_size = num_timesteps
-    if planner_environment is None:
+    needs_planner = use_planner_transitions or planner_eval
+    if needs_planner and planner_environment is None:
         raise ValueError("planner_environment is required for AWAC-MPC.")
     if env_reset_every_steps < 0:
         raise ValueError(
@@ -521,34 +520,42 @@ def train(
             "Use a vectorized/wrapped env with batch dimension."
         )
 
-    planner_env = _PlannerActionRepeatWrapper(planner_environment, action_repeat)
-    compress_planner_state = getattr(
-        planner_env, "compress_planner_state", lambda state: state
-    )
-    restore_planner_state = getattr(
-        planner_env, "restore_planner_state", lambda state: state
-    )
-    controller_kwargs = dict(controller_kwargs or {})
-    controller_kwargs["use_bro"] = bool(use_bro)
-    controller_kwargs["gamma"] = discounting
-    controller_kwargs["reward_scaling"] = reward_scaling
-    task = make_task(planner_env)  # type: ignore[arg-type]
-    controller = TreeMPC(task=task, sac_network=sac_network, **controller_kwargs)
-    planner_params_template = _init_planner_params(controller, seed, None)
+    controller = None
+    planner_params_template = None
+    compress_planner_state = lambda state: state
+    restore_planner_state = lambda state: state
+    if needs_planner:
+        assert planner_environment is not None
+        planner_env = _PlannerActionRepeatWrapper(planner_environment, action_repeat)
+        compress_planner_state = getattr(
+            planner_env, "compress_planner_state", lambda state: state
+        )
+        restore_planner_state = getattr(
+            planner_env, "restore_planner_state", lambda state: state
+        )
+        controller_kwargs = dict(controller_kwargs or {})
+        controller_kwargs["use_bro"] = bool(use_bro)
+        controller_kwargs["gamma"] = discounting
+        controller_kwargs["reward_scaling"] = reward_scaling
+        task = make_task(planner_env)  # type: ignore[arg-type]
+        controller = TreeMPC(task=task, sac_network=sac_network, **controller_kwargs)
+        planner_params_template = _init_planner_params(controller, seed, None)
 
-    dummy_planner_state = jax.tree.map(
-        lambda x: x[0]
-        if hasattr(x, "shape") and x.shape and x.shape[0] == num_envs
-        else x,
-        env_state,
-    )
-    dummy_planner_state = compress_planner_state(dummy_planner_state)
+    dummy_planner_state = None
+    if use_planner_transitions:
+        dummy_planner_state = jax.tree.map(
+            lambda x: x[0]
+            if hasattr(x, "shape") and x.shape and x.shape[0] == num_envs
+            else x,
+            env_state,
+        )
+        dummy_planner_state = compress_planner_state(dummy_planner_state)
 
     replay_dummy_transition = _to_storage_transition(
         base_dummy_transition,
         dummy_planner_state,
     )
-    # Planner state is stored in replay extras, so keep the buffer in pytree form.
+    # Planner state may be stored in replay extras, so keep the buffer in pytree form.
     replay_buffer = PytreeUniformSamplingQueue(
         max_replay_size=max_replay_size,
         dummy_data_sample=replay_dummy_transition,
@@ -611,7 +618,8 @@ def train(
                     discount,
                 )
             extras = _build_extras(next_state.info, next_state.done)
-            extras["policy_extras"]["planner_state"] = compress_planner_state(state)
+            if use_planner_transitions:
+                extras["policy_extras"]["planner_state"] = compress_planner_state(state)
             transition = Transition(
                 observation=state.obs,
                 action=action,
@@ -639,12 +647,15 @@ def train(
             jnp.arange(rollout_length, dtype=jnp.int32),
         )
 
-        raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
+        planner_states = None
+        if use_planner_transitions:
+            raw_planner_states = transitions.extras["policy_extras"]["planner_state"]
         transitions = _strip_policy_extras(transitions)
-        time_len, batch_dim = transitions.reward.shape[:2]
-        planner_states = _flatten_time_batch_tree(
-            raw_planner_states, time_len, batch_dim
-        )
+        if use_planner_transitions:
+            time_len, batch_dim = transitions.reward.shape[:2]
+            planner_states = _flatten_time_batch_tree(
+                raw_planner_states, time_len, batch_dim
+            )
 
         transitions = _flatten_transition_batch(transitions)
         normalizer_params = running_statistics.update(
@@ -704,14 +715,20 @@ def train(
             lambda x, y: x * (1 - coeff) + y * coeff, target, new
         )
         new_target_qr_params = polyak(training_state.target_qr_params, qr_params, tau)
-        actor_transitions, planner_avg_rollout_return = _planner_supervised_batch(
-            sampled,
-            controller,
-            planner_params_template,
-            key_planner,
-            _planner_model_params(training_state.replace(qr_params=qr_params)),
-            restore_planner_state_fn=restore_planner_state,
-        )
+        planner_avg_rollout_return = jnp.zeros((), dtype=jnp.float32)
+        if use_planner_transitions:
+            assert controller is not None
+            assert planner_params_template is not None
+            actor_transitions, planner_avg_rollout_return = _planner_supervised_batch(
+                sampled,
+                controller,
+                planner_params_template,
+                key_planner,
+                _planner_model_params(training_state.replace(qr_params=qr_params)),
+                restore_planner_state_fn=restore_planner_state,
+            )
+        else:
+            actor_transitions = _strip_policy_extras(sampled)
         shuffled_actor_data = _shuffle_and_batch_actor_transitions(
             actor_transitions,
             batch_size,
