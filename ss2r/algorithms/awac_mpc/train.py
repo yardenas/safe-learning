@@ -383,7 +383,7 @@ def train(
         raise ValueError(f"mpo_eta_min must be > 0, got {mpo_eta_min}.")
     if mpo_eta_opt_maxiter < 1:
         raise ValueError(
-            "mpo_eta_opt_maxiter must be >= 1, " f"got {mpo_eta_opt_maxiter}."
+            f"mpo_eta_opt_maxiter must be >= 1, got {mpo_eta_opt_maxiter}."
         )
     if mpo_log_prob_min > 0.0:
         raise ValueError(f"mpo_log_prob_min must be <= 0, got {mpo_log_prob_min}.")
@@ -726,6 +726,7 @@ def train(
                 new_policy_optimizer_state_i,
             ) = actor_update(
                 policy_params,
+                training_state.target_policy_params,
                 training_state.normalizer_params,
                 qr_params,
                 minibatch,

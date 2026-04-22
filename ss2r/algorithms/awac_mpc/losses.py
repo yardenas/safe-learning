@@ -49,6 +49,22 @@ def _solve_eta_dual(
     return jnp.exp(result.x[0]) + 1e-8
 
 
+def _sample_raw_actions(
+    dist_params: jax.Array,
+    key: PRNGKey,
+    num_action_samples: int,
+    parametric_action_distribution,
+) -> tuple[jax.Array, jax.Array]:
+    sample_keys = jax.random.split(key, num_action_samples)
+    raw_actions_nba = jax.vmap(
+        lambda k: parametric_action_distribution.sample_no_postprocessing(
+            dist_params, k
+        )
+    )(sample_keys)
+    actions_nba = jax.vmap(parametric_action_distribution.postprocess)(raw_actions_nba)
+    return raw_actions_nba, actions_nba
+
+
 def make_losses(
     sac_network: SafeSACNetworks,
     *,
@@ -129,6 +145,7 @@ def make_losses(
 
     def actor_loss(
         policy_params: Params,
+        target_policy_params: Params,
         normalizer_params: Any,
         qr_params: Params,
         transitions: Transition,
@@ -137,40 +154,30 @@ def make_losses(
         policy_extras = transitions.extras["policy_extras"]
         baseline_value = policy_extras.get("baseline_value", None)
 
-        current_dist_params = policy_network.apply(
-            normalizer_params,
-            policy_params,
-            transitions.observation,
+        target_dist_params = policy_network.apply(
+            normalizer_params, target_policy_params, transitions.observation
         )
-        sample_keys = jax.random.split(key, mpo_num_action_samples)
+        raw_actions_nba, actions_nba = _sample_raw_actions(
+            target_dist_params,
+            key,
+            mpo_num_action_samples,
+            parametric_action_distribution,
+        )
 
-        sampled_raw_actions = jax.vmap(
-            lambda sample_key: parametric_action_distribution.sample_no_postprocessing(
-                current_dist_params, sample_key
-            )
-        )(sample_keys)
-        sampled_log_probs = jax.vmap(
-            lambda raw_action: parametric_action_distribution.log_prob(
-                current_dist_params, raw_action
-            )
-        )(sampled_raw_actions)
-        sampled_actions = jax.vmap(parametric_action_distribution.postprocess)(
-            sampled_raw_actions
-        )
         sampled_q_values = jax.vmap(
-            lambda action: _reduce_q(
+            lambda sampled_actions_ba: _reduce_q(
                 qr_network.apply(
                     normalizer_params,
                     qr_params,
                     transitions.observation,
-                    action,
+                    sampled_actions_ba,
                 ),
                 use_bro,
             )
-        )(sampled_actions)
-
-        sampled_log_probs = jnp.swapaxes(sampled_log_probs, 0, 1)
+        )(actions_nba)
+        # [N, B] -> [B, N]
         sampled_q_values = jnp.swapaxes(sampled_q_values, 0, 1)
+
         if baseline_value is not None:
             baseline_value = jax.lax.stop_gradient(baseline_value)
             mpo_advantages = sampled_q_values - baseline_value[:, None]
@@ -187,8 +194,20 @@ def make_losses(
         mpo_scores = mpo_scores - jnp.max(mpo_scores, axis=-1, keepdims=True)
         mpo_weights = jax.nn.softmax(mpo_scores, axis=-1)
         mpo_weights = jax.lax.stop_gradient(mpo_weights)
+
+        current_dist_params = policy_network.apply(
+            normalizer_params, policy_params, transitions.observation
+        )
+        sampled_log_probs_current = jax.vmap(
+            lambda raw_actions_ba: parametric_action_distribution.log_prob(
+                current_dist_params, raw_actions_ba
+            )
+        )(raw_actions_nba)
+        # [N, B] -> [B, N]
+        sampled_log_probs_current = jnp.swapaxes(sampled_log_probs_current, 0, 1)
+        sampled_q_values = jnp.swapaxes(sampled_q_values, 0, 1)
         finite_log_probs_current = jnp.nan_to_num(
-            sampled_log_probs,
+            sampled_log_probs_current,
             nan=mpo_log_prob_min,
             neginf=mpo_log_prob_min,
             posinf=0.0,
