@@ -304,18 +304,63 @@ def _planner_supervised_batch(
         planner_params,
     )
     avg_rollout_return = jnp.mean(rollouts.returns)
+    rollout_horizon = rollouts.all_traj_actions.shape[2]
+    root_transitions = _strip_policy_extras(transitions)
+    root_returns = jnp.mean(rollouts.all_traj_returns[:, :, 0, ...], axis=1)
+    root_actor_transitions = root_transitions._replace(
+        extras={
+            "state_extras": root_transitions.extras["state_extras"],
+            "policy_extras": {"baseline_value": root_returns},
+        }
+    )
+
+    if rollout_horizon <= 1:
+        return root_actor_transitions, avg_rollout_return
+
+    traj_obs = jax.tree.map(lambda x: x[:, :, 1:, ...], rollouts.all_traj_obs)
+    traj_next_obs = jax.tree.map(lambda x: x[:, :, 1:, ...], rollouts.all_traj_next_obs)
+    traj_actions = rollouts.all_traj_actions[:, :, 1:, ...]
+    traj_rewards = rollouts.all_traj_rewards[:, :, 1:, ...]
+    traj_discount = rollouts.all_traj_discount[:, :, 1:, ...]
+    traj_truncation = rollouts.all_traj_truncation[:, :, 1:, ...]
+    traj_returns = rollouts.all_traj_returns[:, :, 1:, ...]
+
+    flat_obs = _flatten_leading_dims(traj_obs, 3)
+    flat_next_obs = _flatten_leading_dims(traj_next_obs, 3)
+    flat_actions = _flatten_leading_dims(traj_actions, 3)
+    flat_rewards = _flatten_leading_dims(traj_rewards, 3)
+    flat_discount = _flatten_leading_dims(traj_discount, 3)
+    flat_truncation = _flatten_leading_dims(traj_truncation, 3)
+    flat_returns = _flatten_leading_dims(traj_returns, 3)
+
     actor_transitions = Transition(
-        observation=_flatten_leading_dims(rollouts.all_traj_obs, 3),
-        action=_flatten_leading_dims(rollouts.all_traj_actions, 3),
-        reward=_flatten_leading_dims(rollouts.all_traj_rewards, 3),
-        discount=_flatten_leading_dims(rollouts.all_traj_discount, 3),
-        next_observation=_flatten_leading_dims(rollouts.all_traj_next_obs, 3),
+        observation=jax.tree.map(
+            lambda root, flat: jnp.concatenate([root, flat], axis=0),
+            root_actor_transitions.observation,
+            flat_obs,
+        ),
+        action=jnp.concatenate([root_actor_transitions.action, flat_actions], axis=0),
+        reward=jnp.concatenate([root_actor_transitions.reward, flat_rewards], axis=0),
+        discount=jnp.concatenate(
+            [root_actor_transitions.discount, flat_discount], axis=0
+        ),
+        next_observation=jax.tree.map(
+            lambda root, flat: jnp.concatenate([root, flat], axis=0),
+            root_actor_transitions.next_observation,
+            flat_next_obs,
+        ),
         extras={
             "state_extras": {
-                "truncation": _flatten_leading_dims(rollouts.all_traj_truncation, 3),
+                "truncation": jnp.concatenate(
+                    [
+                        root_actor_transitions.extras["state_extras"]["truncation"],
+                        flat_truncation,
+                    ],
+                    axis=0,
+                ),
             },
             "policy_extras": {
-                "baseline_value": _flatten_leading_dims(rollouts.all_traj_returns, 3),
+                "baseline_value": jnp.concatenate([root_returns, flat_returns], axis=0),
             },
         },
     )
