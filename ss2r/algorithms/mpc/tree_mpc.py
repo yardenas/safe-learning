@@ -82,9 +82,14 @@ def _state_is_active(state: mjx_env.State) -> jax.Array:
 @struct.dataclass
 class _TreeRollout:
     raw_action_sequences: jax.Array
-    candidate_raw_actions: jax.Array
-    candidate_q_values: jax.Array
     returns: jax.Array
+    all_traj_obs: Any
+    all_traj_next_obs: Any
+    all_traj_actions: jax.Array
+    all_traj_rewards: jax.Array
+    all_traj_discount: jax.Array
+    all_traj_truncation: jax.Array
+    all_traj_returns: jax.Array
 
 
 class TreeMPC:
@@ -160,11 +165,21 @@ class TreeMPC:
             raw_root_actions[:, None, :],
             (num_particles, self.ctrl_steps, act_dim),
         )
+        all_traj_obs = _broadcast_tree(state.obs, num_particles)
+        all_traj_obs = jax.tree.map(lambda x: x[:, None, ...], all_traj_obs)
+        all_traj_actions = root_actions[:, None, :]
+        zeros = jnp.zeros((num_particles, 1), dtype=jnp.float32)
+        ones = jnp.ones((num_particles, 1), dtype=jnp.float32)
         rollout = _TreeRollout(  # type: ignore
             raw_action_sequences=raw_action_sequences,
-            candidate_raw_actions=raw_root_actions,
-            candidate_q_values=q_values,
             returns=q_values,
+            all_traj_obs=all_traj_obs,
+            all_traj_next_obs=all_traj_obs,
+            all_traj_actions=all_traj_actions,
+            all_traj_rewards=zeros,
+            all_traj_discount=ones,
+            all_traj_truncation=zeros,
+            all_traj_returns=q_values[:, None],
         )
         return rollout
 
@@ -359,15 +374,23 @@ class TreeMPC:
 
             (
                 next_states,
-                _,
-                _,
+                obs_steps,
+                next_obs_steps,
                 rewards_steps,
                 discount_steps,
                 truncation_steps,
             ) = jax.vmap(self._rollout_zoh)(states, decision_actions)
 
+            repeated_actions = jnp.broadcast_to(
+                decision_actions[:, None, :],
+                (num_particles, self.zoh_steps, decision_actions.shape[-1]),
+            )
+
             return (next_states, rng), (
                 raw_decision_actions,
+                obs_steps,
+                next_obs_steps,
+                repeated_actions,
                 rewards_steps,
                 discount_steps,
                 truncation_steps,
@@ -377,6 +400,9 @@ class TreeMPC:
             (terminal_states, terminal_rng),
             (
                 decision_raw_actions,
+                obs_steps,
+                next_obs_steps,
+                repeated_actions,
                 rewards_steps,
                 discount_steps,
                 truncation_steps,
@@ -384,6 +410,9 @@ class TreeMPC:
         ) = jax.lax.scan(_scan_fn, (states0, key), jnp.arange(self.ctrl_steps))
         decision_raw_actions = jnp.swapaxes(decision_raw_actions, 0, 1)
 
+        all_traj_obs = jax.tree.map(flatten_time, obs_steps)
+        all_traj_next_obs = jax.tree.map(flatten_time, next_obs_steps)
+        all_traj_actions = flatten_time(repeated_actions)
         all_traj_rewards = flatten_time(rewards_steps)
         all_traj_discount = flatten_time(discount_steps)
         all_traj_truncation = flatten_time(truncation_steps)
@@ -391,7 +420,8 @@ class TreeMPC:
         terminal_q = self._estimate_target_q(terminal_obs, terminal_rng, model_params)
 
         step_discount = self.gamma * all_traj_discount * (1.0 - all_traj_truncation)
-        reward_weights = jnp.cumprod(
+        scaled_rewards = self.reward_scaling * all_traj_rewards
+        prefix_discount = jnp.cumprod(
             jnp.concatenate(
                 [
                     jnp.ones((num_particles, 1), dtype=step_discount.dtype),
@@ -401,19 +431,34 @@ class TreeMPC:
             ),
             axis=1,
         )
-        terminal_weight = jnp.prod(step_discount, axis=1)
-        returns = (
-            jnp.sum(
-                reward_weights * (self.reward_scaling * all_traj_rewards),
-                axis=1,
-            )
-            + terminal_weight * terminal_q
+        weighted_rewards = prefix_discount * scaled_rewards
+        suffix_reward_sum = jnp.flip(
+            jnp.cumsum(jnp.flip(weighted_rewards, axis=1), axis=1),
+            axis=1,
         )
+        terminal_prefix = jnp.prod(step_discount, axis=1, keepdims=True)
+        numerator = suffix_reward_sum + terminal_prefix * terminal_q[:, None]
+        safe_prefix_discount = jnp.where(
+            prefix_discount > 0.0,
+            prefix_discount,
+            jnp.ones_like(prefix_discount),
+        )
+        all_traj_returns = jnp.where(
+            prefix_discount > 0.0,
+            numerator / safe_prefix_discount,
+            jnp.zeros_like(numerator),
+        )
+        returns = all_traj_returns[:, 0]
         rollout = _TreeRollout(  # type: ignore
             raw_action_sequences=decision_raw_actions,
-            candidate_raw_actions=decision_raw_actions[:, 0, :],
-            candidate_q_values=returns,
             returns=returns,
+            all_traj_obs=all_traj_obs,
+            all_traj_next_obs=all_traj_next_obs,
+            all_traj_actions=all_traj_actions,
+            all_traj_rewards=all_traj_rewards,
+            all_traj_discount=all_traj_discount,
+            all_traj_truncation=all_traj_truncation,
+            all_traj_returns=all_traj_returns,
         )
         return rollout
 
@@ -446,6 +491,41 @@ class TreeMPC:
         flat_raw_action_sequences = rollouts.raw_action_sequences.reshape(
             (self.iterations * self.num_samples, self.ctrl_steps, act_dim)
         )
+        flat_all_traj_obs = jax.tree.map(
+            lambda x: x.reshape(
+                (self.iterations * self.num_samples, x.shape[2]) + x.shape[3:]
+            ),
+            rollouts.all_traj_obs,
+        )
+        flat_all_traj_next_obs = jax.tree.map(
+            lambda x: x.reshape(
+                (self.iterations * self.num_samples, x.shape[2]) + x.shape[3:]
+            ),
+            rollouts.all_traj_next_obs,
+        )
+        flat_all_traj_actions = rollouts.all_traj_actions.reshape(
+            (self.iterations * self.num_samples, rollouts.all_traj_actions.shape[2])
+            + rollouts.all_traj_actions.shape[3:]
+        )
+        flat_all_traj_rewards = rollouts.all_traj_rewards.reshape(
+            (self.iterations * self.num_samples, rollouts.all_traj_rewards.shape[2])
+            + rollouts.all_traj_rewards.shape[3:]
+        )
+        flat_all_traj_discount = rollouts.all_traj_discount.reshape(
+            (self.iterations * self.num_samples, rollouts.all_traj_discount.shape[2])
+            + rollouts.all_traj_discount.shape[3:]
+        )
+        flat_all_traj_truncation = rollouts.all_traj_truncation.reshape(
+            (
+                self.iterations * self.num_samples,
+                rollouts.all_traj_truncation.shape[2],
+            )
+            + rollouts.all_traj_truncation.shape[3:]
+        )
+        flat_all_traj_returns = rollouts.all_traj_returns.reshape(
+            (self.iterations * self.num_samples, rollouts.all_traj_returns.shape[2])
+            + rollouts.all_traj_returns.shape[3:]
+        )
         weights = jnn.softmax(flat_returns / self.temperature, axis=0)
         mean_raw_actions = jnp.sum(
             weights[:, None, None] * flat_raw_action_sequences,
@@ -453,13 +533,14 @@ class TreeMPC:
         )
         rollout = _TreeRollout(  # type: ignore
             raw_action_sequences=flat_raw_action_sequences,
-            candidate_raw_actions=rollouts.candidate_raw_actions.reshape(
-                (self.iterations * self.num_samples, act_dim)
-            ),
-            candidate_q_values=rollouts.candidate_q_values.reshape(
-                (self.iterations * self.num_samples,)
-            ),
             returns=flat_returns,
+            all_traj_obs=flat_all_traj_obs,
+            all_traj_next_obs=flat_all_traj_next_obs,
+            all_traj_actions=flat_all_traj_actions,
+            all_traj_rewards=flat_all_traj_rewards,
+            all_traj_discount=flat_all_traj_discount,
+            all_traj_truncation=flat_all_traj_truncation,
+            all_traj_returns=flat_all_traj_returns,
         )
         params = params.replace(actions=mean_raw_actions, rng=rng)  # type: ignore
         return params, rollout

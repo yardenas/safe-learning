@@ -272,11 +272,13 @@ def _planner_supervised_batch(
     transitions: Transition,
     controller,
     planner_params_template: TreeMPCParams,
-    planner_rollout_length: int,
     key: PRNGKey,
     planner_model_params: TreeMPCModelParams | None = None,
     restore_planner_state_fn: Callable[[Any], Any] | None = None,
 ) -> tuple[Transition, jax.Array]:
+    if not getattr(controller, "rollout_actions", True):
+        return _strip_policy_extras(transitions), jnp.zeros((), dtype=jnp.float32)
+
     planner_states = transitions.extras["policy_extras"].get("planner_state", None)
     if planner_states is None:
         raise ValueError(
@@ -290,52 +292,33 @@ def _planner_supervised_batch(
         planner_states = jax.vmap(restore_planner_state_fn)(planner_states)
     batch_size = transitions.reward.shape[0]
     planner_params = _planner_params_for_batch(planner_params_template, key, batch_size)
-
-    def _single_rollout(
-        planner_state: Any,
-        planner_params_i: TreeMPCParams,
-    ) -> tuple[Transition, jax.Array]:
-        def _scan_fn(carry, _):
-            state, params = carry
-            next_params, rollout = controller.optimize_with_candidates(
-                state,
-                params,
-                planner_model_params,
-            )
-            chosen_action = controller.action_sequence(next_params.actions)[0]
-            next_state = controller.task.env.step(state, chosen_action)
-            extras = _build_extras(next_state.info, next_state.done)
-            extras["policy_extras"] = {
-                "candidate_raw_actions": rollout.candidate_raw_actions,
-                "candidate_q_values": rollout.candidate_q_values,
-            }
-            transition = Transition(
-                observation=state.obs,
-                action=chosen_action,
-                reward=next_state.reward,
-                discount=jnp.asarray(1.0 - next_state.done, dtype=jnp.float32),
-                next_observation=next_state.obs,
-                extras=extras,
-            )
-            return (next_state, next_params), (
-                transition,
-                jnp.mean(rollout.returns),
-            )
-
-        (_, _), (planner_transitions, planner_returns) = jax.lax.scan(
-            _scan_fn,
-            (planner_state, planner_params_i),
-            (),
-            length=planner_rollout_length,
+    _, rollouts = jax.vmap(
+        lambda planner_state, planner_params_i: controller.optimize_with_candidates(
+            planner_state,
+            planner_params_i,
+            planner_model_params,
         )
-        return planner_transitions, planner_returns
-
-    rollout_transitions, rollout_returns = jax.vmap(_single_rollout)(
+    )(
         planner_states,
         planner_params,
     )
-    avg_rollout_return = jnp.mean(rollout_returns)
-    return _flatten_leading_dims(rollout_transitions), avg_rollout_return
+    avg_rollout_return = jnp.mean(rollouts.returns)
+    actor_transitions = Transition(
+        observation=_flatten_leading_dims(rollouts.all_traj_obs, 3),
+        action=_flatten_leading_dims(rollouts.all_traj_actions, 3),
+        reward=_flatten_leading_dims(rollouts.all_traj_rewards, 3),
+        discount=_flatten_leading_dims(rollouts.all_traj_discount, 3),
+        next_observation=_flatten_leading_dims(rollouts.all_traj_next_obs, 3),
+        extras={
+            "state_extras": {
+                "truncation": _flatten_leading_dims(rollouts.all_traj_truncation, 3),
+            },
+            "policy_extras": {
+                "baseline_value": _flatten_leading_dims(rollouts.all_traj_returns, 3),
+            },
+        },
+    )
+    return actor_transitions, avg_rollout_return
 
 
 def train(
@@ -365,12 +348,12 @@ def train(
     reset_on_eval: bool = True,
     planner_eval: bool = True,
     rollout_length: int = 1,
-    planner_rollout_length: int = 1,
     mpo_eta: float = 1.0,
     mpo_eta_epsilon: float = 0.1,
     mpo_eta_min: float = 1e-3,
     mpo_eta_opt_maxiter: int = 10,
     mpo_log_prob_min: float = -100.0,
+    mpo_num_action_samples: int = 16,
     n_critics: int = 2,
     use_bro: bool = True,
     actor_grad_clip_norm: float = 1.0,
@@ -404,10 +387,6 @@ def train(
         )
     if mpo_log_prob_min > 0.0:
         raise ValueError(f"mpo_log_prob_min must be <= 0, got {mpo_log_prob_min}.")
-    if planner_rollout_length < 1:
-        raise ValueError(
-            f"planner_rollout_length must be >= 1, got {planner_rollout_length}."
-        )
     if actor_grad_clip_norm <= 0.0:
         raise ValueError(
             f"actor_grad_clip_norm must be > 0, got {actor_grad_clip_norm}."
@@ -587,6 +566,7 @@ def train(
         mpo_eta_min=mpo_eta_min,
         mpo_eta_opt_maxiter=mpo_eta_opt_maxiter,
         mpo_log_prob_min=mpo_log_prob_min,
+        mpo_num_action_samples=mpo_num_action_samples,
         use_bro=use_bro,
     )
     critic_update = gradients.gradient_update_fn(
@@ -701,7 +681,7 @@ def train(
         unused_t,
     ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
         training_state, buffer_state, key, count = carry
-        key, key_critic, key_perm, key_planner = jax.random.split(key, 4)
+        key, key_critic, key_perm, key_planner, key_actor = jax.random.split(key, 5)
 
         buffer_state, sampled = replay_buffer.sample(buffer_state)
         sampled = _float32_training_transition(sampled)
@@ -726,7 +706,6 @@ def train(
             sampled,
             controller,
             planner_params_template,
-            planner_rollout_length,
             key_planner,
             _planner_model_params(training_state.replace(qr_params=qr_params)),
             restore_planner_state_fn=restore_planner_state,
@@ -739,7 +718,8 @@ def train(
         num_actor_minibatches = shuffled_actor_data.reward.shape[0]
 
         def _actor_step(carry, minibatch):
-            policy_params, policy_optimizer_state = carry
+            policy_params, policy_optimizer_state, key = carry
+            key, key_loss = jax.random.split(key)
             (
                 (actor_loss_i, aux_i),
                 new_policy_params_i,
@@ -747,26 +727,30 @@ def train(
             ) = actor_update(
                 policy_params,
                 training_state.normalizer_params,
+                qr_params,
                 minibatch,
+                key_loss,
                 optimizer_state=policy_optimizer_state,
                 params=policy_params,
             )
             return (
                 new_policy_params_i,
                 new_policy_optimizer_state_i,
+                key,
             ), (
                 actor_loss_i,
                 aux_i,
             )
 
         (
-            (new_policy_params, new_policy_optimizer_state),
+            (new_policy_params, new_policy_optimizer_state, _),
             (actor_losses, actor_auxes),
         ) = jax.lax.scan(
             _actor_step,
             (
                 training_state.policy_params,
                 training_state.policy_optimizer_state,
+                key_actor,
             ),
             shuffled_actor_data,
             length=num_actor_minibatches,

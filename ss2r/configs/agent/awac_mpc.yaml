@@ -17,12 +17,12 @@ planner_eval: false
 env_reset_every_steps: 0
 
 rollout_length: 1
-planner_rollout_length: 1
 mpo_eta: 1.0
 mpo_eta_epsilon: 0.1
 mpo_eta_min: 1e-3
 mpo_eta_opt_maxiter: 10
 mpo_log_prob_min: -100.0
+mpo_num_action_samples: 16
 policy_target_tau: 0.001
 actor_grad_clip_norm: 1.0
 critic_grad_clip_norm: 1.0
