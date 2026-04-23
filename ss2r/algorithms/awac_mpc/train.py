@@ -301,6 +301,7 @@ def _planner_supervised_batch(
     planner_params_template: TreeMPCParams,
     key: PRNGKey,
     planner_actor_single_random_trajectory: bool,
+    planner_actor_winner_trajectory: bool,
     planner_actor_max_imagined_steps: int,
     planner_actor_imagined_transitions_per_root: int,
     planner_model_params: TreeMPCModelParams | None = None,
@@ -344,15 +345,18 @@ def _planner_supervised_batch(
     )
 
     imagined_steps = min(planner_actor_max_imagined_steps, rollout_horizon - 1)
-    if planner_actor_single_random_trajectory:
+    if planner_actor_single_random_trajectory or planner_actor_winner_trajectory:
         if rollout_horizon <= 1:
             return root_actor_transitions, avg_rollout_return
 
-        branch_count = rollouts.all_traj_actions.shape[1]
-        branch_keys = jax.random.split(sample_key, batch_size)
-        sampled_branch_indices = jax.vmap(
-            lambda k: jax.random.randint(k, (), 0, branch_count)
-        )(branch_keys)
+        if planner_actor_winner_trajectory:
+            sampled_branch_indices = jnp.argmax(rollouts.returns, axis=1)
+        else:
+            branch_count = rollouts.all_traj_actions.shape[1]
+            branch_keys = jax.random.split(sample_key, batch_size)
+            sampled_branch_indices = jax.vmap(
+                lambda k: jax.random.randint(k, (), 0, branch_count)
+            )(branch_keys)
 
         traj_obs = _sample_planner_branches_per_root(
             rollouts.all_traj_obs, sampled_branch_indices
@@ -527,6 +531,7 @@ def train(
     use_baseline_value: bool = True,
     use_planner_transitions: bool = True,
     planner_actor_single_random_trajectory: bool = False,
+    planner_actor_winner_trajectory: bool = False,
     planner_actor_max_imagined_steps: int = 3,
     planner_actor_imagined_transitions_per_root: int = 8,
     n_critics: int = 2,
@@ -571,6 +576,11 @@ def train(
         raise ValueError(
             "planner_actor_imagined_transitions_per_root must be >= 0, "
             f"got {planner_actor_imagined_transitions_per_root}."
+        )
+    if planner_actor_single_random_trajectory and planner_actor_winner_trajectory:
+        raise ValueError(
+            "planner_actor_single_random_trajectory and "
+            "planner_actor_winner_trajectory cannot both be true."
         )
     if actor_grad_clip_norm <= 0.0:
         raise ValueError(
@@ -943,6 +953,7 @@ def train(
                 planner_params_template,
                 key_planner,
                 planner_actor_single_random_trajectory,
+                planner_actor_winner_trajectory,
                 planner_actor_max_imagined_steps,
                 planner_actor_imagined_transitions_per_root,
                 _planner_model_params(training_state.replace(qr_params=qr_params)),
