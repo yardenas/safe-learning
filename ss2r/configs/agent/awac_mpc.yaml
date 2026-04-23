@@ -25,6 +25,7 @@ mpo_log_prob_min: -100.0
 mpo_num_action_samples: 16
 use_baseline_value: true
 use_planner_transitions: true
+planner_actor_single_random_trajectory: false
 planner_actor_max_imagined_steps: 3
 planner_actor_imagined_transitions_per_root: 8
 policy_target_tau: 0.001

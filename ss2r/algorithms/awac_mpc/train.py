@@ -233,6 +233,13 @@ def _sample_planner_candidates_per_root(tree: Any, sample_indices: jax.Array) ->
     )
 
 
+def _sample_planner_branches_per_root(tree: Any, branch_indices: jax.Array) -> Any:
+    return jax.tree.map(
+        lambda x: jax.vmap(lambda x_i, idx_i: x_i[idx_i])(x, branch_indices),
+        tree,
+    )
+
+
 def _shuffle_and_batch_actor_transitions(
     actor_transitions: Transition,
     batch_size: int,
@@ -293,6 +300,7 @@ def _planner_supervised_batch(
     controller,
     planner_params_template: TreeMPCParams,
     key: PRNGKey,
+    planner_actor_single_random_trajectory: bool,
     planner_actor_max_imagined_steps: int,
     planner_actor_imagined_transitions_per_root: int,
     planner_model_params: TreeMPCModelParams | None = None,
@@ -336,72 +344,118 @@ def _planner_supervised_batch(
     )
 
     imagined_steps = min(planner_actor_max_imagined_steps, rollout_horizon - 1)
-    if imagined_steps <= 0 or planner_actor_imagined_transitions_per_root <= 0:
-        return root_actor_transitions, avg_rollout_return
+    if planner_actor_single_random_trajectory:
+        if rollout_horizon <= 1:
+            return root_actor_transitions, avg_rollout_return
 
-    traj_slice = slice(1, 1 + imagined_steps)
-    traj_obs = jax.tree.map(lambda x: x[:, :, traj_slice, ...], rollouts.all_traj_obs)
-    traj_next_obs = jax.tree.map(
-        lambda x: x[:, :, traj_slice, ...], rollouts.all_traj_next_obs
-    )
-    traj_actions = rollouts.all_traj_actions[:, :, traj_slice, ...]
-    traj_rewards = rollouts.all_traj_rewards[:, :, traj_slice, ...]
-    traj_discount = rollouts.all_traj_discount[:, :, traj_slice, ...]
-    traj_truncation = rollouts.all_traj_truncation[:, :, traj_slice, ...]
-    traj_returns = rollouts.all_traj_returns[:, :, traj_slice, ...]
+        branch_count = rollouts.all_traj_actions.shape[1]
+        branch_keys = jax.random.split(sample_key, batch_size)
+        sampled_branch_indices = jax.vmap(
+            lambda k: jax.random.randint(k, (), 0, branch_count)
+        )(branch_keys)
 
-    imagined_candidates = traj_actions.shape[1] * traj_actions.shape[2]
-    imagined_transitions_per_root = min(
-        planner_actor_imagined_transitions_per_root,
-        imagined_candidates,
-    )
-    if imagined_transitions_per_root <= 0:
-        return root_actor_transitions, avg_rollout_return
-
-    per_root_obs = _flatten_planner_candidates_per_root(traj_obs)
-    per_root_next_obs = _flatten_planner_candidates_per_root(traj_next_obs)
-    per_root_actions = _flatten_planner_candidates_per_root(traj_actions)
-    per_root_rewards = _flatten_planner_candidates_per_root(traj_rewards)
-    per_root_discount = _flatten_planner_candidates_per_root(traj_discount)
-    per_root_truncation = _flatten_planner_candidates_per_root(traj_truncation)
-    per_root_returns = _flatten_planner_candidates_per_root(traj_returns)
-
-    if imagined_transitions_per_root < imagined_candidates:
-        sample_keys = jax.random.split(sample_key, batch_size)
-        sampled_indices = jax.vmap(
-            lambda k: jax.random.permutation(k, imagined_candidates)[
-                :imagined_transitions_per_root
-            ]
-        )(sample_keys)
-        per_root_obs = _sample_planner_candidates_per_root(
-            per_root_obs, sampled_indices
+        traj_obs = _sample_planner_branches_per_root(
+            rollouts.all_traj_obs, sampled_branch_indices
         )
-        per_root_next_obs = _sample_planner_candidates_per_root(
-            per_root_next_obs, sampled_indices
+        traj_next_obs = _sample_planner_branches_per_root(
+            rollouts.all_traj_next_obs, sampled_branch_indices
         )
-        per_root_actions = _sample_planner_candidates_per_root(
-            per_root_actions, sampled_indices
+        traj_actions = _sample_planner_branches_per_root(
+            rollouts.all_traj_actions, sampled_branch_indices
         )
-        per_root_rewards = _sample_planner_candidates_per_root(
-            per_root_rewards, sampled_indices
+        traj_rewards = _sample_planner_branches_per_root(
+            rollouts.all_traj_rewards, sampled_branch_indices
         )
-        per_root_discount = _sample_planner_candidates_per_root(
-            per_root_discount, sampled_indices
+        traj_discount = _sample_planner_branches_per_root(
+            rollouts.all_traj_discount, sampled_branch_indices
         )
-        per_root_truncation = _sample_planner_candidates_per_root(
-            per_root_truncation, sampled_indices
+        traj_truncation = _sample_planner_branches_per_root(
+            rollouts.all_traj_truncation, sampled_branch_indices
         )
-        per_root_returns = _sample_planner_candidates_per_root(
-            per_root_returns, sampled_indices
+        traj_returns = _sample_planner_branches_per_root(
+            rollouts.all_traj_returns, sampled_branch_indices
         )
 
-    flat_obs = _flatten_leading_dims(per_root_obs, 2)
-    flat_next_obs = _flatten_leading_dims(per_root_next_obs, 2)
-    flat_actions = _flatten_leading_dims(per_root_actions, 2)
-    flat_rewards = _flatten_leading_dims(per_root_rewards, 2)
-    flat_discount = _flatten_leading_dims(per_root_discount, 2)
-    flat_truncation = _flatten_leading_dims(per_root_truncation, 2)
-    flat_returns = _flatten_leading_dims(per_root_returns, 2)
+        flat_obs = _flatten_leading_dims(
+            jax.tree.map(lambda x: x[:, 1:, ...], traj_obs), 2
+        )
+        flat_next_obs = _flatten_leading_dims(
+            jax.tree.map(lambda x: x[:, 1:, ...], traj_next_obs), 2
+        )
+        flat_actions = _flatten_leading_dims(traj_actions[:, 1:, ...], 2)
+        flat_rewards = _flatten_leading_dims(traj_rewards[:, 1:, ...], 2)
+        flat_discount = _flatten_leading_dims(traj_discount[:, 1:, ...], 2)
+        flat_truncation = _flatten_leading_dims(traj_truncation[:, 1:, ...], 2)
+        flat_returns = _flatten_leading_dims(traj_returns[:, 1:, ...], 2)
+    else:
+        if imagined_steps <= 0 or planner_actor_imagined_transitions_per_root <= 0:
+            return root_actor_transitions, avg_rollout_return
+
+        traj_slice = slice(1, 1 + imagined_steps)
+        traj_obs = jax.tree.map(
+            lambda x: x[:, :, traj_slice, ...], rollouts.all_traj_obs
+        )
+        traj_next_obs = jax.tree.map(
+            lambda x: x[:, :, traj_slice, ...], rollouts.all_traj_next_obs
+        )
+        traj_actions = rollouts.all_traj_actions[:, :, traj_slice, ...]
+        traj_rewards = rollouts.all_traj_rewards[:, :, traj_slice, ...]
+        traj_discount = rollouts.all_traj_discount[:, :, traj_slice, ...]
+        traj_truncation = rollouts.all_traj_truncation[:, :, traj_slice, ...]
+        traj_returns = rollouts.all_traj_returns[:, :, traj_slice, ...]
+
+        imagined_candidates = traj_actions.shape[1] * traj_actions.shape[2]
+        imagined_transitions_per_root = min(
+            planner_actor_imagined_transitions_per_root,
+            imagined_candidates,
+        )
+        if imagined_transitions_per_root <= 0:
+            return root_actor_transitions, avg_rollout_return
+
+        per_root_obs = _flatten_planner_candidates_per_root(traj_obs)
+        per_root_next_obs = _flatten_planner_candidates_per_root(traj_next_obs)
+        per_root_actions = _flatten_planner_candidates_per_root(traj_actions)
+        per_root_rewards = _flatten_planner_candidates_per_root(traj_rewards)
+        per_root_discount = _flatten_planner_candidates_per_root(traj_discount)
+        per_root_truncation = _flatten_planner_candidates_per_root(traj_truncation)
+        per_root_returns = _flatten_planner_candidates_per_root(traj_returns)
+
+        if imagined_transitions_per_root < imagined_candidates:
+            sample_keys = jax.random.split(sample_key, batch_size)
+            sampled_indices = jax.vmap(
+                lambda k: jax.random.permutation(k, imagined_candidates)[
+                    :imagined_transitions_per_root
+                ]
+            )(sample_keys)
+            per_root_obs = _sample_planner_candidates_per_root(
+                per_root_obs, sampled_indices
+            )
+            per_root_next_obs = _sample_planner_candidates_per_root(
+                per_root_next_obs, sampled_indices
+            )
+            per_root_actions = _sample_planner_candidates_per_root(
+                per_root_actions, sampled_indices
+            )
+            per_root_rewards = _sample_planner_candidates_per_root(
+                per_root_rewards, sampled_indices
+            )
+            per_root_discount = _sample_planner_candidates_per_root(
+                per_root_discount, sampled_indices
+            )
+            per_root_truncation = _sample_planner_candidates_per_root(
+                per_root_truncation, sampled_indices
+            )
+            per_root_returns = _sample_planner_candidates_per_root(
+                per_root_returns, sampled_indices
+            )
+
+        flat_obs = _flatten_leading_dims(per_root_obs, 2)
+        flat_next_obs = _flatten_leading_dims(per_root_next_obs, 2)
+        flat_actions = _flatten_leading_dims(per_root_actions, 2)
+        flat_rewards = _flatten_leading_dims(per_root_rewards, 2)
+        flat_discount = _flatten_leading_dims(per_root_discount, 2)
+        flat_truncation = _flatten_leading_dims(per_root_truncation, 2)
+        flat_returns = _flatten_leading_dims(per_root_returns, 2)
 
     actor_transitions = Transition(
         observation=jax.tree.map(
@@ -472,6 +526,7 @@ def train(
     mpo_num_action_samples: int = 16,
     use_baseline_value: bool = True,
     use_planner_transitions: bool = True,
+    planner_actor_single_random_trajectory: bool = False,
     planner_actor_max_imagined_steps: int = 3,
     planner_actor_imagined_transitions_per_root: int = 8,
     n_critics: int = 2,
@@ -887,6 +942,7 @@ def train(
                 controller,
                 planner_params_template,
                 key_planner,
+                planner_actor_single_random_trajectory,
                 planner_actor_max_imagined_steps,
                 planner_actor_imagined_transitions_per_root,
                 _planner_model_params(training_state.replace(qr_params=qr_params)),
