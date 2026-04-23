@@ -17,7 +17,6 @@ planner_eval: false
 env_reset_every_steps: 0
 
 rollout_length: 1
-planner_rollout_length: 1
 mpo_eta: 1.0
 mpo_eta_epsilon: 0.1
 mpo_eta_min: 1e-3

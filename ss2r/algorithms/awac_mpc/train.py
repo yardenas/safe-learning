@@ -234,21 +234,6 @@ def _shuffle_and_batch_actor_transitions(
     return jax.tree.map(_shuffle_and_reshape, actor_transitions)
 
 
-def _sample_actor_minibatch(
-    actor_transitions: Transition,
-    batch_size: int,
-    key: PRNGKey,
-) -> Transition:
-    total_actor_samples = actor_transitions.reward.shape[0]
-    if total_actor_samples < batch_size:
-        raise ValueError(
-            "planner_online actor transitions must contain at least batch_size "
-            f"samples. got={total_actor_samples}, batch_size={batch_size}"
-        )
-    indices = jax.random.permutation(key, total_actor_samples)[:batch_size]
-    return jax.tree.map(lambda x: x[indices], actor_transitions)
-
-
 class _PlannerActionRepeatWrapper(Wrapper):
     """Minimal wrapper that repeats each planner env step."""
 
@@ -287,7 +272,7 @@ def _planner_supervised_batch(
     transitions: Transition,
     controller,
     planner_params_template: TreeMPCParams,
-    planner_rollout_length: int,
+    num_rollout_steps: int,
     key: PRNGKey,
     planner_model_params: TreeMPCModelParams | None = None,
     restore_planner_state_fn: Callable[[Any], Any] | None = None,
@@ -341,7 +326,7 @@ def _planner_supervised_batch(
             _scan_fn,
             (planner_state, planner_params_i),
             (),
-            length=planner_rollout_length,
+            length=num_rollout_steps,
         )
         return planner_transitions, planner_returns
 
@@ -380,7 +365,6 @@ def train(
     reset_on_eval: bool = True,
     planner_eval: bool = True,
     rollout_length: int = 1,
-    planner_rollout_length: int = 1,
     mpo_eta: float = 1.0,
     mpo_eta_epsilon: float = 0.1,
     mpo_eta_min: float = 1e-3,
@@ -419,9 +403,9 @@ def train(
         )
     if mpo_log_prob_min > 0.0:
         raise ValueError(f"mpo_log_prob_min must be <= 0, got {mpo_log_prob_min}.")
-    if planner_rollout_length < 1:
+    if grad_updates_per_step < 1:
         raise ValueError(
-            f"planner_rollout_length must be >= 1, got {planner_rollout_length}."
+            f"grad_updates_per_step must be >= 1, got {grad_updates_per_step}."
         )
     if actor_grad_clip_norm <= 0.0:
         raise ValueError(
@@ -723,7 +707,7 @@ def train(
             actor_seed_transitions,
             controller,
             planner_params_template,
-            planner_rollout_length,
+            grad_updates_per_step,
             key_planner,
             _planner_model_params(training_state),
             restore_planner_state_fn=restore_planner_state,
@@ -733,7 +717,6 @@ def train(
             batch_size,
             key_perm,
         )
-        actor_transitions = _flatten_leading_dims(actor_transitions)
         return buffer_state, actor_transitions, planner_avg_rollout_return
 
     def training_step_jitted(
@@ -744,7 +727,7 @@ def train(
         training_key, key_planner, key_perm = jax.random.split(training_key, 3)
         (
             buffer_state,
-            actor_transitions,
+            actor_minibatches,
             planner_avg_rollout_return,
         ) = prepare_actor_training_data(
             training_state,
@@ -755,7 +738,7 @@ def train(
 
         def sgd_step(
             carry: Tuple[TrainingState, ReplayBufferState, PRNGKey, int],
-            unused_t,
+            actor_minibatch: Transition,
         ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
             training_state, buffer_state, key, count = carry
             key, key_critic = jax.random.split(key)
@@ -775,13 +758,6 @@ def train(
                 params=training_state.qr_params,
             )
 
-            key, key_actor = jax.random.split(key)
-
-            actor_minibatch = _sample_actor_minibatch(
-                actor_transitions,
-                batch_size,
-                key_actor,
-            )
             (
                 (actor_loss, aux),
                 new_policy_params,
@@ -851,7 +827,7 @@ def train(
         ) = jax.lax.scan(
             sgd_step,
             (training_state, buffer_state, training_key, 0),
-            (),
+            actor_minibatches,
             length=grad_updates_per_step,
         )
         return training_state, buffer_state, metrics
