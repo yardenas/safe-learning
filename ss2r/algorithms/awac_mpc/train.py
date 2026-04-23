@@ -634,39 +634,6 @@ def train(
         actor_loss_fn, policy_optimizer, pmap_axis_name=None, has_aux=True
     )
 
-    def actor_update_with_target(
-        policy_params: Params,
-        target_policy_params: Params,
-        normalizer_params: Any,
-        qr_params: Params,
-        transitions: Transition,
-        key: PRNGKey,
-        *,
-        optimizer_state: optax.OptState,
-        params: Params,
-    ):
-        value, new_policy_params, new_policy_optimizer_state = actor_update(
-            policy_params,
-            target_policy_params,
-            normalizer_params,
-            qr_params,
-            transitions,
-            key,
-            optimizer_state=optimizer_state,
-            params=params,
-        )
-        new_target_policy_params = _polyak_update(
-            target_policy_params,
-            new_policy_params,
-            policy_target_tau,
-        )
-        return (
-            value,
-            new_policy_params,
-            new_target_policy_params,
-            new_policy_optimizer_state,
-        )
-
     def _collect_experience(
         training_state: TrainingState,
         env_local: envs.Env,
@@ -818,16 +785,15 @@ def train(
         num_actor_minibatches = shuffled_actor_data.reward.shape[0]
 
         def _actor_step(carry, minibatch):
-            policy_params, target_policy_params, policy_optimizer_state, key = carry
+            policy_params, policy_optimizer_state, key = carry
             key, key_loss = jax.random.split(key)
             (
                 (actor_loss_i, aux_i),
                 new_policy_params_i,
-                new_target_policy_params_i,
                 new_policy_optimizer_state_i,
-            ) = actor_update_with_target(
+            ) = actor_update(
                 policy_params,
-                target_policy_params,
+                training_state.target_policy_params,
                 training_state.normalizer_params,
                 qr_params,
                 minibatch,
@@ -837,7 +803,6 @@ def train(
             )
             return (
                 new_policy_params_i,
-                new_target_policy_params_i,
                 new_policy_optimizer_state_i,
                 key,
             ), (
@@ -848,7 +813,6 @@ def train(
         (
             (
                 new_policy_params,
-                new_target_policy_params,
                 new_policy_optimizer_state,
                 _,
             ),
@@ -857,7 +821,6 @@ def train(
             _actor_step,
             (
                 training_state.policy_params,
-                training_state.target_policy_params,
                 training_state.policy_optimizer_state,
                 key_actor,
             ),
@@ -877,10 +840,10 @@ def train(
             new_policy_optimizer_state,
             training_state.policy_optimizer_state,
         )
-        target_policy_params = jax.tree.map(
-            update_if_needed,
-            new_target_policy_params,
+        target_policy_params = _polyak_update(
             training_state.target_policy_params,
+            policy_params,
+            policy_target_tau,
         )
         new_training_state = training_state.replace(  # type: ignore
             policy_optimizer_state=policy_optimizer_state,
