@@ -6,12 +6,21 @@ defaults:
   - _self_
 
 training:
-  num_timesteps: 5000000
+  num_timesteps: 100000
   action_repeat: 4
   safe: false
   train_domain_randomization: false
   eval_domain_randomization: false
   num_eval_episodes: 1
+  num_envs: 10
 
 agent:
   max_replay_size: 1000000
+  batch_size: 128
+  grad_updates_per_step: 10
+  controller_kwargs:
+    num_samples: 128
+    horizon: 25
+    zoh_steps: 5
+    temperature: 0.8
+    iterations: 1
