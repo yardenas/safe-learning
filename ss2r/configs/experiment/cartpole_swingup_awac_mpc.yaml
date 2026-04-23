@@ -17,7 +17,7 @@ training:
 agent:
   max_replay_size: 1000000
   batch_size: 128
-  grad_updates_per_step: 2
+  grad_updates_per_step: 10
   planner_rollout_length: 25
   controller_kwargs:
     num_samples: 128
