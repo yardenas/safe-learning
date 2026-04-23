@@ -234,6 +234,21 @@ def _shuffle_and_batch_actor_transitions(
     return jax.tree.map(_shuffle_and_reshape, actor_transitions)
 
 
+def _sample_actor_minibatch(
+    actor_transitions: Transition,
+    batch_size: int,
+    key: PRNGKey,
+) -> Transition:
+    total_actor_samples = actor_transitions.reward.shape[0]
+    if total_actor_samples < batch_size:
+        raise ValueError(
+            "planner_online actor transitions must contain at least batch_size "
+            f"samples. got={total_actor_samples}, batch_size={batch_size}"
+        )
+    indices = jax.random.permutation(key, total_actor_samples)[:batch_size]
+    return jax.tree.map(lambda x: x[indices], actor_transitions)
+
+
 class _PlannerActionRepeatWrapper(Wrapper):
     """Minimal wrapper that repeats each planner env step."""
 
@@ -696,129 +711,136 @@ def train(
             True,
         )
 
-    def sgd_step(
-        carry: Tuple[TrainingState, ReplayBufferState, PRNGKey, int],
-        unused_t,
-    ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
-        training_state, buffer_state, key, count = carry
-        key, key_critic, key_perm, key_planner = jax.random.split(key, 4)
-
-        buffer_state, sampled = replay_buffer.sample(buffer_state)
-        sampled = _float32_training_transition(sampled)
-
-        critic_transitions = _strip_policy_extras(sampled)
-        (critic_loss, critic_aux), qr_params, qr_optimizer_state = critic_update(
-            training_state.qr_params,
-            training_state.policy_params,
-            training_state.normalizer_params,
-            training_state.target_qr_params,
-            critic_transitions,
-            key_critic,
-            optimizer_state=training_state.qr_optimizer_state,
-            params=training_state.qr_params,
-        )
-
-        polyak = lambda target, new, coeff: jax.tree.map(
-            lambda x, y: x * (1 - coeff) + y * coeff, target, new
-        )
-        new_target_qr_params = polyak(training_state.target_qr_params, qr_params, tau)
+    def prepare_actor_training_data(
+        training_state: TrainingState,
+        buffer_state: ReplayBufferState,
+        key_planner: PRNGKey,
+        key_perm: PRNGKey,
+    ) -> tuple[ReplayBufferState, Transition, jax.Array]:
+        buffer_state, actor_seed_transitions = replay_buffer.sample(buffer_state)
+        actor_seed_transitions = _float32_training_transition(actor_seed_transitions)
         actor_transitions, planner_avg_rollout_return = _planner_supervised_batch(
-            sampled,
+            actor_seed_transitions,
             controller,
             planner_params_template,
             planner_rollout_length,
             key_planner,
-            _planner_model_params(training_state.replace(qr_params=qr_params)),
+            _planner_model_params(training_state),
             restore_planner_state_fn=restore_planner_state,
         )
-        shuffled_actor_data = _shuffle_and_batch_actor_transitions(
+        actor_transitions = _shuffle_and_batch_actor_transitions(
             actor_transitions,
             batch_size,
             key_perm,
         )
-        num_actor_minibatches = shuffled_actor_data.reward.shape[0]
-
-        def _actor_step(carry, minibatch):
-            policy_params, policy_optimizer_state = carry
-            (
-                (actor_loss_i, aux_i),
-                new_policy_params_i,
-                new_policy_optimizer_state_i,
-            ) = actor_update(
-                policy_params,
-                training_state.normalizer_params,
-                minibatch,
-                optimizer_state=policy_optimizer_state,
-                params=policy_params,
-            )
-            return (
-                new_policy_params_i,
-                new_policy_optimizer_state_i,
-            ), (
-                actor_loss_i,
-                aux_i,
-            )
-
-        (
-            (new_policy_params, new_policy_optimizer_state),
-            (actor_losses, actor_auxes),
-        ) = jax.lax.scan(
-            _actor_step,
-            (
-                training_state.policy_params,
-                training_state.policy_optimizer_state,
-            ),
-            shuffled_actor_data,
-            length=num_actor_minibatches,
-        )
-        actor_loss = jnp.mean(actor_losses)
-        aux = jax.tree.map(jnp.mean, actor_auxes)
-
-        should_update_actor = count % num_critic_updates_per_actor_update == 0
-        update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
-        policy_params = jax.tree.map(
-            update_if_needed, new_policy_params, training_state.policy_params
-        )
-        policy_optimizer_state = jax.tree.map(
-            update_if_needed,
-            new_policy_optimizer_state,
-            training_state.policy_optimizer_state,
-        )
-        new_target_policy_params = polyak(
-            training_state.target_policy_params,
-            policy_params,
-            policy_target_tau,
-        )
-        new_training_state = training_state.replace(  # type: ignore
-            policy_optimizer_state=policy_optimizer_state,
-            policy_params=policy_params,
-            target_policy_params=new_target_policy_params,
-            qr_optimizer_state=qr_optimizer_state,
-            qr_params=qr_params,
-            target_qr_params=new_target_qr_params,
-            gradient_steps=training_state.gradient_steps + 1,
-        )
-        actor_aux = {f"actor/{k}": v for k, v in aux.items()}
-        critic_aux = {f"critic/{k}": v for k, v in critic_aux.items()}
-        metrics = {
-            "critic_loss": critic_loss,
-            "actor_loss": actor_loss,
-            "planner/avg_rollout_return": planner_avg_rollout_return,
-            **critic_aux,
-            **actor_aux,
-        }
-        return (
-            new_training_state,
-            buffer_state,
-            key,
-            count + 1,
-        ), metrics
+        actor_transitions = _flatten_leading_dims(actor_transitions)
+        return buffer_state, actor_transitions, planner_avg_rollout_return
 
     def training_step_jitted(
         training_state: TrainingState,
         buffer_state: ReplayBufferState,
         training_key: PRNGKey,
     ) -> Tuple[TrainingState, ReplayBufferState, Metrics]:
+        training_key, key_planner, key_perm = jax.random.split(training_key, 3)
+        (
+            buffer_state,
+            actor_transitions,
+            planner_avg_rollout_return,
+        ) = prepare_actor_training_data(
+            training_state,
+            buffer_state,
+            key_planner,
+            key_perm,
+        )
+
+        def sgd_step(
+            carry: Tuple[TrainingState, ReplayBufferState, PRNGKey, int],
+            unused_t,
+        ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
+            training_state, buffer_state, key, count = carry
+            key, key_critic = jax.random.split(key)
+
+            buffer_state, sampled = replay_buffer.sample(buffer_state)
+            sampled = _float32_training_transition(sampled)
+
+            critic_transitions = _strip_policy_extras(sampled)
+            (critic_loss, critic_aux), qr_params, qr_optimizer_state = critic_update(
+                training_state.qr_params,
+                training_state.policy_params,
+                training_state.normalizer_params,
+                training_state.target_qr_params,
+                critic_transitions,
+                key_critic,
+                optimizer_state=training_state.qr_optimizer_state,
+                params=training_state.qr_params,
+            )
+
+            key, key_actor = jax.random.split(key)
+
+            actor_minibatch = _sample_actor_minibatch(
+                actor_transitions,
+                batch_size,
+                key_actor,
+            )
+            (
+                (actor_loss, aux),
+                new_policy_params,
+                new_policy_optimizer_state,
+            ) = actor_update(
+                training_state.policy_params,
+                training_state.normalizer_params,
+                actor_minibatch,
+                optimizer_state=training_state.policy_optimizer_state,
+                params=training_state.policy_params,
+            )
+
+            should_update_actor = count % num_critic_updates_per_actor_update == 0
+            update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
+            policy_params = jax.tree.map(
+                update_if_needed, new_policy_params, training_state.policy_params
+            )
+            policy_optimizer_state = jax.tree.map(
+                update_if_needed,
+                new_policy_optimizer_state,
+                training_state.policy_optimizer_state,
+            )
+
+            polyak = lambda target, new, coeff: jax.tree.map(
+                lambda x, y: x * (1 - coeff) + y * coeff, target, new
+            )
+            new_target_qr_params = polyak(
+                training_state.target_qr_params, qr_params, tau
+            )
+            new_target_policy_params = polyak(
+                training_state.target_policy_params,
+                policy_params,
+                policy_target_tau,
+            )
+            new_training_state = training_state.replace(  # type: ignore
+                policy_optimizer_state=policy_optimizer_state,
+                policy_params=policy_params,
+                target_policy_params=new_target_policy_params,
+                qr_optimizer_state=qr_optimizer_state,
+                qr_params=qr_params,
+                target_qr_params=new_target_qr_params,
+                gradient_steps=training_state.gradient_steps + 1,
+            )
+            actor_aux = {f"actor/{k}": v for k, v in aux.items()}
+            critic_aux = {f"critic/{k}": v for k, v in critic_aux.items()}
+            metrics = {
+                "critic_loss": critic_loss,
+                "actor_loss": actor_loss,
+                "planner/avg_rollout_return": planner_avg_rollout_return,
+                **critic_aux,
+                **actor_aux,
+            }
+            return (
+                new_training_state,
+                buffer_state,
+                key,
+                count + 1,
+            ), metrics
+
         (
             (
                 training_state,
