@@ -128,8 +128,8 @@ def main(cfg):
         f"Setting up experiment with the following configuration: "
         f"\n{OmegaConf.to_yaml(cfg)}"
     )
-    log_git_hash()
     logger = TrainingLogger(cfg)
+    log_git_hash()
     train_fn = get_train_fn(cfg)
     planner_env = None
     train_env_wrap_fn, eval_env_wrap_fn = benchmark_suites.get_wrap_env_fn(cfg)
