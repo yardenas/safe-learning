@@ -14,6 +14,7 @@ training:
   num_timesteps: 50000000
   safe: false
   num_eval_episodes: 1
+  num_eval_envs: 32
   train_domain_randomization: false
   eval_domain_randomization: false
 

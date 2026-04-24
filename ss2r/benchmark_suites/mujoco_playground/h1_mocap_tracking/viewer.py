@@ -298,13 +298,19 @@ def _download_wandb_checkpoint_and_config(
     *,
     entity: str | None,
     project: str,
+    timeout: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     try:
         import wandb
     except ImportError as exc:  # pragma: no cover - optional runtime dependency.
         raise ImportError("wandb is required for action_mode='policy'.") from exc
 
-    api = wandb.Api(overrides={"entity": entity}) if entity else wandb.Api()
+    api_kwargs = {"timeout": timeout} if timeout is not None else {}
+    api = (
+        wandb.Api(overrides={"entity": entity}, **api_kwargs)
+        if entity
+        else wandb.Api(**api_kwargs)
+    )
     run_path = f"{entity}/{project}/{run_id}" if entity else f"{project}/{run_id}"
     run = api.run(run_path)
     run_config = dict(run.config)
