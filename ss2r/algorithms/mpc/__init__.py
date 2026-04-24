@@ -3,6 +3,7 @@ from ss2r.algorithms.mpc.tree_mpc import (
     TreeMPC,
     TreeMPCModelParams,
     TreeMPCParams,
+    TreeMPCRollout,
     make_task,
 )
 
@@ -11,5 +12,6 @@ __all__ = [
     "TreeMPC",
     "TreeMPCModelParams",
     "TreeMPCParams",
+    "TreeMPCRollout",
     "make_task",
 ]

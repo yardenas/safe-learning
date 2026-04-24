@@ -10,6 +10,7 @@ tau: 0.005
 min_replay_size: 8192
 max_replay_size: 1000000
 grad_updates_per_step: 512
+planner_supervision_rollout_length: 512
 deterministic_eval: true
 reset_on_eval: true
 planner_eval: false
@@ -39,3 +40,4 @@ controller_kwargs:
   iterations: 1
   rollout_actions: true
   terminal_action_samples: 1
+  td_lambda: 0.0

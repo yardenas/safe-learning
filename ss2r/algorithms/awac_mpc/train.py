@@ -306,8 +306,8 @@ def _planner_supervised_batch(
             next_state = controller.task.env.step(state, chosen_action)
             extras = _build_extras(next_state.info, next_state.done)
             extras["policy_extras"] = {
-                "candidate_raw_actions": rollout.candidate_raw_actions,
-                "candidate_q_values": rollout.candidate_q_values,
+                "raw_action_sequences": rollout.raw_action_sequences[:, 0, :],
+                "q_values": rollout.q_values[:, 0],
             }
             transition = Transition(
                 observation=state.obs,
@@ -319,7 +319,7 @@ def _planner_supervised_batch(
             )
             return (next_state, next_params), (
                 transition,
-                jnp.mean(rollout.returns),
+                jnp.mean(rollout.q_values),
             )
 
         (_, _), (planner_transitions, planner_returns) = jax.lax.scan(
@@ -360,6 +360,7 @@ def train(
     min_replay_size: int = 0,
     max_replay_size: Optional[int] = None,
     grad_updates_per_step: int = 1,
+    planner_supervision_rollout_length: int = 1,
     deterministic_eval: bool = False,
     reset_on_eval: bool = True,
     planner_eval: bool = True,
@@ -398,13 +399,18 @@ def train(
         raise ValueError(f"mpo_eta_min must be > 0, got {mpo_eta_min}.")
     if mpo_eta_opt_maxiter < 1:
         raise ValueError(
-            "mpo_eta_opt_maxiter must be >= 1, " f"got {mpo_eta_opt_maxiter}."
+            f"mpo_eta_opt_maxiter must be >= 1, got {mpo_eta_opt_maxiter}."
         )
     if mpo_log_prob_min > 0.0:
         raise ValueError(f"mpo_log_prob_min must be <= 0, got {mpo_log_prob_min}.")
     if grad_updates_per_step < 1:
         raise ValueError(
             f"grad_updates_per_step must be >= 1, got {grad_updates_per_step}."
+        )
+    if planner_supervision_rollout_length < 1:
+        raise ValueError(
+            "planner_supervision_rollout_length must be >= 1, "
+            f"got {planner_supervision_rollout_length}."
         )
     if actor_grad_clip_norm <= 0.0:
         raise ValueError(
@@ -706,7 +712,7 @@ def train(
             actor_seed_transitions,
             controller,
             planner_params_template,
-            grad_updates_per_step,
+            planner_supervision_rollout_length,
             key_planner,
             _planner_model_params(training_state),
             restore_planner_state_fn=restore_planner_state,
@@ -715,6 +721,25 @@ def train(
             actor_transitions,
             batch_size,
             key_perm,
+        )
+        num_actor_minibatches = actor_transitions.reward.shape[0]
+        actor_updates_per_critic = max(
+            1,
+            num_actor_minibatches // grad_updates_per_step,
+        )
+        total_actor_updates = grad_updates_per_step * actor_updates_per_critic
+        minibatch_indices = (
+            jnp.arange(total_actor_updates, dtype=jnp.int32) % num_actor_minibatches
+        )
+        actor_transitions = jax.tree.map(
+            lambda x: x[minibatch_indices],
+            actor_transitions,
+        )
+        actor_transitions = jax.tree.map(
+            lambda x: x.reshape(
+                (grad_updates_per_step, actor_updates_per_critic) + x.shape[1:]
+            ),
+            actor_transitions,
         )
         return buffer_state, actor_transitions, planner_avg_rollout_return
 
@@ -737,10 +762,13 @@ def train(
 
         def sgd_step(
             carry: Tuple[TrainingState, ReplayBufferState, PRNGKey],
-            actor_minibatch: Transition,
+            actor_minibatches_i: Transition,
         ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey], Metrics]:
             training_state, buffer_state, key = carry
             key, key_critic = jax.random.split(key)
+            polyak = lambda target, new, coeff: jax.tree.map(
+                lambda x, y: x * (1 - coeff) + y * coeff, target, new
+            )
 
             buffer_state, sampled = replay_buffer.sample(buffer_state)
             sampled = _float32_training_transition(sampled)
@@ -756,47 +784,58 @@ def train(
                 optimizer_state=training_state.qr_optimizer_state,
                 params=training_state.qr_params,
             )
-
-            (
-                (actor_loss, aux),
-                new_policy_params,
-                new_policy_optimizer_state,
-            ) = actor_update(
-                training_state.policy_params,
-                training_state.normalizer_params,
-                actor_minibatch,
-                optimizer_state=training_state.policy_optimizer_state,
-                params=training_state.policy_params,
-            )
-
-            polyak = lambda target, new, coeff: jax.tree.map(
-                lambda x, y: x * (1 - coeff) + y * coeff, target, new
-            )
             new_target_qr_params = polyak(
                 training_state.target_qr_params, qr_params, tau
             )
-            new_target_policy_params = polyak(
-                training_state.target_policy_params,
-                new_policy_params,
-                policy_target_tau,
-            )
-            new_training_state = training_state.replace(  # type: ignore
-                policy_optimizer_state=new_policy_optimizer_state,
-                policy_params=new_policy_params,
-                target_policy_params=new_target_policy_params,
+            training_state = training_state.replace(  # type: ignore
                 qr_optimizer_state=qr_optimizer_state,
                 qr_params=qr_params,
                 target_qr_params=new_target_qr_params,
+            )
+
+            def actor_sgd_step(
+                actor_state: TrainingState,
+                actor_minibatch: Transition,
+            ) -> tuple[TrainingState, tuple[jnp.ndarray, dict[str, jnp.ndarray]]]:
+                (
+                    (actor_loss, aux),
+                    new_policy_params,
+                    new_policy_optimizer_state,
+                ) = actor_update(
+                    actor_state.policy_params,
+                    actor_state.normalizer_params,
+                    actor_minibatch,
+                    optimizer_state=actor_state.policy_optimizer_state,
+                    params=actor_state.policy_params,
+                )
+                new_target_policy_params = polyak(
+                    actor_state.target_policy_params,
+                    new_policy_params,
+                    policy_target_tau,
+                )
+                actor_state = actor_state.replace(  # type: ignore
+                    policy_optimizer_state=new_policy_optimizer_state,
+                    policy_params=new_policy_params,
+                    target_policy_params=new_target_policy_params,
+                )
+                return actor_state, (actor_loss, aux)
+
+            new_training_state, (actor_losses, actor_auxes) = jax.lax.scan(
+                actor_sgd_step,
+                training_state,
+                actor_minibatches_i,
+                length=actor_minibatches_i.reward.shape[0],
+            )
+            new_training_state = new_training_state.replace(  # type: ignore
                 gradient_steps=training_state.gradient_steps + 1,
             )
-            actor_aux = {f"actor/{k}": v for k, v in aux.items()}
             critic_aux = {f"critic/{k}": v for k, v in critic_aux.items()}
             metrics = {
                 "critic_loss": critic_loss,
-                "actor_loss": actor_loss,
+                "actor_loss": jnp.mean(actor_losses),
                 "planner/avg_rollout_return": planner_avg_rollout_return,
                 **critic_aux,
-                **actor_aux,
+                **{f"actor/{k}": jnp.mean(v, axis=0) for k, v in actor_auxes.items()},
             }
             return (
                 new_training_state,

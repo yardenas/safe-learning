@@ -128,8 +128,8 @@ def make_losses(
         transitions: Transition,
     ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
         policy_extras = transitions.extras["policy_extras"]
-        candidate_raw_actions = policy_extras["candidate_raw_actions"]
-        candidate_q_values = policy_extras["candidate_q_values"]
+        candidate_raw_actions = policy_extras["raw_action_sequences"]
+        candidate_q_values = policy_extras["q_values"]
 
         eta = _solve_eta_dual(
             candidate_q_values,
@@ -169,7 +169,10 @@ def make_losses(
             mpo_log_prob_min,
         )
 
-        nll_loss_per_state = -jnp.sum(mpo_weights * clipped_log_probs_current, axis=-1)
+        nll_loss_per_state = -jnp.sum(
+            mpo_weights * clipped_log_probs_current,
+            axis=-1,
+        )
         nll_loss = jnp.mean(nll_loss_per_state)
         aux = {
             "eta": eta,
