@@ -10,8 +10,8 @@ environment:
       dataset_name: dance1_subject3
 
 training:
-  num_envs: 8192
-  num_timesteps: 50000000
+  num_envs: 4096
+  num_timesteps: 10000000
   safe: false
   num_eval_episodes: 1
   num_eval_envs: 32
