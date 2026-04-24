@@ -10,7 +10,6 @@ tau: 0.005
 min_replay_size: 8192
 max_replay_size: 1000000
 grad_updates_per_step: 512
-num_critic_updates_per_actor_update: 1
 deterministic_eval: true
 reset_on_eval: true
 planner_eval: false

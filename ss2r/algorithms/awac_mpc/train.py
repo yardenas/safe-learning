@@ -360,7 +360,6 @@ def train(
     min_replay_size: int = 0,
     max_replay_size: Optional[int] = None,
     grad_updates_per_step: int = 1,
-    num_critic_updates_per_actor_update: int = 1,
     deterministic_eval: bool = False,
     reset_on_eval: bool = True,
     planner_eval: bool = True,
@@ -737,10 +736,10 @@ def train(
         )
 
         def sgd_step(
-            carry: Tuple[TrainingState, ReplayBufferState, PRNGKey, int],
+            carry: Tuple[TrainingState, ReplayBufferState, PRNGKey],
             actor_minibatch: Transition,
-        ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey, int], Metrics]:
-            training_state, buffer_state, key, count = carry
+        ) -> Tuple[Tuple[TrainingState, ReplayBufferState, PRNGKey], Metrics]:
+            training_state, buffer_state, key = carry
             key, key_critic = jax.random.split(key)
 
             buffer_state, sampled = replay_buffer.sample(buffer_state)
@@ -770,17 +769,6 @@ def train(
                 params=training_state.policy_params,
             )
 
-            should_update_actor = count % num_critic_updates_per_actor_update == 0
-            update_if_needed = lambda x, y: jnp.where(should_update_actor, x, y)
-            policy_params = jax.tree.map(
-                update_if_needed, new_policy_params, training_state.policy_params
-            )
-            policy_optimizer_state = jax.tree.map(
-                update_if_needed,
-                new_policy_optimizer_state,
-                training_state.policy_optimizer_state,
-            )
-
             polyak = lambda target, new, coeff: jax.tree.map(
                 lambda x, y: x * (1 - coeff) + y * coeff, target, new
             )
@@ -789,12 +777,12 @@ def train(
             )
             new_target_policy_params = polyak(
                 training_state.target_policy_params,
-                policy_params,
+                new_policy_params,
                 policy_target_tau,
             )
             new_training_state = training_state.replace(  # type: ignore
-                policy_optimizer_state=policy_optimizer_state,
-                policy_params=policy_params,
+                policy_optimizer_state=new_policy_optimizer_state,
+                policy_params=new_policy_params,
                 target_policy_params=new_target_policy_params,
                 qr_optimizer_state=qr_optimizer_state,
                 qr_params=qr_params,
@@ -814,7 +802,6 @@ def train(
                 new_training_state,
                 buffer_state,
                 key,
-                count + 1,
             ), metrics
 
         (
@@ -826,7 +813,7 @@ def train(
             metrics,
         ) = jax.lax.scan(
             sgd_step,
-            (training_state, buffer_state, training_key, 0),
+            (training_state, buffer_state, training_key),
             actor_minibatches,
             length=grad_updates_per_step,
         )
